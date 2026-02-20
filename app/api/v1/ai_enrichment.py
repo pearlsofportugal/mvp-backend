@@ -23,14 +23,15 @@ from app.schemas.ai_enrichment import (
 )
 from app.schemas.base_schema import ApiResponse
 from app.services.ai_enrichment_service import enrich_listing_with_ai, optimize_text_with_ai
-
+import asyncio
 router = APIRouter()
 
 
 @router.post("/optimize", response_model=ApiResponse[AITextOptimizationResponse])
 async def optimize_text(payload: AITextOptimizationRequest, request: Request):
     """Optimize free text with AI SEO logic."""
-    result = optimize_text_with_ai(payload.content, payload.keywords)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, optimize_text_with_ai, payload.content, payload.keywords)
     if payload.fields:
         filtered = result.output.model_dump(include=set(payload.fields))
         result.output = AIEnrichmentOutput.model_validate(filtered)
@@ -52,11 +53,11 @@ async def enrich_listing(
 
     response = await enrich_listing_with_ai(listing, payload)
     if payload.apply:
-        await db.flush()
+        await db.commit()
     return ok(response, "Listing enriched successfully", request)
 
 
-@router.post("/preview/{listing_id}", response_model=ApiResponse[EnrichmentPreview])
+@router.get("/preview/{listing_id}", response_model=ApiResponse[EnrichmentPreview])
 async def preview_enrichment(
     listing_id: UUID,
     request: Request,

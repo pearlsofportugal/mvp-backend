@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     # Database
     database_url: str
     database_url_sync: str
-    
+    api_key: str = ""
+
     # Scraping defaults
     default_min_delay: float = 2.0
     default_max_delay: float = 5.0
@@ -35,7 +36,8 @@ class Settings(BaseSettings):
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-2.5-flash"
     google_genai_temperature: float = 0.2
-
+    ai_rate_limit_requests: int = 20   # pedidos permitidos por janela
+    ai_rate_limit_window: int = 60     # janela em segundos
     @field_validator('database_url')
     @classmethod
     def validate_database_url(cls, v):
@@ -52,6 +54,17 @@ class Settings(BaseSettings):
                 return json.loads(v)
             except json.JSONDecodeError:
                 return [origin.strip() for origin in v.split(",")]
+        return v
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, v: str) -> str:
+        if not v:
+            import warnings
+            warnings.warn(
+                "API_KEY não configurada — endpoints desprotegidos.",
+                stacklevel=2,
+            )
         return v
 
 

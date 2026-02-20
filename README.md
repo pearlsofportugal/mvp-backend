@@ -77,12 +77,29 @@ pytest -v
 | PATCH | `/api/v1/sites/{key}` | Update site selectors |
 | DELETE | `/api/v1/sites/{key}` | Deactivate site |
 
-### Enrichment
+### AI Enrichment
+> Router prefix: `/api/v1/enrichment/ai`
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/v1/enrichment/run` | Batch enrich descriptions |
-| POST | `/api/v1/enrichment/preview/{id}` | Preview enrichment |
-| GET | `/api/v1/enrichment/stats` | Quality statistics |
+| POST | `/api/v1/enrichment/ai/optimize` | Optimize free text with AI (SEO title/description/meta) |
+| POST | `/api/v1/enrichment/ai/listing` | Enrich a specific listing by ID |
+| GET | `/api/v1/enrichment/ai/preview/{listing_id}` | Preview AI enrichment without saving |
+| GET | `/api/v1/enrichment/ai/stats` | Aggregated enrichment statistics |
+
+#### `POST /api/v1/enrichment/ai/listing` — request body
+```json
+{
+  "listing_id": "uuid",
+  "fields": ["title", "description", "meta_description"],
+  "keywords": ["optional", "custom", "keywords"],
+  "apply": false,
+  "force": false
+}
+```
+- `apply: true` persiste as alterações na base de dados
+- `force: true` regenera mesmo que o campo já tenha valor
+- Se `keywords` for vazio, são inferidas automaticamente a partir do listing
 
 ### Export
 | Method | Endpoint | Description |
@@ -113,7 +130,8 @@ backend/
 ## Ethical Scraping Rules
 
 1. **Fail-closed robots.txt** — if robots.txt can't be loaded, ALL requests to that domain are blocked
-2. **Mandatory rate limiting** — random delay between requests
-3. **Identifiable User-Agent** — includes bot name + contact
-4. **Exponential backoff** — on 429/5xx errors
-5. **URL deduplication** — never visit the same URL twice per job
+2. **Mandatory rate limiting** — random delay between requests (configurable min/max delay)
+3. **Identifiable User-Agent** — must include bot name + contact info
+4. **Retries with exponential backoff** — 429/5xx retriable, 4xx returns None immediately
+5. **Per-domain robots.txt cache** — 1-hour TTL to avoid hammering robots.txt endpoints
+6. **URL deduplication** — within a job, the same URL is never fetched twice

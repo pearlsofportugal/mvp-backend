@@ -39,26 +39,27 @@ logger = get_logger(__name__)
 
 async def run_scrape_job(job_id: str) -> None:
     """Entry point for background scraping job.
-    
-    This function is called by FastAPI BackgroundTasks after the HTTP response
-    is sent. It runs entirely async, using asyncio.to_thread for blocking I/O
-    operations (HTTP requests via requests library).
+
+    FIX: Abre uma única sessão de DB para toda a duração do job, em vez de
+    abrir/fechar uma sessão por cada operação auxiliar.
     """
     set_correlation_id(job_id)
     logger.info("Starting scrape job %s", job_id)
 
+    # ÚNICA sessão para todo o job — todas as funções auxiliares recebem-na como argumento
     async with async_session_factory() as db:
         try:
-            # Load job
             result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
             job = result.scalar_one_or_none()
             if not job:
                 logger.error("Job %s not found", job_id)
                 return
 
-            # Load site config
             site_result = await db.execute(
-                select(SiteConfig).where(SiteConfig.key == job.site_key, SiteConfig.is_active.is_(True))
+                select(SiteConfig).where(
+                    SiteConfig.key == job.site_key,
+                    SiteConfig.is_active.is_(True),
+                )
             )
             site_config = site_result.scalar_one_or_none()
             if not site_config:
@@ -66,12 +67,11 @@ async def run_scrape_job(job_id: str) -> None:
                 await db.commit()
                 return
 
-            # Mark as running
             job.mark_running()
             await db.commit()
 
-            # Run the actual scraping
             await _run_scrape_async(
+                db=db,
                 job_id=str(job.id),
                 site_key=job.site_key,
                 base_url=site_config.base_url,
@@ -97,6 +97,7 @@ async def run_scrape_job(job_id: str) -> None:
 
 
 async def _run_scrape_async(
+    db: AsyncSession,
     job_id: str,
     site_key: str,
     base_url: str,
@@ -108,9 +109,7 @@ async def _run_scrape_async(
     image_filter: Optional[str],
     config: Dict[str, Any],
 ) -> None:
-    """Async scraping loop — wraps blocking HTTP calls with asyncio.to_thread."""
-    
-    # Initialize ethical scraper (handle None values in config)
+    """Async scraping loop — recebe a sessão DB existente em vez de abrir novas."""
     scraper = EthicalScraper(
         min_delay=config.get("min_delay") or settings.default_min_delay,
         max_delay=config.get("max_delay") or settings.default_max_delay,
@@ -119,7 +118,6 @@ async def _run_scrape_async(
     )
 
     try:
-        # Merge selectors with link_pattern and image_filter
         full_selectors = {**selectors}
         if link_pattern:
             full_selectors["listing_link_pattern"] = link_pattern
@@ -133,47 +131,41 @@ async def _run_scrape_async(
         errors = 0
 
         for page_num in range(max_pages):
-            # Check if job was cancelled
-            if await _check_job_cancelled(job_id):
+            if await _check_job_cancelled(db, job_id):
                 logger.info("Job %s was cancelled", job_id)
                 break
 
             logger.info("Scraping page %d: %s", page_num + 1, current_url)
 
-            # Fetch listing page (blocking call wrapped in to_thread)
             response = await asyncio.to_thread(scraper.get, current_url)
             if not response:
                 logger.warning("Failed to fetch page: %s", current_url)
-                await _add_job_log(job_id, "error", f"Failed to fetch page: {current_url}", current_url)
+                await _add_job_log(db, job_id, "error", f"Failed to fetch page: {current_url}", current_url)
                 errors += 1
                 break
 
             pages_visited += 1
             html = response.text
 
-            # Extract listing links
             links = parse_listing_links(html, base_url, full_selectors)
             listings_found += len(links)
 
-            # Track found URLs
+            # Track all found URLs em batch — um único commit para a página inteira
             for link in links:
-                await _track_url(job_id, "found", link)
+                await _track_url_no_commit(db, job_id, "found", link)
+            await db.commit()
 
-            # Process each listing
             for link in links:
-                # Check cancellation
-                if await _check_job_cancelled(job_id):
+                if await _check_job_cancelled(db, job_id):
                     break
 
                 try:
-                    # Fetch listing detail page (blocking call wrapped in to_thread)
                     detail_response = await asyncio.to_thread(scraper.get, link)
                     if not detail_response:
-                        await _track_url(job_id, "failed", link)
-                        await _add_job_log(job_id, "warning", f"Failed to fetch listing page", link)
+                        await _track_url(db, job_id, "failed", link)
+                        await _add_job_log(db, job_id, "warning", "Failed to fetch listing page", link)
                         continue
 
-                    # Parse the listing page
                     raw_data = parse_listing_page(
                         detail_response.text,
                         link,
@@ -181,16 +173,15 @@ async def _run_scrape_async(
                         extraction_mode,
                     )
 
-                    # Normalize to canonical schema
                     property_schema = normalize_partner_payload(raw_data, site_key)
 
-                    # Persist to DB (with deduplication)
-                    await _persist_listing(job_id, property_schema, site_key)
-                    await _track_url(job_id, "scraped", link)
+                    # persist_listing usa a mesma sessão — sem nova ligação
+                    await _persist_listing(db, job_id, property_schema, site_key)
+                    await _track_url(db, job_id, "scraped", link)
                     listings_scraped += 1
 
-                    # Update progress after each listing for real-time feedback
                     await _update_job_progress(
+                        db,
                         job_id,
                         pages_visited=pages_visited,
                         listings_found=listings_found,
@@ -200,152 +191,153 @@ async def _run_scrape_async(
 
                 except Exception as e:
                     logger.error("Error processing listing %s: %s", link, str(e))
-                    await _track_url(job_id, "failed", link)
-                    await _add_job_log(job_id, "error", f"Error processing listing: {str(e)}", link)
+                    await _track_url(db, job_id, "failed", link)
+                    await _add_job_log(db, job_id, "error", f"Error processing listing: {str(e)}", link)
                     errors += 1
 
-            # Find next page
             next_url = parse_next_page(html, base_url, full_selectors)
             if not next_url:
                 logger.info("No more pages — stopping")
                 break
             current_url = next_url
 
-        # Mark job as completed
-        await _complete_job(job_id)
+        await _complete_job(db, job_id)
 
     except Exception as e:
         logger.error("Scraping error: %s\n%s", str(e), traceback.format_exc())
-        await _fail_job(job_id, str(e))
+        await _fail_job(db, job_id, str(e))
     finally:
         scraper.close()
 
 
-async def _check_job_cancelled(job_id: str) -> bool:
-    """Check if the job has been cancelled."""
-    async with async_session_factory() as db:
-        result = await db.execute(select(ScrapeJob.status).where(ScrapeJob.id == UUID(job_id)))
-        status = result.scalar_one_or_none()
-        return status == "cancelled"
+# ---------------------------------------------------------------------------
+# Funções auxiliares — recebem db: AsyncSession, sem abrir sessões próprias
+# ---------------------------------------------------------------------------
+
+async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:
+    """Verifica se o job foi cancelado — reutiliza a sessão existente."""
+    result = await db.execute(select(ScrapeJob.status).where(ScrapeJob.id == UUID(job_id)))
+    status = result.scalar_one_or_none()
+    return status == "cancelled"
 
 
-async def _add_job_log(job_id: str, level: str, message: str, url: Optional[str] = None) -> None:
-    """Add a log entry to the job."""
-    async with async_session_factory() as db:
-        result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-        job = result.scalar_one_or_none()
-        if job:
-            job.add_log(level, message, url)
-            await db.commit()
-
-
-async def _track_url(job_id: str, status: str, url: str) -> None:
-    """Track URL processing status."""
-    async with async_session_factory() as db:
-        result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-        job = result.scalar_one_or_none()
-        if job:
-            job.add_url(status, url)
-            await db.commit()
-
-
-async def _update_job_progress(job_id: str, **progress) -> None:
-    """Update job progress counters in the DB."""
-    async with async_session_factory() as db:
-        result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-        job = result.scalar_one_or_none()
-        if job:
-            job.update_progress(**progress)
-            await db.commit()
-
-
-async def _persist_listing(job_id: str, schema, site_key: str) -> None:
-    """Persist a listing to the DB with deduplication on source_url.
-
-    If a listing with the same source_url exists:
-    - Update its fields (preserving created_at)
-    - Record price change if price differs
-    """
-    from app.services.mapper_service import schema_to_listing_dict
-
-    async with async_session_factory() as db:
-        listing_data = schema_to_listing_dict(schema, scrape_job_id=UUID(job_id))
-
-        # Check for existing listing by source_url
-        existing = None
-        if listing_data.get("source_url"):
-            result = await db.execute(
-                select(Listing).where(Listing.source_url == listing_data["source_url"])
-            )
-            existing = result.scalar_one_or_none()
-
-        if existing:
-            # Deduplication: update existing listing
-            logger.info("Updating existing listing: %s", listing_data["source_url"])
-
-            # Track price change
-            new_price = listing_data.get("price_amount")
-            if (
-                new_price is not None
-                and existing.price_amount is not None
-                and existing.price_amount != new_price
-            ):
-                price_record = PriceHistory(
-                    listing_id=existing.id,
-                    price_amount=existing.price_amount,
-                    price_currency=existing.price_currency or "EUR",
-                )
-                db.add(price_record)
-                logger.info(
-                    "Price change for %s: %s → %s",
-                    listing_data["source_url"],
-                    existing.price_amount,
-                    new_price,
-                )
-
-            # Update fields (preserve created_at)
-            for field, value in listing_data.items():
-                if field not in ("scrape_job_id",) and value is not None:
-                    setattr(existing, field, value)
-            existing.updated_at = datetime.now(timezone.utc)
-            existing.scrape_job_id = UUID(job_id)
-
-        else:
-            # New listing
-            listing = Listing(**listing_data)
-            db.add(listing)
-            await db.flush()
-
-            # Add media assets
-            for media in schema.media:
-                asset = MediaAsset(
-                    listing_id=listing.id,
-                    url=str(media.url),
-                    alt_text=media.alt_text,
-                    type=media.type or "photo",
-                )
-                db.add(asset)
-
+async def _add_job_log(
+    db: AsyncSession,
+    job_id: str,
+    level: str,
+    message: str,
+    url: Optional[str] = None,
+) -> None:
+    """Adiciona uma entrada de log ao job e faz commit imediato (visibilidade em tempo real)."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
+    job = result.scalar_one_or_none()
+    if job:
+        job.add_log(level, message, url)
         await db.commit()
 
 
-async def _complete_job(job_id: str) -> None:
-    """Mark the job as completed."""
-    async with async_session_factory() as db:
-        result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-        job = result.scalar_one_or_none()
-        if job and job.status == "running":
-            job.mark_completed()
-            await db.commit()
-            logger.info("Job %s completed successfully", job_id)
+async def _track_url(db: AsyncSession, job_id: str, status: str, url: str) -> None:
+    """Regista o estado de processamento de uma URL e faz commit imediato."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
+    job = result.scalar_one_or_none()
+    if job:
+        job.add_url(status, url)
+        await db.commit()
 
 
-async def _fail_job(job_id: str, error: str) -> None:
-    """Mark the job as failed."""
-    async with async_session_factory() as db:
-        result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-        job = result.scalar_one_or_none()
-        if job and job.status == "running":
-            job.mark_failed(error)
-            await db.commit()
-            logger.error("Job %s failed: %s", job_id, error)
+async def _track_url_no_commit(db: AsyncSession, job_id: str, status: str, url: str) -> None:
+    """Regista o estado de uma URL SEM commit — usado para batch commits por página."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
+    job = result.scalar_one_or_none()
+    if job:
+        job.add_url(status, url)
+
+
+async def _update_job_progress(db: AsyncSession, job_id: str, **progress) -> None:
+    """Atualiza contadores de progresso e faz commit imediato (visibilidade em tempo real)."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
+    job = result.scalar_one_or_none()
+    if job:
+        job.update_progress(**progress)
+        await db.commit()
+
+
+async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str) -> None:
+    """Persiste um listing na DB com deduplicação por source_url.
+
+    Reutiliza a sessão existente — sem nova ligação à DB.
+    """
+    from app.services.mapper_service import schema_to_listing_dict
+
+    listing_data = schema_to_listing_dict(schema, scrape_job_id=UUID(job_id))
+
+    existing = None
+    if listing_data.get("source_url"):
+        result = await db.execute(
+            select(Listing).where(Listing.source_url == listing_data["source_url"])
+        )
+        existing = result.scalar_one_or_none()
+
+    if existing:
+        logger.info("Updating existing listing: %s", listing_data["source_url"])
+
+        new_price = listing_data.get("price_amount")
+        if (
+            new_price is not None
+            and existing.price_amount is not None
+            and existing.price_amount != new_price
+        ):
+            price_record = PriceHistory(
+                listing_id=existing.id,
+                price_amount=existing.price_amount,
+                price_currency=existing.price_currency or "EUR",
+            )
+            db.add(price_record)
+            logger.info(
+                "Price change for %s: %s → %s",
+                listing_data["source_url"],
+                existing.price_amount,
+                new_price,
+            )
+
+        for field, value in listing_data.items():
+            if field not in ("scrape_job_id",) and value is not None:
+                setattr(existing, field, value)
+        existing.updated_at = datetime.now(timezone.utc)
+        existing.scrape_job_id = UUID(job_id)
+
+    else:
+        listing = Listing(**listing_data)
+        db.add(listing)
+        await db.flush()  # flush para obter o ID antes de adicionar media assets
+
+        for media in schema.media:
+            asset = MediaAsset(
+                listing_id=listing.id,
+                url=str(media.url),
+                alt_text=media.alt_text,
+                type=media.type or "photo",
+            )
+            db.add(asset)
+
+    await db.commit()
+
+
+async def _complete_job(db: AsyncSession, job_id: str) -> None:
+    """Marca o job como completo."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
+    job = result.scalar_one_or_none()
+    if job and job.status == "running":
+        job.mark_completed()
+        await db.commit()
+        logger.info("Job %s completed successfully", job_id)
+
+
+async def _fail_job(db: AsyncSession, job_id: str, error: str) -> None:
+    """Marca o job como falhado."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
+    job = result.scalar_one_or_none()
+    if job and job.status == "running":
+        job.mark_failed(error)
+        await db.commit()
+        logger.error("Job %s failed: %s", job_id, error)

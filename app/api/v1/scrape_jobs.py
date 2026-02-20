@@ -1,9 +1,12 @@
 """Scrape Jobs API router — launch, monitor, and manage scraping jobs.
 /api/v1/jobs"""
-from typing import Optional
+import asyncio
+import json
+from typing import AsyncIterator, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +18,8 @@ from app.schemas.scrape_job import JobCreate, JobListRead, JobRead
 from app.schemas.base_schema import ApiResponse
 from app.api.responses import ok
 from app.services.scraper_service import run_scrape_job
+from app.database import async_session_factory
+
 
 router = APIRouter()
 
@@ -131,3 +136,144 @@ async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
     await db.delete(job)
     await db.flush()
     return ok(None, "Job deleted successfully", request)
+
+
+
+# ---------------------------------------------------------------------------
+# SSE — Server-Sent Events para progresso em tempo real
+# ---------------------------------------------------------------------------
+
+_SSE_POLL_INTERVAL = 1.0   # segundos entre leituras à DB durante o streaming
+_SSE_HEARTBEAT_EVERY = 15  # enviar heartbeat a cada N ticks (evita timeout de proxies)
+_SSE_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
+    """
+    Gerador assíncrono que emite eventos SSE com o progresso do job.
+
+    Formato SSE (RFC 8895):
+      event: <tipo>\\n
+      data: <json>\\n
+      \\n
+
+    Tipos de eventos emitidos:
+      - 'progress': atualização de contadores (pages_visited, listings_found, etc.)
+      - 'status':   mudança de estado do job (running → completed, failed, cancelled)
+      - 'heartbeat': keepalive — evita que proxies/load-balancers fechem a ligação idle
+      - 'error':    job não encontrado ou erro interno no stream
+      - 'done':     evento final antes de fechar o stream
+
+    O stream fecha automaticamente quando:
+      1. O job atinge um estado terminal (completed/failed/cancelled)
+      2. O cliente fecha a ligação (request.is_disconnected())
+      3. Ocorre um erro irrecuperável
+    """
+    tick = 0
+    last_progress: Optional[dict] = None
+    last_status: Optional[str] = None
+
+    try:
+        async with async_session_factory() as db:
+            # Verificar que o job existe antes de começar o stream
+            result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
+            job = result.scalar_one_or_none()
+            if not job:
+                yield _sse_event("error", {"message": f"Job {job_id} not found"})
+                return
+
+        # Loop de streaming
+        while True:
+            # Verificar se o cliente desligou (evita deixar streams órfãos no servidor)
+            if await request.is_disconnected():
+                break
+
+            async with async_session_factory() as db:
+                result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
+                job = result.scalar_one_or_none()
+
+            if not job:
+                yield _sse_event("error", {"message": "Job disappeared from database"})
+                break
+
+            current_progress = job.progress or {}
+            current_status = job.status
+
+            # Emitir evento de progresso se algo mudou
+            if current_progress != last_progress or current_status != last_status:
+                payload = {
+                    "job_id": str(job_id),
+                    "status": current_status,
+                    "progress": current_progress,
+                    "error_message": job.error_message,
+                }
+                # Distinguir mudança de status de atualização de progresso
+                event_type = "status" if current_status != last_status else "progress"
+                yield _sse_event(event_type, payload)
+
+                last_progress = current_progress
+                last_status = current_status
+
+            # Fechar stream se o job terminou
+            if current_status in _SSE_TERMINAL_STATUSES:
+                # Emitir snapshot final com estado completo
+                yield _sse_event("done", {
+                    "job_id": str(job_id),
+                    "status": current_status,
+                    "progress": current_progress,
+                    "error_message": job.error_message,
+                })
+                break
+
+            # Heartbeat periódico — mantém a ligação viva através de proxies
+            tick += 1
+            if tick % _SSE_HEARTBEAT_EVERY == 0:
+                yield _sse_event("heartbeat", {"tick": tick})
+
+            await asyncio.sleep(_SSE_POLL_INTERVAL)
+
+    except asyncio.CancelledError:
+        # Cliente desligou — saída limpa sem log de erro
+        pass
+    except Exception as e:
+        yield _sse_event("error", {"message": f"Stream error: {str(e)}"})
+
+
+def _sse_event(event_type: str, data: dict) -> str:
+    """Formata um evento SSE conforme RFC 8895."""
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+@router.get(
+    "/{job_id}/stream",
+    summary="Stream job progress via Server-Sent Events",
+    response_description="SSE stream com eventos de progresso do job",
+    # Sem response_model — StreamingResponse não é serializável pelo Pydantic
+)
+async def stream_job_progress(job_id: UUID, request: Request):
+    """
+    Stream do progresso de um scraping job via Server-Sent Events (SSE).
+
+    O cliente recebe eventos em tempo real sem necessidade de polling.
+    A ligação fecha automaticamente quando o job termina.
+
+    Eventos:
+    - `progress` — contadores atualizados (pages_visited, listings_found, listings_scraped, errors)
+    - `status`   — mudança de estado (pending → running → completed/failed/cancelled)
+    - `heartbeat` — keepalive a cada ~15s
+    - `done`     — snapshot final quando o job termina
+    - `error`    — job não encontrado ou erro interno
+
+    **Nota de autenticação:** inclui o header `X-API-Key` na ligação SSE.
+    O EventSource nativo do browser não suporta headers — usa a biblioteca
+    `@microsoft/fetch-event-source` no frontend (ver frontend/src/app/core/services/jobs.ts).
+    """
+    return StreamingResponse(
+        _sse_job_stream(job_id, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Desativa buffer do nginx — essencial para SSE
+        },
+    )

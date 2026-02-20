@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Pearls2026
+      POSTGRES_DB: mvpscraper
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: "MVP-Scraper"
+      APP_VERSION: "1.0.0"
+      DATABASE_URL: postgresql+asyncpg://postgres:Pearls2026@db:5432/mvpscraper
+      DATABASE_URL_SYNC: postgresql://postgres:Pearls2026@db:5432/mvpscraper
+      DEBUG: "true"
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: '["http://localhost:4200", "http://localhost:8000"]'
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  pgdata:

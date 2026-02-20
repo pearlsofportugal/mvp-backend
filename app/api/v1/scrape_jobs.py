@@ -1,0 +1,133 @@
+"""Scrape Jobs API router — launch, monitor, and manage scraping jobs.
+/api/v1/jobs"""
+from typing import Optional
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from sqlalchemy import select, desc, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_db
+from app.core.exceptions import JobAlreadyRunningError, NotFoundError
+from app.models.scrape_job import ScrapeJob
+from app.models.site_config import SiteConfig
+from app.schemas.scrape_job import JobCreate, JobListRead, JobRead
+from app.schemas.base_schema import ApiResponse
+from app.api.responses import ok
+from app.services.scraper_service import run_scrape_job
+
+router = APIRouter()
+
+
+@router.post("", response_model=ApiResponse[JobRead], status_code=201)
+async def create_job(
+    request: Request,
+    payload: JobCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Launch a new scrape job. Runs in background (MVP: one job at a time per worker)."""
+    # Check if a job is already running
+    running = await db.execute(
+        select(ScrapeJob).where(ScrapeJob.status == "running")
+    )
+    if running.scalar_one_or_none():
+        raise JobAlreadyRunningError(
+            "A scrape job is already running. Wait for it to finish or cancel it."
+        )
+
+    # Validate site_key exists
+    site = await db.execute(
+        select(SiteConfig).where(SiteConfig.key == payload.site_key, SiteConfig.is_active.is_(True))
+    )
+    site_config = site.scalar_one_or_none()
+    if not site_config:
+        raise NotFoundError(f"Site config '{payload.site_key}' not found or inactive")
+
+    # Create job record
+    job = ScrapeJob(
+        site_key=payload.site_key,
+        base_url=site_config.base_url,
+        start_url=payload.start_url,
+        max_pages=payload.max_pages,
+        status="pending",
+        config=payload.config.model_dump() if payload.config else None,
+        progress={"pages_visited": 0, "listings_found": 0, "listings_scraped": 0, "errors": 0},
+    )
+    db.add(job)
+    await db.commit()  # Commit BEFORE scheduling background task to avoid race condition
+    await db.refresh(job)  # Refresh to ensure we have the latest state
+
+    job_id = job.id
+
+    # Schedule background task (job is now guaranteed to be in DB)
+    background_tasks.add_task(run_scrape_job, str(job_id))
+
+    return ok(JobRead.model_validate(job), "Job created successfully", request)
+
+
+@router.get("", response_model=ApiResponse[list[JobListRead]])
+async def list_jobs(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    status: Optional[str] = Query(None, pattern="^(pending|running|completed|failed|cancelled)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """List scrape jobs with optional status filter."""
+    query = select(ScrapeJob).order_by(desc(ScrapeJob.created_at))
+    count_query = select(func.count()).select_from(ScrapeJob)
+    if status:
+        query = query.where(ScrapeJob.status == status)
+        count_query = count_query.where(ScrapeJob.status == status)
+    query = query.offset((page - 1) * page_size).limit(page_size)
+
+    result = await db.execute(query)
+    total_result = await db.execute(count_query)
+    jobs = result.scalars().all()
+    total = total_result.scalar_one()
+    trace_id = getattr(request.state, "trace_id", None)
+
+    return ok([JobListRead.model_validate(j) for j in jobs], "Jobs listed successfully", request, meta={"page": page, "page_size": page_size, "total": total})
+
+
+
+@router.get("/{job_id}", response_model=ApiResponse[JobRead])
+async def get_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
+    """Get the status and progress of a scrape job."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise NotFoundError(f"Scrape job {job_id} not found")
+    return ok(JobRead.model_validate(job), "Job retrieved successfully", request)
+
+
+@router.post("/{job_id}/cancel", response_model=ApiResponse[JobRead])
+async def cancel_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
+    """Cancel a running or pending scrape job."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise NotFoundError(f"Scrape job {job_id} not found")
+    if job.status not in ("pending", "running"):
+        raise JobAlreadyRunningError(
+            f"Job {job_id} cannot be cancelled (status: {job.status})"
+        )
+
+    job.mark_cancelled()
+    await db.flush()
+    return ok(JobRead.model_validate(job), "Job cancelled successfully", request)
+
+
+@router.delete("/{job_id}", response_model=ApiResponse[None], status_code=200)
+async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
+    """Delete a scrape job record."""
+    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise NotFoundError(f"Scrape job {job_id} not found")
+    if job.status == "running":
+        raise JobAlreadyRunningError("Cannot delete a running job. Cancel it first.")
+    await db.delete(job)
+    await db.flush()
+    return ok(None, "Job deleted successfully", request)

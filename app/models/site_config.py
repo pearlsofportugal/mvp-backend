@@ -14,32 +14,20 @@ class SiteConfig(Base):
     __tablename__ = "site_configs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    key: Mapped[str] = mapped_column(String(50), unique=True, index=True, comment="Unique site identifier")
+    key: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100))
     base_url: Mapped[str] = mapped_column(String(2048))
+    selectors: Mapped[dict] = mapped_column(JSON, default=dict)
+    extraction_mode: Mapped[str] = mapped_column(String(20), default="direct")
 
-    # Selectors stored as JSON — flexible structure
-    selectors: Mapped[dict] = mapped_column(
-        JSON,
-        default=dict,
-        comment="All CSS selectors for parsing: listing_link, title, price, etc.",
-    )
+    # NOVAS COLUNAS
+    pagination_type: Mapped[str] = mapped_column(String(20), nullable=False, default="html_next")
+    pagination_param: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
-    # Extraction mode
-    extraction_mode: Mapped[str] = mapped_column(
-        String(20),
-        default="direct",
-        comment="section (name/value pairs) or direct (CSS selectors)",
-    )
-
-    # URL filtering
-    link_pattern: Mapped[Optional[str]] = mapped_column(String(500), comment="Regex pattern to filter listing URLs")
-    image_filter: Mapped[Optional[str]] = mapped_column(String(500), comment="Pattern to filter image URLs")
-
-    # Status
+    link_pattern: Mapped[Optional[str]] = mapped_column(String(500))
+    image_filter: Mapped[Optional[str]] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

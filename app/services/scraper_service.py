@@ -69,8 +69,8 @@ async def run_scrape_job(job_id: str) -> None:
 
             job.mark_running()
             await db.commit()
-
-            await _run_scrape_async(
+            print(f"pagination_type={site_config.pagination_type}, pagination_param={site_config.pagination_param}, site_config_id={site_config.id}")
+            await _run_scrape_async(    
                 db=db,
                 job_id=str(job.id),
                 site_key=job.site_key,
@@ -82,6 +82,8 @@ async def run_scrape_job(job_id: str) -> None:
                 link_pattern=site_config.link_pattern,
                 image_filter=site_config.image_filter,
                 config=job.config or {},
+                pagination_type=site_config.pagination_type,
+                pagination_param=site_config.pagination_param,
             )
 
         except Exception as e:
@@ -108,6 +110,8 @@ async def _run_scrape_async(
     link_pattern: Optional[str],
     image_filter: Optional[str],
     config: Dict[str, Any],
+    pagination_type: str = "html_next",      # NOVO
+    pagination_param: Optional[str] = None, # NOVO
 ) -> None:
     """Async scraping loop — recebe a sessão DB existente em vez de abrir novas."""
     scraper = EthicalScraper(
@@ -150,7 +154,6 @@ async def _run_scrape_async(
             links = parse_listing_links(html, base_url, full_selectors)
             listings_found += len(links)
 
-            # Track all found URLs em batch — um único commit para a página inteira
             for link in links:
                 await _track_url_no_commit(db, job_id, "found", link)
             await db.commit()
@@ -174,8 +177,6 @@ async def _run_scrape_async(
                     )
 
                     property_schema = normalize_partner_payload(raw_data, site_key)
-
-                    # persist_listing usa a mesma sessão — sem nova ligação
                     await _persist_listing(db, job_id, property_schema, site_key)
                     await _track_url(db, job_id, "scraped", link)
                     listings_scraped += 1
@@ -195,11 +196,23 @@ async def _run_scrape_async(
                     await _add_job_log(db, job_id, "error", f"Error processing listing: {str(e)}", link)
                     errors += 1
 
-            next_url = parse_next_page(html, base_url, full_selectors)
-            if not next_url:
-                logger.info("No more pages — stopping")
+            # ---------- PAGINATION UNIVERSAL ----------
+            if pagination_type == "incremental_path":
+                # Ex: https://site.com/properties/2
+                current_url = f"{start_url.rstrip('/')}/{page_num + 2}"
+            elif pagination_type == "query_param" and pagination_param:
+                # Ex: https://site.com/properties?page=2
+                sep = "&" if "?" in start_url else "?"
+                current_url = f"{start_url}{sep}{pagination_param}={page_num + 2}"
+            elif pagination_type == "html_next":
+                next_url = parse_next_page(html, base_url, full_selectors)
+                if not next_url:
+                    logger.info("No more pages — stopping")
+                    break
+                current_url = next_url
+            else:
+                logger.warning("Unknown pagination_type %s — stopping", pagination_type)
                 break
-            current_url = next_url
 
         await _complete_job(db, job_id)
 

@@ -28,7 +28,7 @@ services:
       DATABASE_URL_SYNC: postgresql://postgres:Pearls2026@db:5432/mvpscraper
       DEBUG: "true"
       LOG_LEVEL: INFO
-      CORS_ORIGINS: '["http://localhost:4200", "http://localhost:8000"]'
+      CORS_ORIGINS: '["http://localhost:4200", "http://localhost:8080","https://frontend-app-41588214705.europe-west1.run.app"]'
     depends_on:
       db:
         condition: service_healthy

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     app_version: str = "1.0.0"
     debug: bool = False
     log_level: str = "INFO"
-    cors_origins: List[str] = ["http://localhost:4200", "http://localhost:8000"]
+    cors_origins: List[str] = ["http://localhost:4200", "http://localhost:8080","https://frontend-app-41588214705.europe-west1.run.app"]
     # Database
     database_url: str
     database_url_sync: str

@@ -1,0 +1,27 @@
+# Ignorar ambientes virtuais (O MAIOR VILÃO)
+.venv
+venv
+env
+bin
+lib
+share
+
+# Ignorar dados de base de dados local
+pgdata
+postgres_data
+
+# Ignorar lixo de Python e testes
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+
+# Ignorar pastas de sistema e IDEs
+.git
+.vscode
+.idea
+
+# Ignorar o próprio Dockerfile e env vars locais
+Dockerfile
+.dockerignore
+.env

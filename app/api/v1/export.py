@@ -8,7 +8,10 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+import io
 from app.api.deps import get_db
 from app.models.listing import Listing
 
@@ -167,9 +170,7 @@ async def export_excel(
     price_min: Optional[Decimal] = Query(None),
     price_max: Optional[Decimal] = Query(None),
 ):
-    """Export filtered listings as Excel (.xlsx)."""
-    import pandas as pd
-
+    """Export filtered listings as Excel (.xlsx) using openpyxl directly."""
     query = _build_export_query(
         district=district, county=county, property_type=property_type,
         source_partner=source_partner, scrape_job_id=scrape_job_id,
@@ -179,24 +180,53 @@ async def export_excel(
     listings = result.scalars().all()
 
     rows = [_listing_to_dict(l) for l in listings]
-    df = pd.DataFrame(rows)
 
+    # Criar o Workbook e a folha ativa
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Listings"
+
+    if rows:
+        # 1. Escrever o Cabeçalho
+        headers = list(rows[0].keys())
+        ws.append(headers)
+
+        # Estilo do cabeçalho: Negrito
+        bold_font = Font(bold=True)
+        for cell in ws[1]:
+            cell.font = bold_font
+
+        # 2. Escrever os Dados
+        for row_dict in rows:
+            ws.append(list(row_dict.values()))
+
+        # 3. Auto-width das colunas
+        # Vamos iterar pelas colunas para calcular a largura
+        for i, column_cells in enumerate(ws.columns, 1):
+            max_length = 0
+            column_letter = get_column_letter(i)
+            
+            for cell in column_cells:
+                try:
+                    if cell.value:
+                        val_len = len(str(cell.value))
+                        if val_len > max_length:
+                            max_length = val_len
+                except:
+                    pass
+            
+            # Ajustar largura (máximo de 50 para não ficar gigante)
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+    else:
+        # Se não houver dados, apenas escrever uma mensagem ou cabeçalhos vazios
+        ws.append(["No data found"])
+
+    # Salvar para o buffer
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Listings")
-
-        # Auto-width columns and bold headers
-        worksheet = writer.sheets["Listings"]
-        from openpyxl.styles import Font
-        for col_idx, col in enumerate(df.columns, 1):
-            worksheet.cell(row=1, column=col_idx).font = Font(bold=True)
-            max_len = max(
-                df[col].astype(str).map(len).max() if len(df) > 0 else 0,
-                len(str(col)),
-            )
-            worksheet.column_dimensions[worksheet.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 50)
-
+    wb.save(output)
     output.seek(0)
+
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

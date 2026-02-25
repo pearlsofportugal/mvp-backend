@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import and_, func, or_, select, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.core.exceptions import NotFoundError, DuplicateError
@@ -26,6 +27,7 @@ from app.schemas.listing import (
     PaginatedResponse,
 )
 from app.api.responses import ok
+from app.schemas.listing_search_schema import ListingSearchItem, ListingSearchResponse
 
 router = APIRouter()
 
@@ -105,11 +107,12 @@ SORT_FIELDS = {
 }
 
 
+
+
 @router.get("", response_model=ApiResponse[PaginatedResponse])
 async def list_listings(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    # Filters
     district: Optional[str] = Query(None),
     county: Optional[str] = Query(None),
     parish: Optional[str] = Query(None),
@@ -129,10 +132,8 @@ async def list_listings(
     created_after: Optional[datetime] = Query(None),
     created_before: Optional[datetime] = Query(None),
     search: Optional[str] = Query(None),
-    # Sorting
     sort_by: str = Query("created_at", enum=list(SORT_FIELDS.keys())),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
-    # Pagination
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -149,36 +150,111 @@ async def list_listings(
         "search": search,
     }
 
-    # Count query
-    count_query = select(func.count(Listing.id))
-    count_query = _apply_filters(count_query, **filter_kwargs)
-    total_result = await db.execute(count_query)
-    total = total_result.scalar_one()
+    count_query = _apply_filters(select(func.count(Listing.id)), **filter_kwargs)
+    total = (await db.execute(count_query)).scalar_one()
 
-    # Data query
-    query = select(Listing)
-    query = _apply_filters(query, **filter_kwargs)
-
-    # Sorting
+    query = _apply_filters(select(Listing), **filter_kwargs)
     sort_column = SORT_FIELDS.get(sort_by, Listing.created_at)
     query = query.order_by(desc(sort_column) if sort_order == "desc" else asc(sort_column))
+    query = query.offset((page - 1) * page_size).limit(page_size)
 
-    # Pagination
-    offset = (page - 1) * page_size
-    query = query.offset(offset).limit(page_size)
+    listings = (await db.execute(query)).scalars().all()
 
-    result = await db.execute(query)
-    listings = result.scalars().all()
-
-    paginated = PaginatedResponse(
-        items=[ListingListRead.model_validate(l) for l in listings],
-        total=total,
-        page=page,
-        page_size=page_size,
-        pages=math.ceil(total / page_size) if total > 0 else 0,
+    return ok(
+        PaginatedResponse(
+            items=[ListingListRead.model_validate(l) for l in listings],
+            total=total,
+            page=page,
+            page_size=page_size,
+            pages=math.ceil(total / page_size) if total > 0 else 0,
+        ),
+        "Listings listed successfully",
+        request,
     )
-    return ok(paginated, "Listings listed successfully", request)
+@router.get("/search", response_model=ApiResponse[ListingSearchResponse])
+async def search_listings(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    q: Optional[str] = Query(None, min_length=2),
+    source_partner: Optional[str] = Query(None),
+    is_enriched: Optional[bool] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Lightweight search endpoint for the listing selector UI.
 
+    Returns thumbnail_url (first media asset) and is_enriched flag.
+    """
+    stmt = select(Listing)
+
+    if q:
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Listing.title.ilike(pattern),
+                Listing.district.ilike(pattern),
+                Listing.county.ilike(pattern),
+                Listing.source_partner.ilike(pattern),
+            )
+        )
+
+    if source_partner:
+        stmt = stmt.where(Listing.source_partner == source_partner)
+
+    if is_enriched is True:
+        stmt = stmt.where(Listing.enriched_description.isnot(None))
+    elif is_enriched is False:
+        stmt = stmt.where(Listing.enriched_description.is_(None))
+
+    total: int = (await db.execute(
+        select(func.count()).select_from(stmt.subquery())
+    )).scalar_one()
+
+    stmt = (
+        stmt
+        .options(selectinload(Listing.media_assets))
+        .order_by(Listing.updated_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    listings = (await db.execute(stmt)).scalars().all()
+
+    items: list[ListingSearchItem] = []
+    for listing in listings:
+        thumbnail_url: Optional[str] = None
+        if listing.media_assets:
+            first = min(listing.media_assets, key=lambda m: m.position or 999)
+            thumbnail_url = first.url
+
+        items.append(
+            ListingSearchItem(
+                id=listing.id,
+                source_partner=listing.source_partner,
+                title=listing.title,
+                property_type=listing.property_type,
+                typology=listing.typology,
+                bedrooms=listing.bedrooms,
+                area_useful_m2=listing.area_useful_m2,
+                district=listing.district,
+                county=listing.county,
+                price_amount=listing.price_amount,
+                price_currency=listing.price_currency,
+                thumbnail_url=thumbnail_url,
+                is_enriched=bool(listing.enriched_description),
+            )
+        )
+
+    return ok(
+        ListingSearchResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            pages=math.ceil(total / page_size) if total > 0 else 0,
+        ),
+        "Listings found",
+        request,
+    )
 @router.get("/stats", response_model=ApiResponse[ListingStats])
 async def listing_stats(
     request: Request,
@@ -194,7 +270,6 @@ async def listing_stats(
         base_filter.append(Listing.scrape_job_id == scrape_job_id)
     where_clause = and_(*base_filter) if base_filter else True
 
-    # Totals
     q = select(
         func.count(Listing.id),
         func.avg(Listing.price_amount),
@@ -202,58 +277,51 @@ async def listing_stats(
         func.max(Listing.price_amount),
         func.avg(Listing.area_useful_m2),
     ).where(where_clause)
-    result = await db.execute(q)
-    row = result.one()
+    row = (await db.execute(q)).one()
     total, avg_price, min_price, max_price, avg_area = row
 
-    # Group by district
     q_district = (
         select(Listing.district, func.count(Listing.id))
-        .where(where_clause)
-        .where(Listing.district.isnot(None))
+        .where(where_clause).where(Listing.district.isnot(None))
         .group_by(Listing.district)
     )
     by_district = {r[0]: r[1] for r in (await db.execute(q_district)).all()}
 
-    # Group by property_type
     q_type = (
         select(Listing.property_type, func.count(Listing.id))
-        .where(where_clause)
-        .where(Listing.property_type.isnot(None))
+        .where(where_clause).where(Listing.property_type.isnot(None))
         .group_by(Listing.property_type)
     )
     by_type = {r[0]: r[1] for r in (await db.execute(q_type)).all()}
 
-    # Group by source_partner
     q_partner = (
         select(Listing.source_partner, func.count(Listing.id))
-        .where(where_clause)
-        .group_by(Listing.source_partner)
+        .where(where_clause).group_by(Listing.source_partner)
     )
     by_partner = {r[0]: r[1] for r in (await db.execute(q_partner)).all()}
 
-    # Group by typology
     q_typo = (
         select(Listing.typology, func.count(Listing.id))
-        .where(where_clause)
-        .where(Listing.typology.isnot(None))
+        .where(where_clause).where(Listing.typology.isnot(None))
         .group_by(Listing.typology)
     )
     by_typo = {r[0]: r[1] for r in (await db.execute(q_typo)).all()}
 
-    stats = ListingStats(
-        total_listings=total or 0,
-        avg_price=float(avg_price) if avg_price else None,
-        min_price=float(min_price) if min_price else None,
-        max_price=float(max_price) if max_price else None,
-        avg_area=float(avg_area) if avg_area else None,
-        by_district=by_district,
-        by_property_type=by_type,
-        by_source_partner=by_partner,
-        by_typology=by_typo,
+    return ok(
+        ListingStats(
+            total_listings=total or 0,
+            avg_price=float(avg_price) if avg_price else None,
+            min_price=float(min_price) if min_price else None,
+            max_price=float(max_price) if max_price else None,
+            avg_area=float(avg_area) if avg_area else None,
+            by_district=by_district,
+            by_property_type=by_type,
+            by_source_partner=by_partner,
+            by_typology=by_typo,
+        ),
+        "Listing stats retrieved successfully",
+        request,
     )
-    return ok(stats, "Listing stats retrieved successfully", request)
-
 @router.get("/duplicates", response_model=ApiResponse[dict])
 async def detect_duplicates(
     request: Request,
@@ -270,16 +338,15 @@ async def detect_duplicates(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    result = await db.execute(query)
-    duplicates = [{"source_url": r[0], "count": r[1]} for r in result.all()]
+    duplicates = [{"source_url": r[0], "count": r[1]} for r in (await db.execute(query)).all()]
     return ok({"duplicates": duplicates}, "Duplicates detected successfully", request)
-
-
+# ══════════════════════════════════════════════════════════════════
+#  DYNAMIC ROUTES — /{listing_id} must come LAST
+# ═════════════════════════════════════════════════════════════════
 @router.get("/{listing_id}", response_model=ApiResponse[ListingRead])
 async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get a single listing by ID."""
-    result = await db.execute(select(Listing).where(Listing.id == listing_id))
-    listing = result.scalar_one_or_none()
+    listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one_or_none()
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
     return ok(ListingRead.model_validate(listing), "Listing retrieved successfully", request)
@@ -288,32 +355,21 @@ async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Dep
 @router.post("", response_model=ApiResponse[ListingRead], status_code=201)
 async def create_listing(payload: ListingCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """Create a new listing manually."""
-    # Check for duplicate source_url
     if payload.source_url:
-        existing = await db.execute(
-            select(Listing).where(Listing.source_url == payload.source_url)
-        )
-        if existing.scalar_one_or_none():
+        if (await db.execute(select(Listing).where(Listing.source_url == payload.source_url))).scalar_one_or_none():
             raise DuplicateError(f"Listing with source_url '{payload.source_url}' already exists")
 
-    # Build listing
     data = payload.model_dump(exclude={"media_assets"})
     listing = Listing(**data)
     db.add(listing)
     await db.flush()
 
-    # Add media assets
     for asset_data in payload.media_assets:
-        asset = MediaAsset(listing_id=listing.id, **asset_data.model_dump())
-        db.add(asset)
+        db.add(MediaAsset(listing_id=listing.id, **asset_data.model_dump()))
 
     await db.flush()
-
-    # Re-fetch with relationships
-    result = await db.execute(select(Listing).where(Listing.id == listing.id))
-    listing = result.scalar_one()
+    listing = (await db.execute(select(Listing).where(Listing.id == listing.id))).scalar_one()
     return ok(ListingRead.model_validate(listing), "Listing created successfully", request)
-
 
 
 @router.patch("/{listing_id}", response_model=ApiResponse[ListingRead])
@@ -324,31 +380,24 @@ async def update_listing(
     db: AsyncSession = Depends(get_db),
 ):
     """Partially update a listing."""
-    result = await db.execute(select(Listing).where(Listing.id == listing_id))
-    listing = result.scalar_one_or_none()
+    listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one_or_none()
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
 
-    # Track price change
     update_data = payload.model_dump(exclude_unset=True)
     if "price_amount" in update_data and update_data["price_amount"] is not None:
         if listing.price_amount is not None and listing.price_amount != update_data["price_amount"]:
-            price_record = PriceHistory(
+            db.add(PriceHistory(
                 listing_id=listing.id,
                 price_amount=listing.price_amount,
                 price_currency=listing.price_currency or "EUR",
-            )
-            db.add(price_record)
+            ))
 
-    # Apply updates
     for field, value in update_data.items():
         setattr(listing, field, value)
 
     await db.flush()
-
-    # Re-fetch
-    result = await db.execute(select(Listing).where(Listing.id == listing_id))
-    listing = result.scalar_one()
+    listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one()
     return ok(ListingRead.model_validate(listing), "Listing updated successfully", request)
 
 
@@ -356,10 +405,8 @@ async def update_listing(
 @router.delete("/{listing_id}", response_model=ApiResponse[None], status_code=200)
 async def delete_listing(listing_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Delete a listing (hard delete — cascades to media_assets and price_history)."""
-    result = await db.execute(select(Listing).where(Listing.id == listing_id))
-    listing = result.scalar_one_or_none()
+    listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one_or_none()
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
     await db.delete(listing)
     return ok(None, "Listing deleted successfully", request)
-

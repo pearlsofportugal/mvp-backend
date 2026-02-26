@@ -17,9 +17,9 @@ class Money(BaseModel):
 
 class Address(BaseModel):
     country: Optional[str] = None
-    region: Optional[str] = None       # district
-    city: Optional[str] = None         # county
-    area: Optional[str] = None         # parish
+    region: Optional[str] = None       
+    city: Optional[str] = None         
+    area: Optional[str] = None         
     postal_code: Optional[str] = None
     full_address: Optional[str] = None
 
@@ -27,7 +27,7 @@ class Address(BaseModel):
 class MediaAsset(BaseModel):
     url: str
     alt_text: Optional[str] = None
-    type: Optional[str] = None         # "photo", "floorplan", "video"
+    type: Optional[str] = None        
 
 
 class ListingFlags(BaseModel):
@@ -46,7 +46,7 @@ class PropertySchema(BaseModel):
     source_partner: str
     source_url: Optional[str] = None
     title: Optional[str] = None
-    listing_type: Optional[str] = None     # sale, rent
+    listing_type: Optional[str] = None      
     property_type: Optional[str] = None
     typology: Optional[str] = None
     bedrooms: Optional[int] = None
@@ -64,7 +64,7 @@ class PropertySchema(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     features: ListingFlags = ListingFlags()
-    descriptions: Dict[str, str] = {}      # {"pt": "...", "en": "..."}
+    descriptions: Dict[str, str] = {}     
     seo: Optional[Dict] = None
     ai_content: Optional[Dict] = None
     raw_partner_payload: Optional[Dict] = None

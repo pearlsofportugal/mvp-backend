@@ -10,7 +10,6 @@ from app.api.deps import get_db
 from app.main import app
 
 
-# Use SQLite for tests (fast, no external deps)
 TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
@@ -55,7 +54,6 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides.clear()
 
 
-# ── Factory helpers ──
 
 def make_listing_payload(**overrides) -> dict:
     """Create a valid listing creation payload."""

@@ -20,7 +20,6 @@ class SiteConfig(Base):
     selectors: Mapped[dict] = mapped_column(JSON, default=dict)
     extraction_mode: Mapped[str] = mapped_column(String(20), default="direct")
 
-    # NOVAS COLUNAS
     pagination_type: Mapped[str] = mapped_column(String(20), nullable=False, default="html_next")
     pagination_param: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 

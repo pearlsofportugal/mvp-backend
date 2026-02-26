@@ -10,7 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
-    from app.models.listing import Listing
+    from app.models.listing_model import Listing
 
 
 class MediaAsset(Base):
@@ -28,7 +28,6 @@ class MediaAsset(Base):
     position: Mapped[Optional[int]] = mapped_column(Integer, comment="Display order")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Relationship
     listing: Mapped["Listing"] = relationship(back_populates="media_assets")
 
     def __repr__(self) -> str:

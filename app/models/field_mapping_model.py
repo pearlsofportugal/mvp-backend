@@ -25,35 +25,30 @@ class FieldMapping(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     
-    # Source field name (what appears in HTML)
     source_name: Mapped[str] = mapped_column(
         String(100), 
         index=True,
         comment="Raw field name from HTML (e.g., 'preço', 'price', 'quartos')"
     )
     
-    # Target canonical field
     target_field: Mapped[str] = mapped_column(
         String(50),
         index=True,
         comment="Canonical field name (e.g., 'price', 'bedrooms', 'has_garage')"
     )
     
-    # Mapping type
     mapping_type: Mapped[str] = mapped_column(
         String(20),
         default="field",
         comment="Type: 'field' (data field) or 'feature' (boolean amenity)"
     )
     
-    # Language/locale
     language: Mapped[str] = mapped_column(
         String(5),
         default="pt",
         comment="Language code: 'pt', 'en', 'es', etc."
     )
     
-    # Optional site-specific mapping
     site_key: Mapped[Optional[str]] = mapped_column(
         String(50),
         nullable=True,
@@ -61,16 +56,13 @@ class FieldMapping(Base):
         comment="Optional site key for site-specific mappings (NULL = global)"
     )
     
-    # Priority for conflict resolution
     priority: Mapped[int] = mapped_column(
         default=0,
         comment="Higher priority mappings override lower ones"
     )
     
-    # Active flag
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     
-    # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -95,7 +87,6 @@ class CharacterMapping(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     
-    # Source string (corrupted or symbol)
     source_chars: Mapped[str] = mapped_column(
         String(20),
         unique=True,
@@ -103,23 +94,19 @@ class CharacterMapping(Base):
         comment="Source characters to replace"
     )
     
-    # Target string (correct)
     target_chars: Mapped[str] = mapped_column(
         String(20),
         comment="Replacement characters"
     )
     
-    # Mapping category
     category: Mapped[str] = mapped_column(
         String(20),
         default="mojibake",
         comment="Category: 'mojibake', 'currency', 'symbol'"
     )
     
-    # Active flag
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     
-    # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

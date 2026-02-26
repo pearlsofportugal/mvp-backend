@@ -12,26 +12,21 @@ class ListingSearchItem(BaseModel):
     and is_enriched (bool derived from enriched_description presence).
     """
 
-    # ── Identity ──────────────────────────────────────────────
     id: UUID
     source_partner: str
 
-    # ── Display ───────────────────────────────────────────────
     title: Optional[str] = None
     property_type: Optional[str] = None
     typology: Optional[str] = None
     bedrooms: Optional[int] = None
     area_useful_m2: Optional[float] = None
 
-    # ── Location ──────────────────────────────────────────────
     district: Optional[str] = None
     county: Optional[str] = None
 
-    # ── Financial ─────────────────────────────────────────────
     price_amount: Optional[float] = None
     price_currency: Optional[str] = None
 
-    # ── Selector extras ───────────────────────────────────────
     thumbnail_url: Optional[str] = Field(
         None,
         description="URL of the first media asset (position=0), if available",

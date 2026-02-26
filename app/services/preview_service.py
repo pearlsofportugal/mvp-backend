@@ -25,7 +25,6 @@ from app.schemas.preview_schema import (
 )
 logger = get_logger(__name__)
 
-# Canonical fields the frontend cares about, in display order
 CANONICAL_FIELDS = [
     ("title", "title"),
     ("property_id", "partner_id"),
@@ -77,7 +76,6 @@ def _build_field_results(raw_data: Dict[str, Any]) -> Tuple[List[FieldPreviewRes
             status=status,
         ))
 
-    # Surface any extra fields the parser found outside the canonical list
     known_raw_keys = {r for r, _ in CANONICAL_FIELDS} | {
         "url", "images", "alt_texts", "page_title", "meta_description", "headers"
     }
@@ -133,7 +131,6 @@ async def preview_listing_detail(
                 ],
             )
 
-        # FIX: parse_listing_page é async — era chamada sem await, retornava coroutine não executada
         raw_data = await parse_listing_page(
             response.text,
             url,

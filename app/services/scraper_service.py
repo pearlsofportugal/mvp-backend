@@ -31,11 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.logging import get_logger, set_correlation_id
 from app.database import async_session_factory
-from app.models.listing import Listing
-from app.models.media import MediaAsset
-from app.models.price_history import PriceHistory
-from app.models.scrape_job import ScrapeJob
-from app.models.site_config import SiteConfig
+from app.models.listing_model import Listing
+from app.models.media_model import MediaAsset
+from app.models.price_history_model import PriceHistory
+from app.models.scrape_job_model import ScrapeJob
+from app.models.site_config_model import SiteConfig
 from app.services.ethics_service import EthicalScraper
 from app.services.mapper_service import normalize_partner_payload, schema_to_listing_dict
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
@@ -167,7 +167,6 @@ async def _run_scrape_async(
             links = parse_listing_links(html, base_url, full_selectors)
             listings_found += len(links)
 
-            # Batch: registar todas as URLs da página num único commit
             for link in links:
                 job.add_url("found", link)
             await db.commit()
@@ -194,7 +193,6 @@ async def _run_scrape_async(
                     property_schema = normalize_partner_payload(raw_data, site_key)
                     await _persist_listing(db, job, property_schema, site_key)
 
-                    # Batch: track URL + progresso num único commit (já feito em _persist_listing)
                     job.add_url("scraped", link)
                     listings_scraped += 1
                     job.update_progress(
@@ -212,7 +210,6 @@ async def _run_scrape_async(
                     errors += 1
                     await db.commit()
 
-            # ---------- PAGINATION ----------
             if pagination_type == "incremental_path":
                 current_url = f"{start_url.rstrip('/')}/{page_num + 2}"
             elif pagination_type == "query_param" and pagination_param:
@@ -228,7 +225,6 @@ async def _run_scrape_async(
                 logger.warning("Unknown pagination_type %s — stopping", pagination_type)
                 break
 
-        # Atualizar progresso final antes de completar
         job.update_progress(
             pages_visited=pages_visited,
             listings_found=listings_found,
@@ -249,9 +245,6 @@ async def _run_scrape_async(
         scraper.close()
 
 
-# ---------------------------------------------------------------------------
-# Helpers — operam diretamente sobre o objeto `job` (sem re-fetch à DB)
-# ---------------------------------------------------------------------------
 
 def _is_cancelled(job: ScrapeJob) -> bool:
     """Verifica se o job foi cancelado — lê o estado em memória, sem query à DB.
@@ -308,7 +301,6 @@ async def _persist_listing(db: AsyncSession, job: ScrapeJob, schema, site_key: s
         existing.updated_at = datetime.now(timezone.utc)
         existing.scrape_job_id = UUID(str(job.id))
 
-        # Upsert de media assets: adicionar apenas os que ainda não existem (por URL)
         if schema.media:
             existing_media_result = await db.execute(
                 select(MediaAsset.url).where(MediaAsset.listing_id == existing.id)
@@ -330,8 +322,7 @@ async def _persist_listing(db: AsyncSession, job: ScrapeJob, schema, site_key: s
     else:
         listing = Listing(**listing_data)
         db.add(listing)
-        await db.flush()  # obter o ID antes de adicionar media assets
-
+        await db.flush() 
         for media in schema.media:
             asset = MediaAsset(
                 listing_id=listing.id,

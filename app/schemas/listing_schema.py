@@ -7,7 +7,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
-# ---- Media sub-schema ----
 class MediaAssetRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -25,7 +24,6 @@ class MediaAssetCreate(BaseModel):
     position: Optional[int] = None
 
 
-# ---- Price history sub-schema ----
 class PriceHistoryRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -35,7 +33,6 @@ class PriceHistoryRead(BaseModel):
     recorded_at: datetime
 
 
-# ---- Listing schemas ----
 class ListingBase(BaseModel):
     """Shared fields for create and update."""
     title: Optional[str] = None

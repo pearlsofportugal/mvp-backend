@@ -23,14 +23,13 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Minimum acceptable User-Agent pattern: must have bot name and contact
 USER_AGENT_PATTERN = re.compile(r".+/.+\s*\(\+.+\)")
 
 
 class EthicalScraper:
     """HTTP client that respects robots.txt, rate limits, and ethical scraping rules."""
 
-    ROBOTS_CACHE_TTL = 3600.0  # 1 hour
+    ROBOTS_CACHE_TTL = 3600.0 
 
     def __init__(
         self,
@@ -48,14 +47,11 @@ class EthicalScraper:
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
 
-        # Robots.txt cache: domain -> (parser, is_loaded_successfully)
         self._robots_cache: dict[str, tuple[RobotFileParser, bool]] = {}
         self._cache_timestamps: dict[str, float] = {}
 
-        # URL deduplication for current job
         self._visited_urls: set[str] = set()
 
-        # HTTP session with retry adapter
         self._session = requests.Session()
         retry_strategy = Retry(
             total=max_retries,
@@ -68,7 +64,6 @@ class EthicalScraper:
         self._session.mount("http://", adapter)
         self._session.headers.update({"User-Agent": self.user_agent})
 
-        # Validate user agent
         if not USER_AGENT_PATTERN.match(self.user_agent):
             logger.warning(
                 "User-Agent '%s' does not follow identifiable bot format. "
@@ -85,13 +80,11 @@ class EthicalScraper:
         """Load and cache robots.txt for a domain."""
         now = time.time()
 
-        # Check cache
         if domain in self._robots_cache:
             cached_time = self._cache_timestamps.get(domain, 0)
             if now - cached_time < self.ROBOTS_CACHE_TTL:
                 return self._robots_cache[domain]
 
-        # Load robots.txt
         robots_url = f"{domain}/robots.txt"
         parser = RobotFileParser()
         parser.set_url(robots_url)
@@ -118,7 +111,6 @@ class EthicalScraper:
         domain = self._get_domain(url)
         parser, loaded = self._load_robots(domain)
 
-        # FAIL-CLOSED: if robots.txt failed to load, block everything
         if not loaded:
             logger.warning("Blocking %s — robots.txt not loaded (fail-closed)", url)
             return False
@@ -156,19 +148,15 @@ class EthicalScraper:
         - HTTP 4xx (non-retriable)
         - All retries exhausted
         """
-        # Deduplication
         if self.is_visited(url):
             logger.debug("Skipping already visited URL: %s", url)
             return None
 
-        # Robots.txt check (fail-closed)
         if not self.allowed(url):
             return None
 
-        # Rate limiting
         self._sleep()
 
-        # Mark as visited
         self.mark_visited(url)
 
         try:
@@ -177,11 +165,9 @@ class EthicalScraper:
             if response.status_code == 200:
                 return response
             elif 400 <= response.status_code < 500 and response.status_code != 429:
-                # 4xx (except 429) — non-retriable
                 logger.warning("HTTP %d for %s — not retrying", response.status_code, url)
                 return None
             else:
-                # 429/5xx handled by retry adapter
                 logger.warning("HTTP %d for %s", response.status_code, url)
                 return None
 

@@ -13,11 +13,11 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.core.exceptions import NotFoundError, DuplicateError
-from app.models.listing import Listing
-from app.models.media import MediaAsset
-from app.models.price_history import PriceHistory
+from app.models.listing_model import Listing
+from app.models.media_model import MediaAsset
+from app.models.price_history_model import PriceHistory
 from app.schemas.base_schema import ApiResponse
-from app.schemas.listing import (
+from app.schemas.listing_schema import (
     ListingCreate,
     ListingListRead,
     ListingRead,
@@ -51,7 +51,6 @@ def _apply_filters(query, **kwargs):
     if kwargs.get("scrape_job_id"):
         filters.append(Listing.scrape_job_id == kwargs["scrape_job_id"])
 
-    # Range filters
     if kwargs.get("price_min") is not None:
         filters.append(Listing.price_amount >= kwargs["price_min"])
     if kwargs.get("price_max") is not None:
@@ -65,7 +64,6 @@ def _apply_filters(query, **kwargs):
     if kwargs.get("bedrooms_max") is not None:
         filters.append(Listing.bedrooms <= kwargs["bedrooms_max"])
 
-    # Boolean flags
     if kwargs.get("has_garage") is not None:
         filters.append(Listing.has_garage == kwargs["has_garage"])
     if kwargs.get("has_pool") is not None:
@@ -73,13 +71,11 @@ def _apply_filters(query, **kwargs):
     if kwargs.get("has_elevator") is not None:
         filters.append(Listing.has_elevator == kwargs["has_elevator"])
 
-    # Date filters
     if kwargs.get("created_after"):
         filters.append(Listing.created_at >= kwargs["created_after"])
     if kwargs.get("created_before"):
         filters.append(Listing.created_at <= kwargs["created_before"])
 
-    # Full-text search (simple LIKE for MVP, upgrade to tsvector later)
     if kwargs.get("search"):
         search_term = f"%{kwargs['search']}%"
         filters.append(
@@ -340,9 +336,7 @@ async def detect_duplicates(
     )
     duplicates = [{"source_url": r[0], "count": r[1]} for r in (await db.execute(query)).all()]
     return ok({"duplicates": duplicates}, "Duplicates detected successfully", request)
-# ══════════════════════════════════════════════════════════════════
-#  DYNAMIC ROUTES — /{listing_id} must come LAST
-# ═════════════════════════════════════════════════════════════════
+
 @router.get("/{listing_id}", response_model=ApiResponse[ListingRead])
 async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get a single listing by ID."""

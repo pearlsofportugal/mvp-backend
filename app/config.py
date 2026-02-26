@@ -4,7 +4,6 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Caminho absoluto para o ficheiro .env
 ENV_FILE = Path(__file__).parent.parent / ".env"
 
 class Settings(BaseSettings):
@@ -14,30 +13,26 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # Application
     app_name: str = "MVP-Scraper"
     app_version: str = "1.0.0"
     debug: bool = False
     log_level: str = "INFO"
     cors_origins: List[str] = ["http://localhost:4200", "http://localhost:8080","https://frontend-app-41588214705.europe-west1.run.app"]
-    # Database
     database_url: str
     database_url_sync: str
     api_key: str = ""
 
-    # Scraping defaults
     default_min_delay: float = 2.0
     default_max_delay: float = 5.0
     default_user_agent: str = "RealEstateResearchBot/1.0 (+contact: you@example.com)"
     default_max_pages: int = 10
     request_timeout: int = 120
 
-    # AI / GenAI
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-2.5-flash"
     google_genai_temperature: float = 0.2
-    ai_rate_limit_requests: int = 20   # pedidos permitidos por janela
-    ai_rate_limit_window: int = 60     # janela em segundos
+    ai_rate_limit_requests: int = 20   
+    ai_rate_limit_window: int = 60     
     @field_validator('database_url')
     @classmethod
     def validate_database_url(cls, v):

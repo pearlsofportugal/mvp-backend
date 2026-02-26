@@ -1,4 +1,3 @@
-# app/api/responses.py
 from typing import Any, Optional
 from fastapi import Request
 from app.schemas.base_schema import ApiResponse

@@ -19,7 +19,6 @@ class ScrapeJob(Base):
     start_url: Mapped[str] = mapped_column(String(2048))
     max_pages: Mapped[int] = mapped_column(Integer, default=10)
     
-    # Status tracking
     status: Mapped[str] = mapped_column(
         String(20),
         default="pending",
@@ -47,7 +46,6 @@ class ScrapeJob(Base):
     )
     error_message: Mapped[Optional[str]] = mapped_column(Text)
 
-    # Timestamps
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

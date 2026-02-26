@@ -17,8 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db
 from app.api.responses import ok
 from app.core.exceptions import NotFoundError
-from app.models.listing import Listing
-from app.schemas.ai_enrichment import (
+from app.models.listing_model import Listing
+from app.schemas.ai_enrichment_schema import (
     AIEnrichmentOutput,
     AIListingEnrichmentRequest,
     AIListingEnrichmentResponse,
@@ -40,8 +40,7 @@ router = APIRouter()
 @router.post("/optimize", response_model=ApiResponse[AITextOptimizationResponse])
 async def optimize_text(payload: AITextOptimizationRequest, request: Request):
     """Optimize free text with AI SEO logic."""
-    # FIX: usa optimize_text_with_ai_async (já corre em thread pool internamente)
-    # em vez de loop.run_in_executor com asyncio.get_event_loop() (deprecated em Python 3.10+)
+
     result = await optimize_text_with_ai_async(payload.content, payload.keywords)
     if payload.fields:
         filtered = result.output.model_dump(include=set(payload.fields))
@@ -81,7 +80,6 @@ async def preview_enrichment(
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
 
-    # Reutiliza a lógica de /listing com apply=False e force=True
     preview_request = AIListingEnrichmentRequest(
         listing_id=listing_id,
         fields=["description"],
@@ -124,7 +122,6 @@ async def enrichment_stats(
     total: int = (await db.execute(total_query)).scalar_one()
     enriched: int = (await db.execute(enriched_query)).scalar_one()
 
-    # Breakdown por source_partner
     by_source_query = select(
         Listing.source_partner,
         func.count(Listing.id).label("total"),

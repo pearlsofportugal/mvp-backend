@@ -14,8 +14,8 @@ from typing import Any, Dict, List, Optional, Sequence
 from app.config import settings
 from app.core.exceptions import EnrichmentError
 from app.core.logging import get_logger
-from app.models.listing import Listing
-from app.schemas.ai_enrichment import (
+from app.models.listing_model import Listing
+from app.schemas.ai_enrichment_schema import (
     AIEnrichmentFieldResult,
     AIEnrichmentOutput,
     AIListingEnrichmentRequest,
@@ -91,10 +91,7 @@ CONTEÚDO DO IMÓVEL A PROCESSAR:
 """.strip()
 
 
-# Singleton do cliente Gemini.
-# A inicialização é protegida pelo GIL do CPython — seguro para uso em MVP onde
-# não há workers múltiplos a inicializar concorrentemente. Para produção com
-# multiprocessing real, considerar threading.Lock.
+
 _client: Any = None
 
 
@@ -139,7 +136,6 @@ def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
 
 async def _call_ai_for_seo_async(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
     """Wrapper async para _call_ai_for_seo — corre na thread pool para não bloquear o event loop."""
-    # FIX: asyncio.get_running_loop() é o correto em Python 3.10+ (get_event_loop deprecated)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _call_ai_for_seo, content, keywords)
 
@@ -213,7 +209,6 @@ async def enrich_listing_with_ai(
 
     keywords_used = _sanitize_keywords(payload.keywords) or infer_listing_keywords(listing)
 
-    # FIX: Determinar quais campos realmente precisam de ser gerados ANTES de chamar a API
     fields_to_generate = []
     fields_to_skip = set()
     for field in fields:
@@ -224,7 +219,6 @@ async def enrich_listing_with_ai(
         else:
             fields_to_generate.append(field)
 
-    # Só chama a API se houver pelo menos um campo para gerar
     output: Optional[AIEnrichmentOutput] = None
     if fields_to_generate:
         source_content = "\n\n".join([

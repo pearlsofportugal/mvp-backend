@@ -11,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
-    from app.models.listing import Listing
+    from app.models.listing_model import Listing
 
 
 class PriceHistory(Base):
@@ -27,7 +27,6 @@ class PriceHistory(Base):
     price_currency: Mapped[str] = mapped_column(String(3), default="EUR")
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Relationship
     listing: Mapped["Listing"] = relationship(back_populates="price_history")
 
     def __repr__(self) -> str:

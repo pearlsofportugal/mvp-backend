@@ -24,11 +24,10 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from app.api.deps import get_db
-from app.models.listing import Listing
+from app.models.listing_model import Listing
 
 router = APIRouter()
 
-# Limite de segurança para exportação Excel (carregado inteiro em memória)
 _EXCEL_MAX_ROWS = 5_000
 
 
@@ -102,7 +101,6 @@ def _listing_to_dict(listing: Listing) -> dict:
     }
 
 
-# Nomes das colunas — definidos uma vez para garantir ordem consistente
 _CSV_FIELDNAMES = list(_listing_to_dict.__annotations__.keys()) if hasattr(_listing_to_dict, '__annotations__') else None
 
 
@@ -136,7 +134,6 @@ async def _csv_row_generator(db: AsyncSession, query) -> AsyncIterator[str]:
                 output.truncate(0)
 
     if first:
-        # Sem resultados — emitir CSV vazio
         yield ""
 
 
@@ -262,13 +259,11 @@ async def export_excel(
                         if val_len > max_length:
                             max_length = val_len
                 except (TypeError, ValueError):
-                    # FIX: bare except substituído por exceções específicas
                     pass
 
             adjusted_width = min(max_length + 2, 50)
             ws.column_dimensions[column_letter].width = adjusted_width
 
-        # Aviso no rodapé se o resultado foi truncado
         if len(listings) == _EXCEL_MAX_ROWS:
             ws.append([f"[Resultado truncado a {_EXCEL_MAX_ROWS} registos. Usa /csv ou /json para exportação completa.]"])
     else:

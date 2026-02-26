@@ -8,9 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.core.exceptions import DuplicateError, NotFoundError
-from app.models.site_config import SiteConfig
+from app.models.site_config_model import SiteConfig
 from app.schemas.base_schema import ApiResponse
-from app.schemas.site_config import SiteConfigCreate, SiteConfigRead, SiteConfigUpdate
+from app.schemas.site_config_schema import SiteConfigCreate, SiteConfigRead, SiteConfigUpdate
 from app.api.responses import ok
 from app.schemas.preview_schema import (
     PreviewListingRequest,
@@ -20,9 +20,6 @@ from app.schemas.preview_schema import (
 )
 from app.services.preview_service import preview_listing_detail, preview_listing_page
 router = APIRouter()
-# ─────────────────────────────────────────────
-# PREVIEW ENDPOINTS (sem DB — testam seletores)
-# ─────────────────────────────────────────────
 
 @router.post("/preview/listing", response_model=ApiResponse[PreviewListingResponse])
 async def preview_listing_endpoint(payload: PreviewListingRequest, request: Request):
@@ -92,7 +89,6 @@ async def create_site(payload: SiteConfigCreate, request: Request, db: AsyncSess
     
     If a deactivated site with the same key exists, it will be reactivated and updated.
     """
-    # Check for existing site (active or inactive)
     existing = await db.execute(select(SiteConfig).where(SiteConfig.key == payload.key))
     existing_site = existing.scalar_one_or_none()
     
@@ -100,7 +96,6 @@ async def create_site(payload: SiteConfigCreate, request: Request, db: AsyncSess
         if existing_site.is_active:
             raise DuplicateError(f"Site config with key '{payload.key}' already exists")
         
-        # Reactivate and update the existing deactivated site
         update_data = payload.model_dump()
         for field, value in update_data.items():
             setattr(existing_site, field, value)

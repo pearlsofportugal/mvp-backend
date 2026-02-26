@@ -48,9 +48,7 @@ async def lifespan(app: FastAPI):
             "Define API_KEY no .env antes de ir a produção."
         )
 
-    # Inicializar cache do parser com os field mappings da DB.
-    # Garante que o cache está pronto antes do primeiro job de scraping arrancar,
-    # evitando que o primeiro job use sempre os defaults hardcoded.
+
     try:
         from app.services.parser_service import init_parser_cache
         await init_parser_cache()
@@ -62,7 +60,6 @@ async def lifespan(app: FastAPI):
             str(e),
         )
 
-    # Inicializar cache do mapper com os currency mappings da DB.
     try:
         from app.services.mapper_service import init_mapper_cache
         await init_mapper_cache()
@@ -159,9 +156,7 @@ def create_app() -> FastAPI:
             ).model_dump(),
         )
 
-    # Todos os routers protegidos com RequireApiKey.
-    # /health fica público — necessário para Docker healthchecks e monitorização.
-    # /docs e /redoc ficam públicos — para desenvolvimento local.
+
     _auth = [RequireApiKey]
 
     application.include_router(listings_router, prefix="/api/v1/listings", tags=["listings"], dependencies=_auth)

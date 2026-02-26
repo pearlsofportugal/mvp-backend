@@ -41,19 +41,15 @@ from app.schemas.property_schema import (
 logger = get_logger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════
-# Configuration Cache
-# ═══════════════════════════════════════════════════════════
+
 
 _CURRENCY_MAP_CACHE: Dict[str, str] = {}
 _CACHE_TIMESTAMP: Optional[datetime] = None
-_CACHE_TTL_SECONDS = 300  # 5 minutes
+_CACHE_TTL_SECONDS = 300  
 
-# Lock para proteger a recarga do cache contra race conditions
-# (múltiplos coroutines a tentar recarregar simultaneamente)
+
 _cache_lock = asyncio.Lock()
 
-# Default fallback currency mappings
 _DEFAULT_CURRENCY_MAP = {
     "€": "EUR",
     "eur": "EUR",
@@ -80,7 +76,6 @@ async def _load_currency_map() -> None:
 
     now = datetime.now(timezone.utc)
 
-    # Fast path: verificar TTL antes de adquirir o lock
     if (
         _CACHE_TIMESTAMP
         and _CURRENCY_MAP_CACHE
@@ -89,7 +84,6 @@ async def _load_currency_map() -> None:
         return
 
     async with _cache_lock:
-        # Double-check após adquirir o lock (outro coroutine pode ter carregado entretanto)
         now = datetime.now(timezone.utc)
         if (
             _CACHE_TIMESTAMP
@@ -100,7 +94,7 @@ async def _load_currency_map() -> None:
 
         try:
             from sqlalchemy import select
-            from app.models.field_mapping import CharacterMapping
+            from app.models.field_mapping_model import CharacterMapping
 
             async with async_session_factory() as db:
                 result = await db.execute(
@@ -113,7 +107,6 @@ async def _load_currency_map() -> None:
 
                 if mappings:
                     currency_map = {m.source_chars: m.target_chars for m in mappings}
-                    # Adicionar variantes em lowercase
                     extended_map: Dict[str, str] = {}
                     for k, v in currency_map.items():
                         extended_map[k] = v
@@ -127,8 +120,7 @@ async def _load_currency_map() -> None:
         except Exception as e:
             logger.warning("Could not load currency map from DB: %s. Using defaults.", str(e))
 
-        # Fallback para defaults — atualiza o timestamp para evitar retry loop
-        # se a DB estiver em baixo (evita tentar recarregar a cada chamada)
+
         _CURRENCY_MAP_CACHE = _DEFAULT_CURRENCY_MAP.copy()
         _CACHE_TIMESTAMP = now
 
@@ -157,7 +149,6 @@ async def init_mapper_cache() -> None:
     await _load_currency_map()
 
 
-# ───────── Price Parsing ─────────
 
 _PRICE_PATTERN = re.compile(r"[\d\s.,]+")
 
@@ -167,35 +158,27 @@ def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
     if not raw:
         return None, None
 
-    # Extract numeric part
     match = _PRICE_PATTERN.search(raw)
     if not match:
         return None, None
 
     num_str = match.group().strip()
 
-    # Normalizar espaços antes de qualquer outro processamento
     num_str = num_str.replace(" ", "")
 
-    # Normalize: handle European decimal notation
-    # "250.000" → "250000", "1.234,56" → "1234.56"
+
     if "," in num_str and "." in num_str:
-        # European format: 1.234,56
         num_str = num_str.replace(".", "").replace(",", ".")
     elif "," in num_str:
         parts = num_str.split(",")
         if len(parts[-1]) == 2:
-            # Likely decimal: 250,00
             num_str = num_str.replace(",", ".")
         else:
-            # Likely thousands: 250,000
             num_str = num_str.replace(",", "")
     elif "." in num_str:
         parts = num_str.split(".")
         if all(len(p) == 3 for p in parts[1:]):
-            # All groups after the first are 3 digits → thousand separators: 1.250.000
             num_str = num_str.replace(".", "")
-        # else: single dot like 1250.50 — leave as-is (decimal)
 
     try:
         amount = Decimal(num_str)
@@ -203,9 +186,8 @@ def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
         logger.warning("Failed to parse price amount from: '%s'", raw)
         return None, None
 
-    # Extract currency (from cache)
     currency_map = _get_currency_map()
-    currency = "EUR"  # Default
+    currency = "EUR"  
     raw_lower = raw.lower()
     for symbol, code in currency_map.items():
         if symbol in raw_lower or symbol in raw:
@@ -215,7 +197,6 @@ def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
     return amount, currency
 
 
-# ───────── Area Parsing ─────────
 
 _AREA_PATTERN = re.compile(r"([\d\s.,]+)\s*m[²2]?", re.IGNORECASE)
 
@@ -242,7 +223,6 @@ def parse_area(raw: Optional[str]) -> Optional[float]:
         return None
 
 
-# ───────── Integer Parsing ─────────
 
 def parse_int(raw: Optional[str]) -> Optional[int]:
     """Parse integer from string, handling 'T3' → 3 for typology."""
@@ -254,7 +234,6 @@ def parse_int(raw: Optional[str]) -> Optional[int]:
     return None
 
 
-# ───────── Boolean Mapping ─────────
 
 def parse_bool(raw: Optional[str]) -> Optional[bool]:
     """Map 'Yes'/truthy values to True, None/empty to None."""
@@ -270,7 +249,6 @@ def parse_bool(raw: Optional[str]) -> Optional[bool]:
     return None
 
 
-# ───────── Date Parsing ─────────
 
 _DATE_FORMATS = [
     "%Y-%m-%d",
@@ -295,7 +273,6 @@ def parse_date(raw: Optional[str]) -> Optional[datetime]:
     return None
 
 
-# ───────── Typology → Bedrooms ─────────
 
 def typology_to_bedrooms(typology: Optional[str]) -> Optional[int]:
     """Extract bedrooms from typology string: 'T3' → 3, 'T0' → 0."""
@@ -307,7 +284,6 @@ def typology_to_bedrooms(typology: Optional[str]) -> Optional[int]:
     return None
 
 
-# ───────── Price per m² Calculation ─────────
 
 def calculate_price_per_m2(
     price_amount: Optional[Decimal],
@@ -319,7 +295,6 @@ def calculate_price_per_m2(
     return None
 
 
-# ───────── Partner Normalizers ─────────
 
 def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
     """Normalize a raw Pearls of Portugal payload into canonical PropertySchema."""
@@ -332,9 +307,8 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
     if bedrooms is None:
         bedrooms = typology_to_bedrooms(raw.get("typology"))
     
-    # Map business_type to listing_type
     business_type = (raw.get("business_type") or "").lower().strip()
-    listing_type = "sale"  # Default
+    listing_type = "sale"  
     if business_type in ("rent", "rental", "arrendar", "arrendamento"):
         listing_type = "rent"
     elif business_type in ("buy", "sale", "venda", "comprar"):
@@ -396,7 +370,6 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
         raw_partner_payload=raw,
     )
 
-# ───────── Dispatcher ─────────
 
 _PARTNER_NORMALIZERS = {
     "pearls": normalize_pearls_payload,
@@ -411,7 +384,6 @@ def normalize_partner_payload(raw: Dict[str, Any], partner: str) -> PropertySche
     return normalizer(raw)
 
 
-# ───────── PropertySchema → DB model fields ─────────
 
 def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: Optional[UUID] = None) -> Dict[str, Any]:
     """Convert a canonical PropertySchema to a dict suitable for creating a Listing ORM model."""

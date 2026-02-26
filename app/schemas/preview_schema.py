@@ -25,7 +25,7 @@ class FieldPreviewResult(BaseModel):
     field: str
     raw_value: Optional[str]
     mapped_to: Optional[str]
-    status: str  # "ok" | "empty" | "error"
+    status: str  
 
 
 class PreviewListingResponse(BaseModel):

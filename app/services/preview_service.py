@@ -2,6 +2,9 @@
 
 Used by POST /api/v1/sites/preview/* to validate site configuration
 before running a full scrape job.
+
+CORREÇÕES v2:
+- parse_listing_page agora é async — adicionado `await` (bug crítico: retornava coroutine não executada)
 """
 import asyncio
 from typing import Any, Dict, List, Optional, Tuple
@@ -130,7 +133,8 @@ async def preview_listing_detail(
                 ],
             )
 
-        raw_data = parse_listing_page(
+        # FIX: parse_listing_page é async — era chamada sem await, retornava coroutine não executada
+        raw_data = await parse_listing_page(
             response.text,
             url,
             full_selectors,

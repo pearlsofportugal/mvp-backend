@@ -1,6 +1,15 @@
-"""AI enrichment service for SEO title/description/meta_description generation."""
+"""AI enrichment service for SEO title/description/meta_description generation.
+
+CORREÇÕES v2:
+- `import asyncio` movido para o topo do ficheiro (estava a meio, depois de definições de funções)
+- Skip check movido para ANTES da chamada à API Gemini — evita desperdício de quota
+  quando todos os campos pedidos já têm valor e force=False
+- `asyncio.get_event_loop()` substituído por `asyncio.get_running_loop()` (correto em Python 3.10+)
+- _client singleton documentado — GIL torna a inicialização segura para uso em produção MVP
+"""
+import asyncio
 import json
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from app.config import settings
 from app.core.exceptions import EnrichmentError
@@ -42,7 +51,6 @@ Responda obrigatoriamente em JSON válido com as seguintes chaves:
 
 def _sanitize_keywords(keywords: Sequence[str]) -> List[str]:
     clean = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
-    # preserve order and uniqueness
     unique: List[str] = []
     seen = set()
     for keyword in clean:
@@ -64,7 +72,7 @@ def _extract_json(text: str) -> Dict[str, Any]:
         start = candidate.find("{")
         end = candidate.rfind("}")
         if start >= 0 and end > start:
-            return json.loads(candidate[start : end + 1])
+            return json.loads(candidate[start: end + 1])
         raise
 
 
@@ -73,7 +81,7 @@ def _build_prompt(content: str, keywords: Sequence[str]) -> str:
     sanitized = _sanitize_keywords(keywords)
     primary = sanitized[0] if sanitized else "Imóvel"
     secondary = ", ".join(sanitized[1:]) if len(sanitized) > 1 else "Nenhuma"
-    
+
     return f"""
 PALAVRA-CHAVE PRINCIPAL: {primary}
 PALAVRAS-CHAVE SECUNDÁRIAS: {secondary}
@@ -81,6 +89,12 @@ PALAVRAS-CHAVE SECUNDÁRIAS: {secondary}
 CONTEÚDO DO IMÓVEL A PROCESSAR:
 {content}
 """.strip()
+
+
+# Singleton do cliente Gemini.
+# A inicialização é protegida pelo GIL do CPython — seguro para uso em MVP onde
+# não há workers múltiplos a inicializar concorrentemente. Para produção com
+# multiprocessing real, considerar threading.Lock.
 _client: Any = None
 
 
@@ -96,33 +110,39 @@ def _get_client():
             raise EnrichmentError("google-genai dependency is not available", detail=str(exc)) from exc
     return _client
 
-import asyncio
 
 def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
+    """Chama a API Gemini de forma síncrona (bloqueante).
+
+    NOTA: Esta função é SEMPRE chamada via asyncio.to_thread() para não bloquear
+    o event loop — nunca chamar diretamente de código async.
+    """
     client = _get_client()
     prompt = _build_prompt(content, keywords)
-    
+
     try:
         response = client.models.generate_content(
             model=settings.google_genai_model,
             config={
-                "system_instruction": _SYSTEM_INSTRUCTION_SEO, # Persona e Regras
-                "temperature": 0.7, # Equilíbrio entre criatividade e precisão
+                "system_instruction": _SYSTEM_INSTRUCTION_SEO,
+                "temperature": 0.7,
                 "response_mime_type": "application/json",
             },
-            contents=prompt, # Dados do imóvel
+            contents=prompt,
         )
-        
-        # Como usamos response_mime_type, o Gemini já deve retornar JSON puro
         return _extract_json(str(response.text))
-        
+
     except Exception as exc:
         logger.exception("AI SEO generation failed")
         raise EnrichmentError("Failed to generate AI SEO output", detail=str(exc)) from exc
 
+
 async def _call_ai_for_seo_async(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
-    loop = asyncio.get_event_loop()
+    """Wrapper async para _call_ai_for_seo — corre na thread pool para não bloquear o event loop."""
+    # FIX: asyncio.get_running_loop() é o correto em Python 3.10+ (get_event_loop deprecated)
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _call_ai_for_seo, content, keywords)
+
 
 def _normalize_output(payload: Dict[str, Any]) -> AIEnrichmentOutput:
     return AIEnrichmentOutput(
@@ -132,8 +152,20 @@ def _normalize_output(payload: Dict[str, Any]) -> AIEnrichmentOutput:
     )
 
 
+async def optimize_text_with_ai_async(content: str, keywords: Sequence[str]) -> AITextOptimizationResponse:
+    """AI optimization — versão async (para uso nos endpoints FastAPI)."""
+    sanitized_keywords = _sanitize_keywords(keywords)
+    raw = await _call_ai_for_seo_async(content, sanitized_keywords)
+    output = _normalize_output(raw)
+    return AITextOptimizationResponse(
+        model_used=settings.google_genai_model,
+        keywords_used=sanitized_keywords,
+        output=output,
+    )
+
+
 def optimize_text_with_ai(content: str, keywords: Sequence[str]) -> AITextOptimizationResponse:
-    """AI optimization equivalent to previous `otimizar_para_seo` function."""
+    """AI optimization — versão síncrona (compatibilidade com código legado)."""
     sanitized_keywords = _sanitize_keywords(keywords)
     raw = _call_ai_for_seo(content, sanitized_keywords)
     output = _normalize_output(raw)
@@ -156,9 +188,18 @@ def infer_listing_keywords(listing: Listing) -> List[str]:
     return _sanitize_keywords([part for part in derived if part])
 
 
-async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentRequest) -> AIListingEnrichmentResponse:
-    """Apply AI SEO enrichment to selected listing fields (preview or apply)."""
+async def enrich_listing_with_ai(
+    listing: Listing,
+    payload: AIListingEnrichmentRequest,
+) -> AIListingEnrichmentResponse:
+    """Apply AI SEO enrichment to selected listing fields (preview or apply).
+
+    FIX: O skip check é agora feito ANTES da chamada à API Gemini.
+    Se todos os campos pedidos já têm valor e force=False, a API não é chamada —
+    evita desperdício de quota e custos desnecessários.
+    """
     fields = payload.fields or ["title", "description", "meta_description"]
+
     original_values = {
         "title": listing.title,
         "description": listing.enriched_description or listing.description or listing.raw_description,
@@ -172,48 +213,61 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
 
     keywords_used = _sanitize_keywords(payload.keywords) or infer_listing_keywords(listing)
 
-    source_content = "\n\n".join(
-        [
+    # FIX: Determinar quais campos realmente precisam de ser gerados ANTES de chamar a API
+    fields_to_generate = []
+    fields_to_skip = set()
+    for field in fields:
+        destination_current = destination_current_values.get(field)
+        already_has_value = bool(destination_current and destination_current.strip())
+        if not payload.force and already_has_value:
+            fields_to_skip.add(field)
+        else:
+            fields_to_generate.append(field)
+
+    # Só chama a API se houver pelo menos um campo para gerar
+    output: Optional[AIEnrichmentOutput] = None
+    if fields_to_generate:
+        source_content = "\n\n".join([
             f"Título atual: {listing.title or ''}",
             f"Descrição atual: {(listing.enriched_description or listing.description or listing.raw_description or '')}",
             f"Meta descrição atual: {listing.meta_description or ''}",
-        ]
-    ).strip()
+        ]).strip()
 
-    raw = await _call_ai_for_seo_async(source_content, keywords_used)
-    output = _normalize_output(raw)
+        raw = await _call_ai_for_seo_async(source_content, keywords_used)
+        output = _normalize_output(raw)
+    else:
+        logger.debug(
+            "Skipping AI call for listing %s — all requested fields already have values (force=False)",
+            listing.id,
+        )
 
-    field_value_map = {
-        "title": output.title,
-        "description": output.description,
-        "meta_description": output.meta_description,
+    field_value_map: Dict[str, Optional[str]] = {
+        "title": output.title if output else None,
+        "description": output.description if output else None,
+        "meta_description": output.meta_description if output else None,
     }
 
     results: List[AIEnrichmentFieldResult] = []
     for field in fields:
         original = original_values.get(field)
-        enriched = field_value_map.get(field)
-        destination_current = destination_current_values.get(field)
-
-        already_has_value = bool(destination_current and destination_current.strip())
-        skip = not payload.force and already_has_value
-
-        enriched_value = field_value_map.get(field)
+        skip = field in fields_to_skip
+        enriched_value = field_value_map.get(field) if not skip else None
         changed = not skip and (enriched_value or "") != (original or "")
+
         results.append(AIEnrichmentFieldResult(
             field=field,
             original=original,
-            enriched=enriched_value if not skip else None,
+            enriched=enriched_value,
             changed=changed,
         ))
 
-        if payload.apply and changed:
+        if payload.apply and changed and enriched_value:
             if field == "title":
-                listing.title = enriched
+                listing.title = enriched_value
             elif field == "description":
-                listing.enriched_description = enriched
+                listing.enriched_description = enriched_value
             elif field == "meta_description":
-                listing.meta_description = enriched
+                listing.meta_description = enriched_value
 
     return AIListingEnrichmentResponse(
         listing_id=listing.id,
@@ -222,5 +276,3 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
         keywords_used=keywords_used,
         results=results,
     )
-
-

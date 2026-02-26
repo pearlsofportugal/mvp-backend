@@ -1,5 +1,12 @@
 """AI enrichment API router — optimize text and selected listing fields with AI.
-/api/v1/enrichment/ai"""
+/api/v1/enrichment/ai
+
+CORREÇÕES v2:
+- `import asyncio` movido para o topo do ficheiro (estava a meio dos imports)
+- `optimize_text` usa agora `optimize_text_with_ai_async` diretamente (já é async)
+  em vez de `loop.run_in_executor` com `asyncio.get_event_loop()` (deprecated)
+"""
+import asyncio
 from typing import Optional
 from uuid import UUID
 
@@ -22,16 +29,20 @@ from app.schemas.ai_enrichment import (
     EnrichmentStats,
 )
 from app.schemas.base_schema import ApiResponse
-from app.services.ai_enrichment_service import enrich_listing_with_ai, optimize_text_with_ai
-import asyncio
+from app.services.ai_enrichment_service import (
+    enrich_listing_with_ai,
+    optimize_text_with_ai_async,
+)
+
 router = APIRouter()
 
 
 @router.post("/optimize", response_model=ApiResponse[AITextOptimizationResponse])
 async def optimize_text(payload: AITextOptimizationRequest, request: Request):
     """Optimize free text with AI SEO logic."""
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, optimize_text_with_ai, payload.content, payload.keywords)
+    # FIX: usa optimize_text_with_ai_async (já corre em thread pool internamente)
+    # em vez de loop.run_in_executor com asyncio.get_event_loop() (deprecated em Python 3.10+)
+    result = await optimize_text_with_ai_async(payload.content, payload.keywords)
     if payload.fields:
         filtered = result.output.model_dump(include=set(payload.fields))
         result.output = AIEnrichmentOutput.model_validate(filtered)
@@ -101,7 +112,6 @@ async def enrichment_stats(
     source_partner: Optional[str] = Query(None, description="Filter stats by source partner"),
 ):
     """Aggregated enrichment statistics across all listings."""
-    # Total de listings (com filtro opcional por source_partner)
     total_query = select(func.count(Listing.id))
     enriched_query = select(func.count(Listing.id)).where(
         Listing.enriched_description.isnot(None)

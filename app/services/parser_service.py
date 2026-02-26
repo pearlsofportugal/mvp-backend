@@ -7,14 +7,19 @@ Supports two extraction modes:
 CONFIGURATION:
   - Field name translations loaded from 'field_mappings' table
   - Feature detection keywords loaded from 'field_mappings' table (type='feature')
-  - Configurations are cached with TTL for performance
+  - Cache is loaded at application startup via init_parser_cache() (called in lifespan)
+  - Cache is also refreshed lazily on parse_listing_page() calls (TTL-based)
 
-FIXES (v2):
-  - Added divisions_section support (extracts bedrooms/bathrooms from icon+name+value layout)
-  - Fixed energy certificate extraction from <img> src when no text value exists
-  - Added "business type" / "business state" to _DEFAULT_FIELD_MAP
-  - _extract_name_value_pairs now falls back to img.icon alt/src when value_el is empty
+MELHORIAS v2:
+  - _load_field_mappings() chamada no startup via init_parser_cache() e lazy na parse
+  - asyncio.Lock protege a recarga do cache contra race conditions
+  - Lookup do field_map convertido de O(n×m) para O(n) via índice invertido por token
+  - parse_listing_card() (dead code) removida — funcionalidade mantida em _parse_listing_card_soup()
+  - Fallback str(soup) no pattern matching tornado opt-in via 'text_pattern_search_html' selector flag
+  - Campo 'details_section = body' documentado explicitamente
+  - Paridade de campos entre modos section e direct (description, advertiser, etc.)
 """
+import asyncio
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -34,17 +39,26 @@ logger = get_logger(__name__)
 
 _FIELD_MAP_CACHE: Dict[str, str] = {}
 _FEATURE_MAP_CACHE: Dict[str, str] = {}
+
+# Índice invertido: token (palavra) → lista de (source_key, target_field)
+# Permite lookup O(1) por token em vez de iterar todo o field_map por item HTML.
+_FIELD_TOKEN_INDEX: Dict[str, List[tuple[str, str]]] = {}
+
 _CACHE_TIMESTAMP: Optional[datetime] = None
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
+# Lock para proteger a recarga do cache contra race conditions
+# (múltiplos coroutines a tentar carregar simultaneamente)
+_cache_lock = asyncio.Lock()
+
 # Default fallback mappings (used if DB is unavailable)
-_DEFAULT_FIELD_MAP = {
+_DEFAULT_FIELD_MAP: Dict[str, str] = {
     # Price
     "price": "price",
     "preço": "price",
     "valor": "price",
 
-    # Business type — FIX: added "business type" and "business state"
+    # Business type
     "business type": "business_type",
     "business state": "business_state",
     "tipo de negócio": "business_type",
@@ -100,7 +114,7 @@ _DEFAULT_FIELD_MAP = {
     "ref": "property_id",
 }
 
-_DEFAULT_FEATURE_MAP = {
+_DEFAULT_FEATURE_MAP: Dict[str, str] = {
     "garage": "garage",
     "garagem": "garage",
     "parking": "garage",
@@ -124,12 +138,66 @@ _DEFAULT_FEATURE_MAP = {
 }
 
 
+def _build_token_index(field_map: Dict[str, str]) -> Dict[str, List[tuple[str, str]]]:
+    """Constrói um índice invertido por token para lookup O(1).
+
+    Para cada source_key do field_map, extrai os tokens individuais (palavras)
+    e mapeia cada token para (source_key, target_field). Assim, ao processar um
+    nome HTML, basta tokenizar e fazer lookup direto em vez de iterar todo o mapa.
+
+    Exemplo:
+      "casas de banho" → bathrooms
+      Gera tokens: "casas", "de", "banho" → todos apontam para "bathrooms"
+      Mas a correspondência final verifica se o source_key COMPLETO está no nome,
+      garantindo que "de" sozinho não faça match indesejado.
+    """
+    index: Dict[str, List[tuple[str, str]]] = {}
+    for source_key, target_field in field_map.items():
+        # Indexar cada token do source_key
+        for token in source_key.split():
+            if token not in index:
+                index[token] = []
+            index[token].append((source_key, target_field))
+    return index
+
+
+def _lookup_field(name: str, field_map: Dict[str, str], token_index: Dict[str, List[tuple[str, str]]]) -> Optional[str]:
+    """Lookup O(n_tokens) do field_map para um nome HTML.
+
+    1. Tokeniza o nome HTML.
+    2. Para cada token, consulta o índice invertido para obter candidatos.
+    3. Verifica se o source_key completo do candidato está contido no nome.
+    4. Retorna o primeiro target_field que fizer match.
+
+    Esta abordagem é substancialmente mais rápida que iterar todo o field_map
+    (O(m)) para cada item HTML, especialmente com field_maps grandes vindos de DB.
+    """
+    tokens = name.split()
+    seen_sources: set[str] = set()
+
+    for token in tokens:
+        candidates = token_index.get(token, [])
+        for source_key, target_field in candidates:
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+            if source_key in name:
+                return target_field
+
+    return None
+
+
 async def _load_field_mappings() -> None:
-    """Load field mappings from DB with caching."""
-    global _FIELD_MAP_CACHE, _FEATURE_MAP_CACHE, _CACHE_TIMESTAMP
+    """Carrega os field mappings da DB com caching e protecção contra race conditions.
+
+    Usa asyncio.Lock para garantir que apenas um coroutine recarrega o cache de
+    cada vez — essencial quando múltiplos jobs correm concorrentemente.
+    """
+    global _FIELD_MAP_CACHE, _FEATURE_MAP_CACHE, _FIELD_TOKEN_INDEX, _CACHE_TIMESTAMP
 
     now = datetime.now(timezone.utc)
 
+    # Fast path: verificar TTL antes de adquirir o lock
     if (
         _CACHE_TIMESTAMP
         and _FIELD_MAP_CACHE
@@ -137,62 +205,88 @@ async def _load_field_mappings() -> None:
     ):
         return
 
-    try:
-        from sqlalchemy import select
-        from app.models.field_mapping import FieldMapping
+    async with _cache_lock:
+        # Double-check após adquirir o lock (outro coroutine pode ter carregado entretanto)
+        now = datetime.now(timezone.utc)
+        if (
+            _CACHE_TIMESTAMP
+            and _FIELD_MAP_CACHE
+            and (now - _CACHE_TIMESTAMP).total_seconds() < _CACHE_TTL_SECONDS
+        ):
+            return
 
-        async with async_session_factory() as db:
-            result = await db.execute(
-                select(FieldMapping).where(FieldMapping.is_active.is_(True))
-            )
-            mappings = result.scalars().all()
+        try:
+            from sqlalchemy import select
+            from app.models.field_mapping import FieldMapping
 
-            field_map = {}
-            feature_map = {}
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(FieldMapping).where(FieldMapping.is_active.is_(True))
+                )
+                mappings = result.scalars().all()
 
-            for m in mappings:
-                if m.mapping_type == "field":
-                    field_map[m.source_name.lower()] = m.target_field
-                elif m.mapping_type == "feature":
-                    feature_map[m.source_name.lower()] = m.target_field
+                field_map: Dict[str, str] = {}
+                feature_map: Dict[str, str] = {}
 
-            if field_map:
-                _FIELD_MAP_CACHE = field_map
-            if feature_map:
-                _FEATURE_MAP_CACHE = feature_map
+                for m in mappings:
+                    if m.mapping_type == "field":
+                        field_map[m.source_name.lower()] = m.target_field
+                    elif m.mapping_type == "feature":
+                        feature_map[m.source_name.lower()] = m.target_field
 
-            _CACHE_TIMESTAMP = now
-            logger.debug(
-                "Loaded %d field mappings and %d feature mappings from DB",
-                len(field_map),
-                len(feature_map),
-            )
+                if field_map:
+                    _FIELD_MAP_CACHE = field_map
+                    _FIELD_TOKEN_INDEX = _build_token_index(field_map)
+                if feature_map:
+                    _FEATURE_MAP_CACHE = feature_map
 
-    except Exception as e:
-        logger.warning("Could not load field mappings from DB: %s. Using defaults.", str(e))
-        _FIELD_MAP_CACHE = _DEFAULT_FIELD_MAP.copy()
-        _FEATURE_MAP_CACHE = _DEFAULT_FEATURE_MAP.copy()
+                _CACHE_TIMESTAMP = now
+                logger.debug(
+                    "Loaded %d field mappings and %d feature mappings from DB",
+                    len(field_map),
+                    len(feature_map),
+                )
+
+        except Exception as e:
+            logger.warning("Could not load field mappings from DB: %s. Using defaults.", str(e))
+            _FIELD_MAP_CACHE = _DEFAULT_FIELD_MAP.copy()
+            _FEATURE_MAP_CACHE = _DEFAULT_FEATURE_MAP.copy()
+            _FIELD_TOKEN_INDEX = _build_token_index(_FIELD_MAP_CACHE)
+            _CACHE_TIMESTAMP = now  # evitar retry contínuo se a DB estiver em baixo
 
 
 def _get_field_map() -> Dict[str, str]:
-    if _FIELD_MAP_CACHE:
-        return _FIELD_MAP_CACHE
-    return _DEFAULT_FIELD_MAP
+    return _FIELD_MAP_CACHE if _FIELD_MAP_CACHE else _DEFAULT_FIELD_MAP
 
 
 def _get_feature_map() -> Dict[str, str]:
-    if _FEATURE_MAP_CACHE:
-        return _FEATURE_MAP_CACHE
-    return _DEFAULT_FEATURE_MAP
+    return _FEATURE_MAP_CACHE if _FEATURE_MAP_CACHE else _DEFAULT_FEATURE_MAP
 
 
-def invalidate_parser_cache():
-    """Clear the parser configuration cache (call after config updates)."""
-    global _FIELD_MAP_CACHE, _FEATURE_MAP_CACHE, _CACHE_TIMESTAMP
+def _get_token_index() -> Dict[str, List[tuple[str, str]]]:
+    if _FIELD_TOKEN_INDEX:
+        return _FIELD_TOKEN_INDEX
+    # Fallback: construir índice a partir dos defaults (sem guardar em cache global)
+    return _build_token_index(_DEFAULT_FIELD_MAP)
+
+
+def invalidate_parser_cache() -> None:
+    """Limpa o cache do parser (chamar após atualizações de config na DB)."""
+    global _FIELD_MAP_CACHE, _FEATURE_MAP_CACHE, _FIELD_TOKEN_INDEX, _CACHE_TIMESTAMP
     _FIELD_MAP_CACHE = {}
     _FEATURE_MAP_CACHE = {}
+    _FIELD_TOKEN_INDEX = {}
     _CACHE_TIMESTAMP = None
     logger.info("Parser configuration cache invalidated")
+
+
+async def init_parser_cache() -> None:
+    """Inicializa o cache do parser carregando os field mappings da DB.
+
+    Deve ser chamada no startup da aplicação (lifespan) para garantir que o
+    cache está pronto antes do primeiro job de scraping arrancar.
+    """
+    await _load_field_mappings()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -204,12 +298,12 @@ def parse_listing_links(
     base_url: str,
     selectors: Dict[str, Any],
 ) -> List[str]:
-    """Extract listing page URLs from a listing/search results page."""
+    """Extrai URLs de listings de uma página de resultados de pesquisa."""
     soup = BeautifulSoup(html, "lxml")
     link_selector = selectors.get("listing_link_selector", "a")
     link_pattern = selectors.get("listing_link_pattern")
 
-    links = []
+    links: List[str] = []
     for a_tag in soup.select(link_selector):
         href = a_tag.get("href")
         if not href:
@@ -231,7 +325,7 @@ def parse_next_page(
     base_url: str,
     selectors: Dict[str, Any],
 ) -> Optional[str]:
-    """Extract the next page URL from pagination."""
+    """Extrai a URL da próxima página a partir da paginação."""
     soup = BeautifulSoup(html, "lxml")
     next_selector = selectors.get("next_page_selector")
 
@@ -245,13 +339,21 @@ def parse_next_page(
     return None
 
 
-def parse_listing_page(
+async def parse_listing_page(
     html: str,
     url: str,
     selectors: Dict[str, Any],
     extraction_mode: str = "direct",
 ) -> Dict[str, Any]:
-    """Parse a single listing detail page into a raw dict."""
+    """Faz parse de uma página de detalhe de listing num dict raw.
+
+    NOTA: É async para poder fazer refresh do cache de field mappings se necessário.
+    O refresh é lazy (TTL-based) e protegido por lock — não bloqueia o event loop
+    porque a leitura da DB é async.
+    """
+    # Refresh do cache se necessário (lazy load + TTL check)
+    await _load_field_mappings()
+
     soup = BeautifulSoup(html, "lxml")
     data: Dict[str, Any] = {"url": url}
 
@@ -260,7 +362,7 @@ def parse_listing_page(
     else:
         data.update(_parse_direct_selectors(soup, selectors))
 
-    # Common extractions (both modes)
+    # Extrações comuns a ambos os modos
     data.update(_parse_images(soup, selectors, url))
     data.update(_parse_seo(soup))
 
@@ -272,7 +374,7 @@ def parse_listing_page(
 # ═══════════════════════════════════════════════════════════
 
 def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse using section-based extraction (name/value pairs)."""
+    """Parse via extração baseada em secções (pares nome/valor)."""
     data: Dict[str, Any] = {}
 
     # Title
@@ -307,13 +409,30 @@ def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict
                     data["raw_description"] = text
                     break
 
+    # Advertiser (paridade com modo direct)
+    adv_selector = selectors.get("advertiser_selector")
+    if adv_selector:
+        el = soup.select_one(adv_selector)
+        if el:
+            data["advertiser"] = el.get_text(strip=True)
+
+    adv_phone_selector = selectors.get("advertiser_phone_selector")
+    if adv_phone_selector:
+        el = soup.select_one(adv_phone_selector)
+        if el:
+            data["advertiser_phone"] = el.get_text(strip=True)
+
     # Text pattern extraction
     text_patterns = selectors.get("text_patterns", {})
     if text_patterns:
-        data.update(_extract_via_text_patterns(soup, text_patterns))
+        data.update(_extract_via_text_patterns(soup, text_patterns, selectors))
 
     # Details section (price, type, district, energy cert…)
     details_section = selectors.get("details_section")
+    # NOTA: details_section = "body" é ignorado intencionalmente.
+    # Usar "body" como selector extrairia name/value pairs de toda a página,
+    # o que causaria falsos positivos. Para extração de página inteira,
+    # usa text_patterns em vez disso.
     if details_section and details_section != "body":
         section = soup.select_one(details_section)
         if section:
@@ -333,9 +452,9 @@ def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict
                 if k not in data:
                     data[k] = v
 
-    # ── FIX: Divisions section (bedrooms / bathrooms / living rooms) ──────────
-    # Some sites (e.g. Pearls of Portugal) put bedrooms/bathrooms in a separate
-    # section#divisions with icon + .name + .value layout, not in section#details.
+    # Divisions section (bedrooms / bathrooms / living rooms)
+    # Alguns sites (ex: Pearls of Portugal) colocam quartos/casas de banho numa
+    # secção separada com layout icon + .name + .value, fora da secção de details.
     divisions_section = selectors.get("divisions_section")
     if divisions_section:
         section = soup.select_one(divisions_section)
@@ -348,9 +467,6 @@ def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict
     # Characteristics / features section
     chars_section = selectors.get("characteristics_section")
     if chars_section:
-        # soupsieve doesn't reliably support :last-of-type with ID selectors.
-        # Try the selector directly; if it fails, fall back to selecting all
-        # matching elements and taking the last one.
         section = _safe_select_one(soup, chars_section)
         if section:
             data.update(_extract_characteristics(section, selectors))
@@ -373,22 +489,18 @@ def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict
 
 
 def _safe_select_one(soup: BeautifulSoup, selector: str) -> Optional[Tag]:
-    """Select one element, with a fallback for pseudo-selectors that soupsieve
-    may not support reliably (e.g. :last-of-type combined with ID selectors).
+    """Seleciona um elemento com fallback para pseudo-selectors não suportados pelo soupsieve.
 
-    If the selector raises an error or returns nothing, falls back to selecting
-    all matches and returning the last one.
+    Se o selector falhar ou não retornar nada, seleciona todos os matches e retorna o último.
+    (Cobre casos como :last-of-type combinado com ID selectors.)
     """
     try:
         el = soup.select_one(selector)
         if el:
             return el
-        # If select_one returned None, try selecting all and taking last
-        # (handles :last-of-type / :first-of-type fallback)
         all_els = soup.select(selector)
         return all_els[-1] if all_els else None
     except Exception:
-        # Strip pseudo-class and retry with the base selector
         base_selector = re.sub(r':[a-z-]+(\([^)]*\))?', '', selector).strip()
         if base_selector and base_selector != selector:
             try:
@@ -404,15 +516,17 @@ def _safe_select_one(soup: BeautifulSoup, selector: str) -> Optional[Tag]:
 # ═══════════════════════════════════════════════════════════
 
 def _extract_name_value_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract name/value pairs from a details section.
+    """Extrai pares nome/valor de uma secção de detalhes.
 
-    FIX: When the value element is missing or empty (e.g. energy certificate
-    rendered as an <img> instead of text), falls back to reading the img src
-    and extracting the energy class letter via regex.
+    Usa o índice de tokens para lookup O(n_tokens) em vez de O(m) por item.
+
+    Fallback: quando o value element está ausente ou vazio (ex: energy certificate
+    renderizado como <img>), extrai a classe energética do src ou alt da imagem.
     """
-    data = {}
+    data: Dict[str, Any] = {}
     name_selector = selectors.get("detail_name_selector", ".name")
     value_selector = selectors.get("detail_value_selector", ".value")
+    token_index = _get_token_index()
     field_map = _get_field_map()
 
     items = section.select(selectors.get("detail_item_selector", ".detail"))
@@ -423,27 +537,21 @@ def _extract_name_value_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[s
 
         name = name_el.get_text(strip=True).lower()
 
-        # ── Try normal value element first ──
+        # Tentar value element primeiro
         value_el = item.select_one(value_selector)
         value = value_el.get_text(strip=True) if value_el else ""
 
-        # ── FIX: Fallback for energy certificate rendered as <img> ──────────
-        # e.g. <div class="detail">
-        #        <div class="name">Energy Certificate</div>
-        #        <img class="icon" src="/img/icons/energy/energy-d.png">
-        #      </div>
+        # Fallback: energy certificate renderizado como <img>
+        # Ex: <div class="name">Energy Certificate</div>
+        #     <img class="icon" src="/img/icons/energy/energy-d.png">
         if not value:
             img = item.select_one("img")
             if img:
-                # Try alt text first (e.g. alt="Energy Certificate D")
                 alt = (img.get("alt") or "").strip()
-                # Extract trailing letter A-G from alt
                 alt_match = re.search(r'\b([A-G])\b', alt, re.IGNORECASE)
                 if alt_match:
                     value = alt_match.group(1).upper()
                 else:
-                    # Fall back to parsing the src filename
-                    # e.g. "energy-d.png" or "energy_class_b.svg"
                     src = img.get("src") or img.get("data-src") or ""
                     src_match = re.search(r'energy[-_]([a-g])', src, re.IGNORECASE)
                     if src_match:
@@ -452,32 +560,31 @@ def _extract_name_value_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[s
         if not value:
             continue
 
-        # Map field name to canonical key
-        for key, field in field_map.items():
-            if key in name:
-                data[field] = value
-                break
+        # Lookup O(n_tokens) via índice invertido
+        target_field = _lookup_field(name, field_map, token_index)
+        if target_field:
+            data[target_field] = value
 
     return data
 
 
 def _extract_divisions(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract bedrooms/bathrooms/living rooms from a divisions section.
+    """Extrai quartos/casas de banho/salas de uma secção de divisões.
 
-    Pearls of Portugal layout:
+    Layout Pearls of Portugal:
       <div class="division">
         <img class="icon" src="...bedrooms.png">
         <div class="name">Bedrooms</div>
         <div class="value">5</div>
       </div>
 
-    Uses the same field_map as _extract_name_value_pairs so it works
-    for any language (Bedrooms / Quartos / Bathrooms / Casas de Banho).
+    Usa o mesmo field_map de _extract_name_value_pairs para suporte multilíngua.
     """
-    data = {}
+    data: Dict[str, Any] = {}
     item_selector = selectors.get("division_item_selector", "div.division")
     name_selector = selectors.get("division_name_selector", "div.name")
     value_selector = selectors.get("division_value_selector", "div.value")
+    token_index = _get_token_index()
     field_map = _get_field_map()
 
     for item in section.select(item_selector):
@@ -491,17 +598,16 @@ def _extract_divisions(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any
         if not value:
             continue
 
-        for key, field in field_map.items():
-            if key in name:
-                data[field] = value
-                break
+        target_field = _lookup_field(name, field_map, token_index)
+        if target_field:
+            data[target_field] = value
 
     return data
 
 
 def _extract_area_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract area measurements from an areas section."""
-    data = {}
+    """Extrai medidas de área de uma secção de áreas."""
+    data: Dict[str, Any] = {}
     items = section.select(selectors.get("area_item_selector", ".area"))
     name_selector = selectors.get("area_name_selector", ".name")
     value_selector = selectors.get("area_value_selector", ".value")
@@ -524,8 +630,8 @@ def _extract_area_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, An
 
 
 def _extract_characteristics(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract boolean characteristics/amenities from a features section."""
-    data = {}
+    """Extrai características booleanas (amenidades) de uma secção de features."""
+    data: Dict[str, Any] = {}
     items = section.select(selectors.get("char_item_selector", ".name"))
     feature_map = _get_feature_map()
 
@@ -544,7 +650,7 @@ def _extract_characteristics(section: Tag, selectors: Dict[str, Any]) -> Dict[st
 # ═══════════════════════════════════════════════════════════
 
 def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse using direct CSS selectors for each field."""
+    """Parse via CSS selectors diretos para cada campo."""
     data: Dict[str, Any] = {}
 
     simple_fields = {
@@ -565,6 +671,10 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
         "business_type_selector": "business_type",
         "price_per_m2_selector": "price_per_m2",
         "publication_date_selector": "publication_date",
+        # Advertiser (paridade com modo section)
+        "advertiser_selector": "advertiser",
+        "advertiser_phone_selector": "advertiser_phone",
+        "advertiser_email_selector": "advertiser_email",
     }
 
     for selector_key, field in simple_fields.items():
@@ -575,7 +685,7 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
         if el:
             data[field] = el.get_text(strip=True)
 
-    # Description (longer, needs length check)
+    # Description (requer verificação de comprimento mínimo)
     desc_selector = selectors.get("description_selector")
     if desc_selector:
         for selector in desc_selector.split(","):
@@ -586,12 +696,11 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
                     data["raw_description"] = text
                     break
 
-    # Property ID (may be in attribute, not text)
+    # Property ID (pode estar num atributo em vez de texto)
     prop_id_selector = selectors.get("property_id_selector")
     if prop_id_selector:
         el = soup.select_one(prop_id_selector)
         if el:
-            # Try text first, then common attributes
             text = el.get_text(strip=True)
             if text:
                 data["property_id"] = text
@@ -602,14 +711,7 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
                         data["property_id"] = val
                         break
 
-    # Advertiser
-    adv_selector = selectors.get("advertiser_selector")
-    if adv_selector:
-        el = soup.select_one(adv_selector)
-        if el:
-            data["advertiser"] = el.get_text(strip=True)
-
-    # Features — bulk via feature map
+    # Features — via feature map
     features_selector = selectors.get("features_selector")
     if features_selector:
         feature_map = _get_feature_map()
@@ -620,7 +722,7 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
                     data[mapped_field] = "Yes"
                     break
 
-    # Individual feature selectors
+    # Feature selectors individuais
     individual_features = {
         "garage_selector": "garage",
         "elevator_selector": "elevator",
@@ -637,7 +739,7 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
     # Text patterns
     text_patterns = selectors.get("text_patterns", {})
     if text_patterns:
-        data.update(_extract_via_text_patterns(soup, text_patterns))
+        data.update(_extract_via_text_patterns(soup, text_patterns, selectors))
 
     return data
 
@@ -647,7 +749,7 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
 # ═══════════════════════════════════════════════════════════
 
 def _parse_images(soup: BeautifulSoup, selectors: Dict[str, Any], base_url: str) -> Dict[str, Any]:
-    """Extract images from the listing page."""
+    """Extrai imagens da página de listing."""
     data: Dict[str, Any] = {"images": [], "alt_texts": []}
 
     image_selector = selectors.get("image_selector", "img")
@@ -670,8 +772,8 @@ def _parse_images(soup: BeautifulSoup, selectors: Dict[str, Any], base_url: str)
 
 
 def _parse_seo(soup: BeautifulSoup) -> Dict[str, Any]:
-    """Extract SEO-relevant elements from the page."""
-    data = {}
+    """Extrai elementos SEO da página."""
+    data: Dict[str, Any] = {}
 
     title_tag = soup.find("title")
     if title_tag:
@@ -693,16 +795,27 @@ def _parse_seo(soup: BeautifulSoup) -> Dict[str, Any]:
     return data
 
 
-def _extract_via_text_patterns(soup: BeautifulSoup, patterns: Dict[str, str]) -> Dict[str, Any]:
-    """Extract data using regex patterns applied to the full page text."""
-    data = {}
+def _extract_via_text_patterns(
+    soup: BeautifulSoup,
+    patterns: Dict[str, str],
+    selectors: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Extrai dados via regex aplicados ao texto da página.
+
+    Por omissão, aplica os padrões apenas ao texto limpo (get_text).
+    O fallback para o HTML raw é opt-in via selector flag 'text_pattern_search_html: true'.
+    Isto evita serializar str(soup) (custoso em memória) para todos os sites.
+    """
+    data: Dict[str, Any] = {}
+    search_html = selectors.get("text_pattern_search_html", False)
+
     full_text = soup.get_text(separator=" ", strip=True)
-    full_html = str(soup)
+    full_html = str(soup) if search_html else None
 
     for field, pattern in patterns.items():
         try:
             match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
-            if not match:
+            if not match and full_html:
                 match = re.search(pattern, full_html, re.IGNORECASE | re.DOTALL)
             if match:
                 value = match.group(1).strip()
@@ -710,28 +823,5 @@ def _extract_via_text_patterns(soup: BeautifulSoup, patterns: Dict[str, str]) ->
                     data[field] = value
         except Exception as e:
             logger.warning("Error applying pattern for %s: %s", field, str(e))
-
-    return data
-
-
-def parse_listing_card(
-    card_html: str,
-    selectors: Dict[str, Any],
-    base_url: str,
-) -> Dict[str, Any]:
-    """Parse a listing card from the search results page (minimal data)."""
-    soup = BeautifulSoup(card_html, "lxml")
-    data: Dict[str, Any] = {}
-
-    for field, selector_key in [
-        ("title", "card_title_selector"),
-        ("price", "card_price_selector"),
-        ("location", "card_location_selector"),
-    ]:
-        selector = selectors.get(selector_key)
-        if selector:
-            el = soup.select_one(selector)
-            if el:
-                data[field] = el.get_text(strip=True)
 
     return data

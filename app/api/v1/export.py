@@ -1,7 +1,18 @@
-"""Export API router — download listings as CSV, JSON, or Excel. /api/v1/export"""
+"""Export API router — download listings as CSV, JSON, or Excel. /api/v1/export
+
+CORREÇÕES v2:
+- `import io` duplicado removido
+- `import csv` e `import json` movidos para o topo do ficheiro
+- bare `except:` substituído por `except (TypeError, ValueError):`
+- CSV e JSON usam streaming real com `yield_per()` em vez de carregar tudo em memória
+- Excel mantém carregamento completo (openpyxl não suporta streaming nativo)
+  mas adiciona aviso de limite de 5000 registos para evitar OOM
+"""
+import csv
 import io
+import json
 from decimal import Decimal
-from typing import Optional
+from typing import AsyncIterator, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -11,11 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-import io
+
 from app.api.deps import get_db
 from app.models.listing import Listing
 
 router = APIRouter()
+
+# Limite de segurança para exportação Excel (carregado inteiro em memória)
+_EXCEL_MAX_ROWS = 5_000
 
 
 def _build_export_query(**kwargs):
@@ -88,6 +102,64 @@ def _listing_to_dict(listing: Listing) -> dict:
     }
 
 
+# Nomes das colunas — definidos uma vez para garantir ordem consistente
+_CSV_FIELDNAMES = list(_listing_to_dict.__annotations__.keys()) if hasattr(_listing_to_dict, '__annotations__') else None
+
+
+async def _csv_row_generator(db: AsyncSession, query) -> AsyncIterator[str]:
+    """Gerador assíncrono que produz linhas CSV em stream, linha a linha.
+
+    Usa yield_per(200) para carregar 200 registos de cada vez em vez de todos
+    de uma vez — evita OOM com volumes grandes.
+    """
+    output = io.StringIO()
+    writer = None
+    first = True
+
+    async with db.stream(query) as result:
+        async for partition in result.partitions(200):
+            for row in partition:
+                listing = row[0] if hasattr(row, '__iter__') and not isinstance(row, Listing) else row
+                row_dict = _listing_to_dict(listing)
+
+                if first:
+                    writer = csv.DictWriter(output, fieldnames=list(row_dict.keys()))
+                    writer.writeheader()
+                    yield output.getvalue()
+                    output.seek(0)
+                    output.truncate(0)
+                    first = False
+
+                writer.writerow(row_dict)
+                yield output.getvalue()
+                output.seek(0)
+                output.truncate(0)
+
+    if first:
+        # Sem resultados — emitir CSV vazio
+        yield ""
+
+
+async def _json_row_generator(db: AsyncSession, query) -> AsyncIterator[str]:
+    """Gerador assíncrono que produz JSON em stream (array de objetos).
+
+    Usa yield_per(200) — evita OOM com volumes grandes.
+    """
+    first = True
+    yield "[\n"
+
+    async with db.stream(query) as result:
+        async for partition in result.partitions(200):
+            for row in partition:
+                listing = row[0] if hasattr(row, '__iter__') and not isinstance(row, Listing) else row
+                row_dict = _listing_to_dict(listing)
+                prefix = "" if first else ",\n"
+                yield prefix + json.dumps(row_dict, ensure_ascii=False)
+                first = False
+
+    yield "\n]"
+
+
 @router.get("/csv")
 async def export_csv(
     db: AsyncSession = Depends(get_db),
@@ -99,29 +171,14 @@ async def export_csv(
     price_min: Optional[Decimal] = Query(None),
     price_max: Optional[Decimal] = Query(None),
 ):
-    """Export filtered listings as CSV."""
-    import csv
-
+    """Export filtered listings as CSV (streaming — sem limite de memória)."""
     query = _build_export_query(
         district=district, county=county, property_type=property_type,
         source_partner=source_partner, scrape_job_id=scrape_job_id,
         price_min=price_min, price_max=price_max,
     )
-    result = await db.execute(query)
-    listings = result.scalars().all()
-
-    output = io.StringIO()
-    if listings:
-        rows = [_listing_to_dict(l) for l in listings]
-        writer = csv.DictWriter(output, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-    else:
-        output.write("")
-
-    output.seek(0)
     return StreamingResponse(
-        iter([output.getvalue()]),
+        _csv_row_generator(db, query),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=listings_export.csv"},
     )
@@ -138,22 +195,14 @@ async def export_json(
     price_min: Optional[Decimal] = Query(None),
     price_max: Optional[Decimal] = Query(None),
 ):
-    """Export filtered listings as JSON."""
-    import json
-
+    """Export filtered listings as JSON (streaming — sem limite de memória)."""
     query = _build_export_query(
         district=district, county=county, property_type=property_type,
         source_partner=source_partner, scrape_job_id=scrape_job_id,
         price_min=price_min, price_max=price_max,
     )
-    result = await db.execute(query)
-    listings = result.scalars().all()
-
-    rows = [_listing_to_dict(l) for l in listings]
-    content = json.dumps(rows, ensure_ascii=False, indent=2)
-
     return StreamingResponse(
-        iter([content]),
+        _json_row_generator(db, query),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=listings_export.json"},
     )
@@ -170,59 +219,61 @@ async def export_excel(
     price_min: Optional[Decimal] = Query(None),
     price_max: Optional[Decimal] = Query(None),
 ):
-    """Export filtered listings as Excel (.xlsx) using openpyxl directly."""
+    """Export filtered listings as Excel (.xlsx).
+
+    NOTA: openpyxl não suporta streaming nativo — os dados são carregados em memória.
+    Limitado a {_EXCEL_MAX_ROWS} registos para evitar OOM. Para exportações maiores,
+    usa os endpoints /csv ou /json que suportam streaming real.
+    """
     query = _build_export_query(
         district=district, county=county, property_type=property_type,
         source_partner=source_partner, scrape_job_id=scrape_job_id,
         price_min=price_min, price_max=price_max,
-    )
+    ).limit(_EXCEL_MAX_ROWS)
+
     result = await db.execute(query)
     listings = result.scalars().all()
 
-    rows = [_listing_to_dict(l) for l in listings]
+    rows = [_listing_to_dict(listing) for listing in listings]
 
-    # Criar o Workbook e a folha ativa
     wb = Workbook()
     ws = wb.active
     ws.title = "Listings"
 
     if rows:
-        # 1. Escrever o Cabeçalho
         headers = list(rows[0].keys())
         ws.append(headers)
 
-        # Estilo do cabeçalho: Negrito
         bold_font = Font(bold=True)
         for cell in ws[1]:
             cell.font = bold_font
 
-        # 2. Escrever os Dados
         for row_dict in rows:
             ws.append(list(row_dict.values()))
 
-        # 3. Auto-width das colunas
-        # Vamos iterar pelas colunas para calcular a largura
         for i, column_cells in enumerate(ws.columns, 1):
             max_length = 0
             column_letter = get_column_letter(i)
-            
+
             for cell in column_cells:
                 try:
                     if cell.value:
                         val_len = len(str(cell.value))
                         if val_len > max_length:
                             max_length = val_len
-                except:
+                except (TypeError, ValueError):
+                    # FIX: bare except substituído por exceções específicas
                     pass
-            
-            # Ajustar largura (máximo de 50 para não ficar gigante)
+
             adjusted_width = min(max_length + 2, 50)
             ws.column_dimensions[column_letter].width = adjusted_width
+
+        # Aviso no rodapé se o resultado foi truncado
+        if len(listings) == _EXCEL_MAX_ROWS:
+            ws.append([f"[Resultado truncado a {_EXCEL_MAX_ROWS} registos. Usa /csv ou /json para exportação completa.]"])
     else:
-        # Se não houver dados, apenas escrever uma mensagem ou cabeçalhos vazios
         ws.append(["No data found"])
 
-    # Salvar para o buffer
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)

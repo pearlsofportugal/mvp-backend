@@ -1,5 +1,11 @@
 """Scrape Jobs API router — launch, monitor, and manage scraping jobs.
-/api/v1/jobs"""
+/api/v1/jobs
+
+CORREÇÕES v2:
+- SSE: reutiliza uma única sessão de DB por toda a duração do stream em vez de
+  abrir/fechar uma sessão nova a cada tick (1 sessão/segundo por cliente conectado)
+- `trace_id` calculado mas não usado em list_jobs removido (linha morta)
+"""
 import asyncio
 import json
 from typing import AsyncIterator, Optional
@@ -32,7 +38,6 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Launch a new scrape job. Runs in background (MVP: one job at a time per worker)."""
-    # Check if a job is already running
     running = await db.execute(
         select(ScrapeJob).where(ScrapeJob.status == "running")
     )
@@ -41,7 +46,6 @@ async def create_job(
             "A scrape job is already running. Wait for it to finish or cancel it."
         )
 
-    # Validate site_key exists
     site = await db.execute(
         select(SiteConfig).where(SiteConfig.key == payload.site_key, SiteConfig.is_active.is_(True))
     )
@@ -49,7 +53,6 @@ async def create_job(
     if not site_config:
         raise NotFoundError(f"Site config '{payload.site_key}' not found or inactive")
 
-    # Create job record
     job = ScrapeJob(
         site_key=payload.site_key,
         base_url=site_config.base_url,
@@ -61,12 +64,9 @@ async def create_job(
     )
     db.add(job)
     await db.commit()  # Commit BEFORE scheduling background task to avoid race condition
-    await db.refresh(job)  # Refresh to ensure we have the latest state
+    await db.refresh(job)
 
-    job_id = job.id
-
-    # Schedule background task (job is now guaranteed to be in DB)
-    background_tasks.add_task(run_scrape_job, str(job_id))
+    background_tasks.add_task(run_scrape_job, str(job.id))
 
     return ok(JobRead.model_validate(job), "Job created successfully", request)
 
@@ -91,10 +91,14 @@ async def list_jobs(
     total_result = await db.execute(count_query)
     jobs = result.scalars().all()
     total = total_result.scalar_one()
-    trace_id = getattr(request.state, "trace_id", None)
 
-    return ok([JobListRead.model_validate(j) for j in jobs], "Jobs listed successfully", request, meta={"page": page, "page_size": page_size, "total": total})
-
+    # FIX: trace_id calculado mas nunca usado — removido (ok() lê request.state internamente)
+    return ok(
+        [JobListRead.model_validate(j) for j in jobs],
+        "Jobs listed successfully",
+        request,
+        meta={"page": page, "page_size": page_size, "total": total},
+    )
 
 
 @router.get("/{job_id}", response_model=ApiResponse[JobRead])
@@ -120,6 +124,9 @@ async def cancel_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
         )
 
     job.mark_cancelled()
+    # flush() é suficiente aqui — o commit é feito automaticamente pelo get_db dependency
+    # no final do request (ver app/api/deps.py). O estado cancelled fica visível ao
+    # scraper_service na próxima iteração via _is_cancelled().
     await db.flush()
     return ok(JobRead.model_validate(job), "Job cancelled successfully", request)
 
@@ -136,7 +143,6 @@ async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
     await db.delete(job)
     await db.flush()
     return ok(None, "Job deleted successfully", request)
-
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +174,19 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
       1. O job atinge um estado terminal (completed/failed/cancelled)
       2. O cliente fecha a ligação (request.is_disconnected())
       3. Ocorre um erro irrecuperável
+
+    FIX: Usa uma única sessão de DB para todo o ciclo de vida do stream.
+    A versão anterior abria e fechava uma sessão a cada tick (1s) — com 10 clientes
+    SSE conectados isso gerava 10 sessões/segundo de pressão desnecessária no pool.
+    A sessão é revalidada via db.expire_all() antes de cada query para garantir
+    que os dados refletem o estado atual da DB (sem cache stale do identity map).
     """
     tick = 0
     last_progress: Optional[dict] = None
     last_status: Optional[str] = None
 
     try:
+        # FIX: sessão única para todo o stream — aberta uma vez, reutilizada a cada tick
         async with async_session_factory() as db:
             # Verificar que o job existe antes de começar o stream
             result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
@@ -182,55 +195,55 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                 yield _sse_event("error", {"message": f"Job {job_id} not found"})
                 return
 
-        # Loop de streaming
-        while True:
-            # Verificar se o cliente desligou (evita deixar streams órfãos no servidor)
-            if await request.is_disconnected():
-                break
+            # Loop de streaming
+            while True:
+                # Verificar se o cliente desligou (evita streams órfãos no servidor)
+                if await request.is_disconnected():
+                    break
 
-            async with async_session_factory() as db:
+                # expire_all() invalida o identity map — força re-fetch da DB na próxima query.
+                # Sem isto, o SQLAlchemy retornaria o objeto em cache sem ir à DB.
+                db.expire_all()
                 result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
                 job = result.scalar_one_or_none()
 
-            if not job:
-                yield _sse_event("error", {"message": "Job disappeared from database"})
-                break
+                if not job:
+                    yield _sse_event("error", {"message": "Job disappeared from database"})
+                    break
 
-            current_progress = job.progress or {}
-            current_status = job.status
+                current_progress = job.progress or {}
+                current_status = job.status
 
-            # Emitir evento de progresso se algo mudou
-            if current_progress != last_progress or current_status != last_status:
-                payload = {
-                    "job_id": str(job_id),
-                    "status": current_status,
-                    "progress": current_progress,
-                    "error_message": job.error_message,
-                }
-                # Distinguir mudança de status de atualização de progresso
-                event_type = "status" if current_status != last_status else "progress"
-                yield _sse_event(event_type, payload)
+                # Emitir evento se algo mudou
+                if current_progress != last_progress or current_status != last_status:
+                    payload = {
+                        "job_id": str(job_id),
+                        "status": current_status,
+                        "progress": current_progress,
+                        "error_message": job.error_message,
+                    }
+                    event_type = "status" if current_status != last_status else "progress"
+                    yield _sse_event(event_type, payload)
 
-                last_progress = current_progress
-                last_status = current_status
+                    last_progress = current_progress
+                    last_status = current_status
 
-            # Fechar stream se o job terminou
-            if current_status in _SSE_TERMINAL_STATUSES:
-                # Emitir snapshot final com estado completo
-                yield _sse_event("done", {
-                    "job_id": str(job_id),
-                    "status": current_status,
-                    "progress": current_progress,
-                    "error_message": job.error_message,
-                })
-                break
+                # Fechar stream se o job terminou
+                if current_status in _SSE_TERMINAL_STATUSES:
+                    yield _sse_event("done", {
+                        "job_id": str(job_id),
+                        "status": current_status,
+                        "progress": current_progress,
+                        "error_message": job.error_message,
+                    })
+                    break
 
-            # Heartbeat periódico — mantém a ligação viva através de proxies
-            tick += 1
-            if tick % _SSE_HEARTBEAT_EVERY == 0:
-                yield _sse_event("heartbeat", {"tick": tick})
+                # Heartbeat periódico — mantém a ligação viva através de proxies
+                tick += 1
+                if tick % _SSE_HEARTBEAT_EVERY == 0:
+                    yield _sse_event("heartbeat", {"tick": tick})
 
-            await asyncio.sleep(_SSE_POLL_INTERVAL)
+                await asyncio.sleep(_SSE_POLL_INTERVAL)
 
     except asyncio.CancelledError:
         # Cliente desligou — saída limpa sem log de erro
@@ -248,7 +261,6 @@ def _sse_event(event_type: str, data: dict) -> str:
     "/{job_id}/stream",
     summary="Stream job progress via Server-Sent Events",
     response_description="SSE stream com eventos de progresso do job",
-    # Sem response_model — StreamingResponse não é serializável pelo Pydantic
 )
 async def stream_job_progress(job_id: UUID, request: Request):
     """

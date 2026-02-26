@@ -5,8 +5,9 @@ FIX (prioridade alta): Autenticação aplicada globalmente via router dependenci
   em vez de um middleware global, para manter /health e /docs públicos
   (necessários para Docker healthchecks e desenvolvimento).
 
-  Alternativa: usar middleware global e whitelist de paths públicos — mais simples
-  mas menos explícito. A abordagem por router é mais idiomática em FastAPI.
+MELHORIAS v2:
+  - init_parser_cache() chamada no startup para carregar os field mappings da DB
+    antes do primeiro job de scraping arrancar.
 """
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -29,7 +30,7 @@ from app.api.v1.scrape_jobs import router as jobs_router
 from app.api.v1.sites import router as sites_router
 from app.api.v1.ai_enrichment import router as ai_enrichment_router
 from app.api.v1.export import router as export_router
-from app.api.deps import RequireApiKey  # FIX: importar o dependency de auth
+from app.api.deps import RequireApiKey
 from app.api.responses import ok
 
 logger = get_logger(__name__)
@@ -40,12 +41,41 @@ async def lifespan(app: FastAPI):
     """Application lifespan — startup and shutdown events."""
     setup_logging()
     logger.info("Starting %s v%s", settings.app_name, settings.app_version)
+
     if not settings.api_key:
         logger.warning(
             "API_KEY não configurada — endpoints desprotegidos. "
             "Define API_KEY no .env antes de ir a produção."
         )
+
+    # Inicializar cache do parser com os field mappings da DB.
+    # Garante que o cache está pronto antes do primeiro job de scraping arrancar,
+    # evitando que o primeiro job use sempre os defaults hardcoded.
+    try:
+        from app.services.parser_service import init_parser_cache
+        await init_parser_cache()
+        logger.info("Parser field mapping cache initialized")
+    except Exception as e:
+        logger.warning(
+            "Parser cache initialization failed: %s. "
+            "Parser will use default field mappings until first successful DB load.",
+            str(e),
+        )
+
+    # Inicializar cache do mapper com os currency mappings da DB.
+    try:
+        from app.services.mapper_service import init_mapper_cache
+        await init_mapper_cache()
+        logger.info("Mapper currency cache initialized")
+    except Exception as e:
+        logger.warning(
+            "Mapper cache initialization failed: %s. "
+            "Mapper will use default currency mappings until first successful DB load.",
+            str(e),
+        )
+
     yield
+
     logger.info("Shutting down %s", settings.app_name)
 
 
@@ -129,10 +159,9 @@ def create_app() -> FastAPI:
             ).model_dump(),
         )
 
-    # FIX: Todos os routers protegidos com RequireApiKey.
+    # Todos os routers protegidos com RequireApiKey.
     # /health fica público — necessário para Docker healthchecks e monitorização.
     # /docs e /redoc ficam públicos — para desenvolvimento local.
-    # Em produção, considera remover docs_url e redoc_url do FastAPI() acima.
     _auth = [RequireApiKey]
 
     application.include_router(listings_router, prefix="/api/v1/listings", tags=["listings"], dependencies=_auth)
@@ -141,7 +170,7 @@ def create_app() -> FastAPI:
     application.include_router(ai_enrichment_router, prefix="/api/v1/enrichment/ai", tags=["enrichment"], dependencies=_auth)
     application.include_router(export_router, prefix="/api/v1/export", tags=["export"], dependencies=_auth)
 
-    @application.get("/health", tags=["system"])  # público — sem _auth
+    @application.get("/health", tags=["system"])
     async def health_check(request: Request):
         from sqlalchemy import text
         from app.database import async_session_factory

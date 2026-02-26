@@ -11,10 +11,17 @@ Handles:
 
 CONFIGURATION:
   - Currency symbol mappings loaded from 'character_mappings' table (category='currency')
-  - Configurations are cached with TTL for performance
+  - Cache loaded at startup via init_mapper_cache() (chamada no lifespan do main.py)
+  - Cache também é refrescado lazily com TTL em parse_price()
+
+CORREÇÕES v2:
+  - asyncio.Lock protege a recarga do cache contra race conditions
+  - Double-check pattern após adquirir o lock (evita dupla carga)
+  - _CACHE_TIMESTAMP atualizado mesmo em fallback (evita retry loop se DB estiver em baixo)
 
 Expandable per partner — dispatcher pattern.
 """
+import asyncio
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -42,6 +49,10 @@ _CURRENCY_MAP_CACHE: Dict[str, str] = {}
 _CACHE_TIMESTAMP: Optional[datetime] = None
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
+# Lock para proteger a recarga do cache contra race conditions
+# (múltiplos coroutines a tentar recarregar simultaneamente)
+_cache_lock = asyncio.Lock()
+
 # Default fallback currency mappings
 _DEFAULT_CURRENCY_MAP = {
     "€": "EUR",
@@ -59,61 +70,78 @@ _DEFAULT_CURRENCY_MAP = {
 }
 
 
-async def _load_currency_map() -> Dict[str, str]:
-    """Load currency symbol mappings from DB with caching."""
+async def _load_currency_map() -> None:
+    """Carrega currency mappings da DB com caching e proteção contra race conditions.
+
+    Usa asyncio.Lock com double-check pattern para garantir que apenas um coroutine
+    recarrega o cache de cada vez — essencial quando múltiplos jobs correm concorrentemente.
+    """
     global _CURRENCY_MAP_CACHE, _CACHE_TIMESTAMP
 
     now = datetime.now(timezone.utc)
 
-    # Check cache validity
+    # Fast path: verificar TTL antes de adquirir o lock
     if (
         _CACHE_TIMESTAMP
         and _CURRENCY_MAP_CACHE
         and (now - _CACHE_TIMESTAMP).total_seconds() < _CACHE_TTL_SECONDS
     ):
-        return _CURRENCY_MAP_CACHE
+        return
 
-    try:
-        from sqlalchemy import select
-        from app.models.field_mapping import CharacterMapping
+    async with _cache_lock:
+        # Double-check após adquirir o lock (outro coroutine pode ter carregado entretanto)
+        now = datetime.now(timezone.utc)
+        if (
+            _CACHE_TIMESTAMP
+            and _CURRENCY_MAP_CACHE
+            and (now - _CACHE_TIMESTAMP).total_seconds() < _CACHE_TTL_SECONDS
+        ):
+            return
 
-        async with async_session_factory() as db:
-            result = await db.execute(
-                select(CharacterMapping).where(
-                    CharacterMapping.category == "currency",
-                    CharacterMapping.is_active.is_(True),
+        try:
+            from sqlalchemy import select
+            from app.models.field_mapping import CharacterMapping
+
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(CharacterMapping).where(
+                        CharacterMapping.category == "currency",
+                        CharacterMapping.is_active.is_(True),
+                    )
                 )
-            )
-            mappings = result.scalars().all()
+                mappings = result.scalars().all()
 
-            if mappings:
-                currency_map = {m.source_chars: m.target_chars for m in mappings}
-                # Add lowercase variants
-                extended_map = {}
-                for k, v in currency_map.items():
-                    extended_map[k] = v
-                    extended_map[k.lower()] = v
-                
-                _CURRENCY_MAP_CACHE = extended_map
-                _CACHE_TIMESTAMP = now
-                logger.debug("Loaded %d currency mappings from DB", len(currency_map))
-                return _CURRENCY_MAP_CACHE
+                if mappings:
+                    currency_map = {m.source_chars: m.target_chars for m in mappings}
+                    # Adicionar variantes em lowercase
+                    extended_map: Dict[str, str] = {}
+                    for k, v in currency_map.items():
+                        extended_map[k] = v
+                        extended_map[k.lower()] = v
 
-    except Exception as e:
-        logger.warning("Could not load currency map from DB: %s. Using defaults.", str(e))
+                    _CURRENCY_MAP_CACHE = extended_map
+                    _CACHE_TIMESTAMP = now
+                    logger.debug("Loaded %d currency mappings from DB", len(currency_map))
+                    return
 
-    return _DEFAULT_CURRENCY_MAP
+        except Exception as e:
+            logger.warning("Could not load currency map from DB: %s. Using defaults.", str(e))
+
+        # Fallback para defaults — atualiza o timestamp para evitar retry loop
+        # se a DB estiver em baixo (evita tentar recarregar a cada chamada)
+        _CURRENCY_MAP_CACHE = _DEFAULT_CURRENCY_MAP.copy()
+        _CACHE_TIMESTAMP = now
 
 
 def _get_currency_map() -> Dict[str, str]:
-    """Get cached currency map synchronously."""
+    """Retorna o currency map em cache (sync). Usa defaults se o cache estiver vazio."""
     if _CURRENCY_MAP_CACHE:
         return _CURRENCY_MAP_CACHE
     return _DEFAULT_CURRENCY_MAP
 
 
-def invalidate_mapper_cache():
-    """Clear the mapper configuration cache (call after config updates)."""
+def invalidate_mapper_cache() -> None:
+    """Limpa o cache do mapper (chamar após atualizações de config na DB)."""
     global _CURRENCY_MAP_CACHE, _CACHE_TIMESTAMP
     _CURRENCY_MAP_CACHE = {}
     _CACHE_TIMESTAMP = None
@@ -121,9 +149,10 @@ def invalidate_mapper_cache():
 
 
 async def init_mapper_cache() -> None:
-    """Initialize the mapper cache by loading currency mappings from DB.
-    
-    Call this at application startup or before first scrape.
+    """Inicializa o cache do mapper carregando os currency mappings da DB.
+
+    Deve ser chamada no startup da aplicação (lifespan) para garantir que o
+    cache está pronto antes do primeiro job de scraping arrancar.
     """
     await _load_currency_map()
 
@@ -131,7 +160,6 @@ async def init_mapper_cache() -> None:
 # ───────── Price Parsing ─────────
 
 _PRICE_PATTERN = re.compile(r"[\d\s.,]+")
-
 
 
 def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
@@ -145,13 +173,16 @@ def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
         return None, None
 
     num_str = match.group().strip()
-    # Normalize: remove spaces, handle European decimal notation
-    # "250 000" → "250000", "1.234,56" → "1234.56"
+
+    # Normalizar espaços antes de qualquer outro processamento
+    num_str = num_str.replace(" ", "")
+
+    # Normalize: handle European decimal notation
+    # "250.000" → "250000", "1.234,56" → "1234.56"
     if "," in num_str and "." in num_str:
         # European format: 1.234,56
         num_str = num_str.replace(".", "").replace(",", ".")
     elif "," in num_str:
-        # Could be European decimal or thousands
         parts = num_str.split(",")
         if len(parts[-1]) == 2:
             # Likely decimal: 250,00
@@ -160,15 +191,11 @@ def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
             # Likely thousands: 250,000
             num_str = num_str.replace(",", "")
     elif "." in num_str:
-        # Could be decimal or European thousands (dots only)
         parts = num_str.split(".")
         if all(len(p) == 3 for p in parts[1:]):
             # All groups after the first are 3 digits → thousand separators: 1.250.000
             num_str = num_str.replace(".", "")
         # else: single dot like 1250.50 — leave as-is (decimal)
-        num_str = num_str.replace(" ", "")
-    else:
-        num_str = num_str.replace(" ", "")
 
     try:
         amount = Decimal(num_str)
@@ -200,7 +227,6 @@ def parse_area(raw: Optional[str]) -> Optional[float]:
 
     match = _AREA_PATTERN.search(raw)
     if not match:
-        # Try just extracting a number
         num_match = re.search(r"[\d.,]+", raw)
         if num_match:
             try:

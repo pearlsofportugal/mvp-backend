@@ -20,7 +20,7 @@ FIX (prioridade alta): Adicionada autenticação por API key.
   para um MVP interno ou tool privada.
 """
 import secrets
-from typing import AsyncGenerator, Annotated
+from typing import Annotated, AsyncGenerator
 
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
@@ -39,7 +39,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise
@@ -53,39 +52,30 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 _api_key_header = APIKeyHeader(
     name="X-API-Key",
-    auto_error=False,  # False para retornar 401 customizado em vez de 403
-    description="API key de autenticação. Configurada via API_KEY no .env",
+    auto_error=False,
+    description="API key configured through API_KEY in the environment",
 )
+
 
 
 async def verify_api_key(
     api_key: Annotated[str | None, Security(_api_key_header)],
 ) -> str:
-    """Valida o header X-API-Key.
-
-    Usa comparação constant-time (secrets.compare_digest) para evitar
-    timing attacks — mesmo que improvável num MVP, é boa prática.
-
-    Raises:
-        HTTPException 401: se a key estiver ausente ou incorreta.
-        HTTPException 500: se API_KEY não estiver configurada no servidor.
-    """
+    """Validate the X-API-Key header."""
     if not settings.api_key:
-        # Servidor mal configurado — não expor detalhes ao cliente
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Servidor não configurado corretamente (API_KEY em falta).",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is not configured on the server.",
         )
 
     if not api_key or not secrets.compare_digest(api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key inválida ou ausente. Usa o header X-API-Key.",
+            detail="Invalid or missing API key.",
             headers={"WWW-Authenticate": "ApiKey"},
         )
 
     return api_key
 
 
-# Shorthand para usar como dependency nos routers
 RequireApiKey = Depends(verify_api_key)

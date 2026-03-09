@@ -13,11 +13,13 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.core.exceptions import NotFoundError, DuplicateError
-from app.models.listing import Listing
-from app.models.media import MediaAsset
-from app.models.price_history import PriceHistory
-from app.schemas.base_schema import ApiResponse
-from app.schemas.listing import (
+from app.models.listing_model import Listing
+from app.models.media_model import MediaAsset
+from app.models.price_history_model import PriceHistory
+from app.schemas.base_schema import ApiResponse, Meta
+from app.schemas.listing_schema import (
+    DuplicateEntry,
+    DuplicatesResponse,
     ListingCreate,
     ListingListRead,
     ListingRead,
@@ -26,7 +28,7 @@ from app.schemas.listing import (
     MediaAssetCreate,
     PaginatedResponse,
 )
-from app.api.responses import ok
+from app.api.responses import ok, ERROR_RESPONSES
 from app.schemas.listing_search_schema import ListingSearchItem, ListingSearchResponse
 
 router = APIRouter()
@@ -46,6 +48,8 @@ def _apply_filters(query, **kwargs):
         filters.append(Listing.property_type.ilike(f"%{kwargs['property_type']}%"))
     if kwargs.get("typology"):
         filters.append(Listing.typology == kwargs["typology"])
+    if kwargs.get("listing_type"):
+        filters.append(Listing.listing_type == kwargs["listing_type"])
     if kwargs.get("source_partner"):
         filters.append(Listing.source_partner == kwargs["source_partner"])
     if kwargs.get("scrape_job_id"):
@@ -109,7 +113,7 @@ SORT_FIELDS = {
 
 
 
-@router.get("", response_model=ApiResponse[PaginatedResponse])
+@router.get("", response_model=ApiResponse[PaginatedResponse], responses=ERROR_RESPONSES, operation_id="list_listings")
 async def list_listings(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -118,6 +122,7 @@ async def list_listings(
     parish: Optional[str] = Query(None),
     property_type: Optional[str] = Query(None),
     typology: Optional[str] = Query(None),
+    listing_type: Optional[str] = Query(None, pattern="^(sale|rent)$"),
     source_partner: Optional[str] = Query(None),
     scrape_job_id: Optional[UUID] = Query(None),
     price_min: Optional[Decimal] = Query(None),
@@ -140,7 +145,7 @@ async def list_listings(
     """List listings with filtering, sorting, and pagination."""
     filter_kwargs = {
         "district": district, "county": county, "parish": parish,
-        "property_type": property_type, "typology": typology,
+        "property_type": property_type, "typology": typology, "listing_type": listing_type,
         "source_partner": source_partner, "scrape_job_id": scrape_job_id,
         "price_min": price_min, "price_max": price_max,
         "area_min": area_min, "area_max": area_max,
@@ -160,18 +165,14 @@ async def list_listings(
 
     listings = (await db.execute(query)).scalars().all()
 
+    pages = math.ceil(total / page_size) if total > 0 else 0
     return ok(
-        PaginatedResponse(
-            items=[ListingListRead.model_validate(l) for l in listings],
-            total=total,
-            page=page,
-            page_size=page_size,
-            pages=math.ceil(total / page_size) if total > 0 else 0,
-        ),
+        PaginatedResponse(items=[ListingListRead.model_validate(l) for l in listings]),
         "Listings listed successfully",
         request,
+        meta=Meta(page=page, page_size=page_size, total=total, pages=pages),
     )
-@router.get("/search", response_model=ApiResponse[ListingSearchResponse])
+@router.get("/search", response_model=ApiResponse[ListingSearchResponse], responses=ERROR_RESPONSES, operation_id="search_listings")
 async def search_listings(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -244,18 +245,14 @@ async def search_listings(
             )
         )
 
+    pages = math.ceil(total / page_size) if total > 0 else 0
     return ok(
-        ListingSearchResponse(
-            items=items,
-            total=total,
-            page=page,
-            page_size=page_size,
-            pages=math.ceil(total / page_size) if total > 0 else 0,
-        ),
+        ListingSearchResponse(items=items),
         "Listings found",
         request,
+        meta=Meta(page=page, page_size=page_size, total=total, pages=pages),
     )
-@router.get("/stats", response_model=ApiResponse[ListingStats])
+@router.get("/stats", response_model=ApiResponse[ListingStats], responses=ERROR_RESPONSES, operation_id="listing_stats")
 async def listing_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -322,7 +319,7 @@ async def listing_stats(
         "Listing stats retrieved successfully",
         request,
     )
-@router.get("/duplicates", response_model=ApiResponse[dict])
+@router.get("/duplicates", response_model=ApiResponse[DuplicatesResponse], responses=ERROR_RESPONSES, operation_id="detect_duplicates")
 async def detect_duplicates(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -338,12 +335,12 @@ async def detect_duplicates(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    duplicates = [{"source_url": r[0], "count": r[1]} for r in (await db.execute(query)).all()]
-    return ok({"duplicates": duplicates}, "Duplicates detected successfully", request)
+    entries = [DuplicateEntry(source_url=r[0], count=r[1]) for r in (await db.execute(query)).all()]
+    return ok(DuplicatesResponse(duplicates=entries), "Duplicates detected successfully", request)
 # ══════════════════════════════════════════════════════════════════
 #  DYNAMIC ROUTES — /{listing_id} must come LAST
 # ═════════════════════════════════════════════════════════════════
-@router.get("/{listing_id}", response_model=ApiResponse[ListingRead])
+@router.get("/{listing_id}", response_model=ApiResponse[ListingRead], responses=ERROR_RESPONSES, operation_id="get_listing")
 async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get a single listing by ID."""
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one_or_none()
@@ -352,7 +349,7 @@ async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Dep
     return ok(ListingRead.model_validate(listing), "Listing retrieved successfully", request)
 
 
-@router.post("", response_model=ApiResponse[ListingRead], status_code=201)
+@router.post("", response_model=ApiResponse[ListingRead], status_code=201, responses=ERROR_RESPONSES, operation_id="create_listing")
 async def create_listing(payload: ListingCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """Create a new listing manually."""
     if payload.source_url:
@@ -372,7 +369,7 @@ async def create_listing(payload: ListingCreate, request: Request, db: AsyncSess
     return ok(ListingRead.model_validate(listing), "Listing created successfully", request)
 
 
-@router.patch("/{listing_id}", response_model=ApiResponse[ListingRead])
+@router.patch("/{listing_id}", response_model=ApiResponse[ListingRead], responses=ERROR_RESPONSES, operation_id="update_listing")
 async def update_listing(
     listing_id: UUID,
     payload: ListingUpdate,
@@ -402,7 +399,7 @@ async def update_listing(
 
 
 
-@router.delete("/{listing_id}", response_model=ApiResponse[None], status_code=200)
+@router.delete("/{listing_id}", response_model=ApiResponse[None], status_code=200, responses=ERROR_RESPONSES, operation_id="delete_listing")
 async def delete_listing(listing_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Delete a listing (hard delete — cascades to media_assets and price_history)."""
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one_or_none()

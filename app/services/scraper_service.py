@@ -25,11 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.logging import get_logger, set_correlation_id
 from app.database import async_session_factory
-from app.models.listing import Listing
-from app.models.media import MediaAsset
-from app.models.price_history import PriceHistory
-from app.models.scrape_job import ScrapeJob
-from app.models.site_config import SiteConfig
+from app.models.listing_model import Listing
+from app.models.media_model import MediaAsset
+from app.models.price_history_model import PriceHistory
+from app.models.scrape_job_model import ScrapeJob
+from app.models.site_config_model import SiteConfig
 from app.services.ethics_service import EthicalScraper
 from app.services.mapper_service import normalize_partner_payload, schema_to_listing_dict
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
@@ -69,7 +69,7 @@ async def run_scrape_job(job_id: str) -> None:
 
             job.mark_running()
             await db.commit()
-            print(f"pagination_type={site_config.pagination_type}, pagination_param={site_config.pagination_param}, site_config_id={site_config.id}")
+
             await _run_scrape_async(    
                 db=db,
                 job_id=str(job.id),

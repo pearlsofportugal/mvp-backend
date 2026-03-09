@@ -139,7 +139,7 @@ async def _load_field_mappings() -> None:
 
     try:
         from sqlalchemy import select
-        from app.models.field_mapping import FieldMapping
+        from app.models.field_mapping_model import FieldMapping
 
         async with async_session_factory() as db:
             result = await db.execute(

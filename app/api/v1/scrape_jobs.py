@@ -1,30 +1,40 @@
 """Scrape Jobs API router — launch, monitor, and manage scraping jobs.
-/api/v1/jobs"""
+/api/v1/jobs
+"""
+
 import asyncio
 import json
+import math
 from typing import AsyncIterator, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc, func
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
-from app.core.exceptions import JobAlreadyRunningError, NotFoundError
-from app.models.scrape_job import ScrapeJob
-from app.models.site_config import SiteConfig
-from app.schemas.scrape_job import JobCreate, JobListRead, JobRead
-from app.schemas.base_schema import ApiResponse
-from app.api.responses import ok
-from app.services.scraper_service import run_scrape_job
+from app.api.responses import ERROR_RESPONSES, ok
+from app.core.exceptions import AppException, JobAlreadyRunningError, NotFoundError
 from app.database import async_session_factory
-
+from app.models.scrape_job_model import ScrapeJob
+from app.models.site_config_model import SiteConfig
+from app.schemas.base_schema import ApiResponse, Meta
+from app.schemas.scrape_job_schema import JobCreate, JobListRead, JobRead
+from app.services.scraper_service import run_scrape_job
 
 router = APIRouter()
 
+_SSE_POLL_INTERVAL = 1.0    # seconds between DB reads while streaming
+_SSE_HEARTBEAT_EVERY = 15   # emit heartbeat every N ticks
+_SSE_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
-@router.post("", response_model=ApiResponse[JobRead], status_code=201)
+
+# ---------------------------------------------------------------------------
+# CRUD
+# ---------------------------------------------------------------------------
+
+@router.post("", response_model=ApiResponse[JobRead], status_code=201, responses=ERROR_RESPONSES, operation_id="create_job")
 async def create_job(
     request: Request,
     payload: JobCreate,
@@ -32,24 +42,20 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Launch a new scrape job. Runs in background (MVP: one job at a time per worker)."""
-    # Check if a job is already running
-    running = await db.execute(
+    running = (await db.execute(
         select(ScrapeJob).where(ScrapeJob.status == "running")
-    )
-    if running.scalar_one_or_none():
+    )).scalar_one_or_none()
+    if running:
         raise JobAlreadyRunningError(
             "A scrape job is already running. Wait for it to finish or cancel it."
         )
 
-    # Validate site_key exists
-    site = await db.execute(
+    site_config = (await db.execute(
         select(SiteConfig).where(SiteConfig.key == payload.site_key, SiteConfig.is_active.is_(True))
-    )
-    site_config = site.scalar_one_or_none()
+    )).scalar_one_or_none()
     if not site_config:
         raise NotFoundError(f"Site config '{payload.site_key}' not found or inactive")
 
-    # Create job record
     job = ScrapeJob(
         site_key=payload.site_key,
         base_url=site_config.base_url,
@@ -60,18 +66,14 @@ async def create_job(
         progress={"pages_visited": 0, "listings_found": 0, "listings_scraped": 0, "errors": 0},
     )
     db.add(job)
-    await db.commit()  # Commit BEFORE scheduling background task to avoid race condition
-    await db.refresh(job)  # Refresh to ensure we have the latest state
+    await db.commit()   # commit BEFORE background task to avoid race condition
+    await db.refresh(job)
 
-    job_id = job.id
-
-    # Schedule background task (job is now guaranteed to be in DB)
-    background_tasks.add_task(run_scrape_job, str(job_id))
-
+    background_tasks.add_task(run_scrape_job, str(job.id))
     return ok(JobRead.model_validate(job), "Job created successfully", request)
 
 
-@router.get("", response_model=ApiResponse[list[JobListRead]])
+@router.get("", response_model=ApiResponse[list[JobListRead]], responses=ERROR_RESPONSES, operation_id="list_jobs")
 async def list_jobs(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -82,92 +84,87 @@ async def list_jobs(
     """List scrape jobs with optional status filter."""
     query = select(ScrapeJob).order_by(desc(ScrapeJob.created_at))
     count_query = select(func.count()).select_from(ScrapeJob)
+
     if status:
         query = query.where(ScrapeJob.status == status)
         count_query = count_query.where(ScrapeJob.status == status)
+
     query = query.offset((page - 1) * page_size).limit(page_size)
 
+    # FIX: both queries must be awaited before consuming results
     result = await db.execute(query)
     total_result = await db.execute(count_query)
+
     jobs = result.scalars().all()
     total = total_result.scalar_one()
-    trace_id = getattr(request.state, "trace_id", None)
+    pages = math.ceil(total / page_size) if total > 0 else 0
 
-    return ok([JobListRead.model_validate(j) for j in jobs], "Jobs listed successfully", request, meta={"page": page, "page_size": page_size, "total": total})
+    return ok(
+        [JobListRead.model_validate(j) for j in jobs],
+        "Jobs listed successfully",
+        request,
+        meta=Meta(page=page, page_size=page_size, total=total, pages=pages),
+    )
 
 
-
-@router.get("/{job_id}", response_model=ApiResponse[JobRead])
+@router.get("/{job_id}", response_model=ApiResponse[JobRead], responses=ERROR_RESPONSES, operation_id="get_job")
 async def get_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get the status and progress of a scrape job."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
-    job = result.scalar_one_or_none()
+    job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
     if not job:
         raise NotFoundError(f"Scrape job {job_id} not found")
     return ok(JobRead.model_validate(job), "Job retrieved successfully", request)
 
 
-@router.post("/{job_id}/cancel", response_model=ApiResponse[JobRead])
+@router.post("/{job_id}/cancel", response_model=ApiResponse[JobRead], responses=ERROR_RESPONSES, operation_id="cancel_job")
 async def cancel_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Cancel a running or pending scrape job."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
-    job = result.scalar_one_or_none()
+    job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
     if not job:
         raise NotFoundError(f"Scrape job {job_id} not found")
+
+    # FIX: use AppException for invalid state — JobAlreadyRunningError is for "already running"
     if job.status not in ("pending", "running"):
-        raise JobAlreadyRunningError(
-            f"Job {job_id} cannot be cancelled (status: {job.status})"
-        )
+        raise AppException(f"Job {job_id} cannot be cancelled (status: {job.status})")
 
     job.mark_cancelled()
-    await db.flush()
+    await db.commit()
     return ok(JobRead.model_validate(job), "Job cancelled successfully", request)
 
 
-@router.delete("/{job_id}", response_model=ApiResponse[None], status_code=200)
+@router.delete("/{job_id}", response_model=ApiResponse[None], status_code=200, responses=ERROR_RESPONSES, operation_id="delete_job")
 async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Delete a scrape job record."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
-    job = result.scalar_one_or_none()
+    job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
     if not job:
         raise NotFoundError(f"Scrape job {job_id} not found")
     if job.status == "running":
-        raise JobAlreadyRunningError("Cannot delete a running job. Cancel it first.")
+        raise AppException("Cannot delete a running job. Cancel it first.")
+
     await db.delete(job)
-    await db.flush()
+    await db.commit()   # FIX: flush → commit so deletion actually persists
     return ok(None, "Job deleted successfully", request)
 
 
-
 # ---------------------------------------------------------------------------
-# SSE — Server-Sent Events para progresso em tempo real
+# SSE — Server-Sent Events
 # ---------------------------------------------------------------------------
-
-_SSE_POLL_INTERVAL = 1.0   # segundos entre leituras à DB durante o streaming
-_SSE_HEARTBEAT_EVERY = 15  # enviar heartbeat a cada N ticks (evita timeout de proxies)
-_SSE_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
-
 
 async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
     """
-    Gerador assíncrono que emite eventos SSE com o progresso do job.
+    Async generator that emits SSE events with live job progress.
 
-    Formato SSE (RFC 8895):
-      event: <tipo>\\n
-      data: <json>\\n
-      \\n
+    Event types:
+      - 'progress'  — counter updates (pages_visited, listings_found, etc.)
+      - 'status'    — job state change (pending → running → completed/failed/cancelled)
+      - 'heartbeat' — keepalive every ~15 s to prevent proxy timeouts
+      - 'done'      — final snapshot when the job reaches a terminal state
+      - 'error'     — job not found or internal stream error
 
-    Tipos de eventos emitidos:
-      - 'progress': atualização de contadores (pages_visited, listings_found, etc.)
-      - 'status':   mudança de estado do job (running → completed, failed, cancelled)
-      - 'heartbeat': keepalive — evita que proxies/load-balancers fechem a ligação idle
-      - 'error':    job não encontrado ou erro interno no stream
-      - 'done':     evento final antes de fechar o stream
-
-    O stream fecha automaticamente quando:
-      1. O job atinge um estado terminal (completed/failed/cancelled)
-      2. O cliente fecha a ligação (request.is_disconnected())
-      3. Ocorre um erro irrecuperável
+    The stream closes automatically when:
+      1. The job reaches a terminal state (completed/failed/cancelled)
+      2. The client disconnects (request.is_disconnected())
+      3. An unrecoverable error occurs
     """
     tick = 0
     last_progress: Optional[dict] = None
@@ -175,22 +172,17 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
 
     try:
         async with async_session_factory() as db:
-            # Verificar que o job existe antes de começar o stream
-            result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
-            job = result.scalar_one_or_none()
+            job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
             if not job:
                 yield _sse_event("error", {"message": f"Job {job_id} not found"})
                 return
 
-        # Loop de streaming
         while True:
-            # Verificar se o cliente desligou (evita deixar streams órfãos no servidor)
             if await request.is_disconnected():
                 break
 
             async with async_session_factory() as db:
-                result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))
-                job = result.scalar_one_or_none()
+                job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
 
             if not job:
                 yield _sse_event("error", {"message": "Job disappeared from database"})
@@ -199,7 +191,6 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
             current_progress = job.progress or {}
             current_status = job.status
 
-            # Emitir evento de progresso se algo mudou
             if current_progress != last_progress or current_status != last_status:
                 payload = {
                     "job_id": str(job_id),
@@ -207,16 +198,12 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                     "progress": current_progress,
                     "error_message": job.error_message,
                 }
-                # Distinguir mudança de status de atualização de progresso
                 event_type = "status" if current_status != last_status else "progress"
                 yield _sse_event(event_type, payload)
-
                 last_progress = current_progress
                 last_status = current_status
 
-            # Fechar stream se o job terminou
             if current_status in _SSE_TERMINAL_STATUSES:
-                # Emitir snapshot final com estado completo
                 yield _sse_event("done", {
                     "job_id": str(job_id),
                     "status": current_status,
@@ -225,7 +212,6 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                 })
                 break
 
-            # Heartbeat periódico — mantém a ligação viva através de proxies
             tick += 1
             if tick % _SSE_HEARTBEAT_EVERY == 0:
                 yield _sse_event("heartbeat", {"tick": tick})
@@ -233,14 +219,13 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
             await asyncio.sleep(_SSE_POLL_INTERVAL)
 
     except asyncio.CancelledError:
-        # Cliente desligou — saída limpa sem log de erro
-        pass
+        pass  # client disconnected — clean exit
     except Exception as e:
         yield _sse_event("error", {"message": f"Stream error: {str(e)}"})
 
 
 def _sse_event(event_type: str, data: dict) -> str:
-    """Formata um evento SSE conforme RFC 8895."""
+    """Format an SSE event per RFC 8895."""
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -248,7 +233,14 @@ def _sse_event(event_type: str, data: dict) -> str:
     "/{job_id}/stream",
     summary="Stream job progress via Server-Sent Events",
     response_description="SSE stream com eventos de progresso do job",
-    # Sem response_model — StreamingResponse não é serializável pelo Pydantic
+    operation_id="stream_job_progress",
+    responses={
+        200: {
+            "content": {"text/event-stream": {}},
+            "description": "SSE stream with live job progress events",
+        },
+        **ERROR_RESPONSES,
+    },
 )
 async def stream_job_progress(job_id: UUID, request: Request):
     """
@@ -266,7 +258,7 @@ async def stream_job_progress(job_id: UUID, request: Request):
 
     **Nota de autenticação:** inclui o header `X-API-Key` na ligação SSE.
     O EventSource nativo do browser não suporta headers — usa a biblioteca
-    `@microsoft/fetch-event-source` no frontend (ver frontend/src/app/core/services/jobs.ts).
+    `@microsoft/fetch-event-source` no frontend.
     """
     return StreamingResponse(
         _sse_job_stream(job_id, request),
@@ -274,6 +266,6 @@ async def stream_job_progress(job_id: UUID, request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Desativa buffer do nginx — essencial para SSE
+            "X-Accel-Buffering": "no",  # disable nginx buffering — required for SSE
         },
     )

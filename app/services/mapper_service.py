@@ -75,7 +75,7 @@ async def _load_currency_map() -> Dict[str, str]:
 
     try:
         from sqlalchemy import select
-        from app.models.field_mapping import CharacterMapping
+        from app.models.field_mapping_model import CharacterMapping
 
         async with async_session_factory() as db:
             result = await db.execute(
@@ -370,10 +370,81 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
         raw_partner_payload=raw,
     )
 
+def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
+    """Normalize a raw Habinédita payload into canonical PropertySchema."""
+    print("this is raw data", raw)
+    price_amount, price_currency = parse_price(raw.get("price"))
+    useful_area = parse_area(raw.get("useful_area"))
+    gross_area = parse_area(raw.get("gross_area"))
+
+    bedrooms = parse_int(raw.get("bedrooms"))
+    if bedrooms is None:
+        bedrooms = typology_to_bedrooms(raw.get("typology"))
+
+    business_type = (raw.get("business_type") or "").lower().strip()
+    listing_type = "sale"
+    if business_type in ("rent", "rental", "arrendar", "arrendamento"):
+        listing_type = "rent"
+
+    price_per_m2_amount = calculate_price_per_m2(price_amount, gross_area or useful_area)
+
+    return PropertySchema(
+        partner_id=raw.get("property_id"),
+        source_partner="habinedita",
+        source_url=raw.get("url"),
+        title=raw.get("title"),
+        listing_type=listing_type,
+        property_type=raw.get("property_type"),
+        typology=raw.get("typology"),
+        bedrooms=bedrooms,
+        bathrooms=parse_int(raw.get("bathrooms")),
+        floor=raw.get("floor"),
+        price=Money(
+            amount=float(price_amount) if price_amount else None,
+            currency=price_currency,
+        ),
+        price_per_m2=Money(
+            amount=float(price_per_m2_amount) if price_per_m2_amount else None,
+            currency=price_currency,
+        ) if price_per_m2_amount else None,
+        area_useful_m2=useful_area,
+        area_gross_m2=gross_area,
+        address=Address(
+            country="Portugal",
+            region=raw.get("district"),
+            city=raw.get("county"),
+            area=raw.get("parish"),
+        ),
+        media=[
+            MediaAsset(url=url, alt_text=alt, type="photo")
+            for url, alt in zip(
+                raw.get("images", []),
+                raw.get("alt_texts", []),
+            )
+        ],
+        features=ListingFlags(
+            has_garage=parse_bool(raw.get("garage")),
+            has_elevator=parse_bool(raw.get("elevator")),
+            has_balcony=parse_bool(raw.get("balcony")),
+            has_air_conditioning=parse_bool(raw.get("air_conditioning")),
+            has_pool=parse_bool(raw.get("swimming_pool")),
+        ),
+        descriptions={
+            "raw": raw.get("raw_description", ""),
+        },
+        energy_certificate=raw.get("energy_certificate"),
+        construction_year=parse_int(raw.get("construction_year")),
+        advertiser=raw.get("advertiser"),
+        contacts=raw.get("contacts"),
+        raw_partner_payload=raw,
+    )
+
+
 # ───────── Dispatcher ─────────
 
 _PARTNER_NORMALIZERS = {
     "pearls": normalize_pearls_payload,
+    "habinedita": normalize_habinedita_payload,
 }
 
 

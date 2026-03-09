@@ -10,7 +10,7 @@ from app.config import settings
 from app.database import Base
 
 # Import all models so Alembic sees them
-from app.models import listing, media, scrape_job, site_config, price_history  # noqa: F401
+from app.models import listing_model, media_model, price_history_model, scrape_job_model, site_config_model  # noqa: F401
 
 config = context.config
 

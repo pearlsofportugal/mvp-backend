@@ -2,7 +2,7 @@
 import pytest
 from httpx import AsyncClient
 
-from app.schemas.ai_enrichment import (
+from app.schemas.ai_enrichment_schema import (
     AIEnrichmentFieldResult,
     AIEnrichmentOutput,
     AIListingEnrichmentResponse,

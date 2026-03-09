@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Sequence
 from app.config import settings
 from app.core.exceptions import EnrichmentError
 from app.core.logging import get_logger
-from app.models.listing import Listing
-from app.schemas.ai_enrichment import (
+from app.models.listing_model import Listing
+from app.schemas.ai_enrichment_schema import (
     AIEnrichmentFieldResult,
     AIEnrichmentOutput,
     AIListingEnrichmentRequest,

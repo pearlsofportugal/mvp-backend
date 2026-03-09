@@ -1,54 +1,57 @@
-"""Pydantic schemas for GET /api/v1/listings/search"""
-from typing import Optional
+"""Pydantic schemas for GET /api/v1/listings/search."""
+
+from decimal import Decimal
+from typing import List, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ListingSearchItem(BaseModel):
     """Lightweight listing representation for the selector UI.
 
-    Extends the base list fields with thumbnail_url (first media asset)
-    and is_enriched (bool derived from enriched_description presence).
+    Extends the base list fields with ``thumbnail_url`` (first media asset,
+    position=0) and ``is_enriched`` (derived from enriched_description presence).
     """
 
-    # ── Identity ──────────────────────────────────────────────
-    id: UUID
-    source_partner: str
+    model_config = ConfigDict(from_attributes=True)
 
-    # ── Display ───────────────────────────────────────────────
+    # ── Identity ──────────────────────────────────────────────────────────
+    id: UUID
+    source_partner: str = Field(..., description="Slug identifying the data source partner.")
+
+    # ── Display ───────────────────────────────────────────────────────────
     title: Optional[str] = None
     property_type: Optional[str] = None
-    typology: Optional[str] = None
-    bedrooms: Optional[int] = None
-    area_useful_m2: Optional[float] = None
+    typology: Optional[str] = Field(None, description="Portuguese typology code (e.g. 'T2').")
+    bedrooms: Optional[int] = Field(None, ge=0)
+    area_useful_m2: Optional[float] = Field(None, ge=0, description="Useful area in m².")
 
-    # ── Location ──────────────────────────────────────────────
+    # ── Location ──────────────────────────────────────────────────────────
     district: Optional[str] = None
     county: Optional[str] = None
 
-    # ── Financial ─────────────────────────────────────────────
-    price_amount: Optional[float] = None
-    price_currency: Optional[str] = None
+    # ── Financial ─────────────────────────────────────────────────────────
+    listing_type: Optional[Literal["sale", "rent"]] = None
+    price_amount: Optional[Decimal] = Field(None, ge=0)
+    price_currency: Optional[str] = Field(None, min_length=3, max_length=3, description="ISO 4217 currency code.")
 
-    # ── Selector extras ───────────────────────────────────────
+    # ── Selector extras ───────────────────────────────────────────────────
     thumbnail_url: Optional[str] = Field(
         None,
-        description="URL of the first media asset (position=0), if available",
+        description="URL of the first media asset (position=0), if available.",
     )
     is_enriched: bool = Field(
         False,
-        description="True when enriched_description is not null/empty",
+        description="True when enriched_description is present and non-empty.",
     )
-
-    model_config = {"from_attributes": True}
 
 
 class ListingSearchResponse(BaseModel):
-    """Paginated search results for the listing selector."""
+    """Search results for the listing selector.
 
-    items: list[ListingSearchItem]
-    total: int
-    page: int
-    page_size: int
-    pages: int
+    Pagination metadata (page, page_size, total, pages) is carried by
+    ``ApiResponse.meta``.
+    """
+
+    items: List[ListingSearchItem] = Field(default_factory=list)

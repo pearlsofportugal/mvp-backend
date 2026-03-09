@@ -8,10 +8,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
-from app.api.responses import ok
+from app.api.responses import ok, ERROR_RESPONSES
 from app.core.exceptions import NotFoundError
-from app.models.listing import Listing
-from app.schemas.ai_enrichment import (
+from app.models.listing_model import Listing
+from app.schemas.ai_enrichment_schema import (
     AIEnrichmentOutput,
     AIListingEnrichmentRequest,
     AIListingEnrichmentResponse,
@@ -27,18 +27,17 @@ import asyncio
 router = APIRouter()
 
 
-@router.post("/optimize", response_model=ApiResponse[AITextOptimizationResponse])
+@router.post("/optimize", response_model=ApiResponse[AITextOptimizationResponse], responses=ERROR_RESPONSES, operation_id="optimize_text")
 async def optimize_text(payload: AITextOptimizationRequest, request: Request):
     """Optimize free text with AI SEO logic."""
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, optimize_text_with_ai, payload.content, payload.keywords)
+    result = await asyncio.to_thread(optimize_text_with_ai, payload.content, payload.keywords)
     if payload.fields:
         filtered = result.output.model_dump(include=set(payload.fields))
         result.output = AIEnrichmentOutput.model_validate(filtered)
     return ok(result, "Text optimized successfully", request)
 
 
-@router.post("/listing", response_model=ApiResponse[AIListingEnrichmentResponse])
+@router.post("/listing", response_model=ApiResponse[AIListingEnrichmentResponse], responses=ERROR_RESPONSES, operation_id="enrich_listing")
 async def enrich_listing(
     payload: AIListingEnrichmentRequest,
     request: Request,
@@ -57,7 +56,7 @@ async def enrich_listing(
     return ok(response, "Listing enriched successfully", request)
 
 
-@router.get("/preview/{listing_id}", response_model=ApiResponse[EnrichmentPreview])
+@router.get("/preview/{listing_id}", response_model=ApiResponse[EnrichmentPreview], responses=ERROR_RESPONSES, operation_id="preview_enrichment")
 async def preview_enrichment(
     listing_id: UUID,
     request: Request,
@@ -94,7 +93,7 @@ async def preview_enrichment(
     )
 
 
-@router.get("/stats", response_model=ApiResponse[EnrichmentStats])
+@router.get("/stats", response_model=ApiResponse[EnrichmentStats], responses=ERROR_RESPONSES, operation_id="enrichment_stats")
 async def enrichment_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),

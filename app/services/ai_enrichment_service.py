@@ -1,5 +1,8 @@
 """AI enrichment service for SEO title/description/meta_description generation."""
 import json
+import time
+from collections import deque
+from threading import Lock
 from typing import Any, Dict, List, Sequence
 
 from app.config import settings
@@ -15,6 +18,9 @@ from app.schemas.ai_enrichment_schema import (
 )
 
 logger = get_logger(__name__)
+
+_AI_REQUEST_TIMESTAMPS = deque()
+_AI_RATE_LIMIT_LOCK = Lock()
 
 _SYSTEM_INSTRUCTION_SEO = """
 Atua como um Especialista em Copywriting Imobiliário e SEO. 
@@ -98,7 +104,30 @@ def _get_client():
 
 import asyncio
 
+
+def _check_ai_rate_limit(now: float | None = None) -> None:
+    """Enforce a simple in-process sliding-window rate limit for AI calls."""
+    max_requests = settings.ai_rate_limit_requests
+    window_seconds = settings.ai_rate_limit_window
+    if max_requests <= 0 or window_seconds <= 0:
+        return
+
+    current_time = time.monotonic() if now is None else now
+    cutoff = current_time - window_seconds
+
+    with _AI_RATE_LIMIT_LOCK:
+        while _AI_REQUEST_TIMESTAMPS and _AI_REQUEST_TIMESTAMPS[0] <= cutoff:
+            _AI_REQUEST_TIMESTAMPS.popleft()
+
+        if len(_AI_REQUEST_TIMESTAMPS) >= max_requests:
+            raise EnrichmentError(
+                f"AI rate limit exceeded: max {max_requests} requests per {window_seconds} seconds."
+            )
+
+        _AI_REQUEST_TIMESTAMPS.append(current_time)
+
 def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
+    _check_ai_rate_limit()
     client = _get_client()
     prompt = _build_prompt(content, keywords)
     

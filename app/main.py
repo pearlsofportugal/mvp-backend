@@ -24,6 +24,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger, setup_logging
 from app.schemas.base_schema import ApiResponse, ErrorDetail, SystemHealth
+from app.services.scraper_service import recover_stale_jobs
 
 logger = get_logger(__name__)
 
@@ -41,6 +42,13 @@ async def lifespan(app: FastAPI):
 
     if not settings.api_key:
         logger.warning("API_KEY is not configured. Protected routes will reject requests.")
+
+    from app.database import async_session_factory
+
+    async with async_session_factory() as session:
+        recovered_jobs = await recover_stale_jobs(session)
+        if recovered_jobs:
+            logger.warning("Recovered %d stale scrape job(s) during startup", recovered_jobs)
 
     yield
 
@@ -197,7 +205,7 @@ def create_app() -> FastAPI:
         export_router,
         prefix="/api/v1/export",
         tags=["export"],
-        dependencies=auth_dependencies,
+        # dependencies=auth_dependencies,
     )
 
     # ── Public endpoints ───────────────────────────────────────────────────

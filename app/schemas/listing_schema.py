@@ -193,6 +193,61 @@ class ListingRead(ListingBase):
     price_history: List[PriceHistoryRead] = Field(default_factory=list)
 
 
+class ListingDetailRead(BaseModel):
+    """Public listing detail response without internal raw scraped text."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    partner_id: Optional[str] = None
+    source_partner: str
+    source_url: Optional[str] = None
+    scrape_job_id: Optional[UUID] = None
+
+    listing_type: Optional[Literal["sale", "rent"]] = None
+    property_type: Optional[str] = None
+    typology: Optional[str] = None
+    title: Optional[str] = None
+    bedrooms: Optional[int] = Field(None, ge=0)
+    bathrooms: Optional[int] = Field(None, ge=0)
+    floor: Optional[str] = None
+    construction_year: Optional[int] = Field(None, ge=1800)
+    energy_certificate: Optional[str] = None
+
+    price_amount: Optional[Decimal] = Field(None, ge=0)
+    price_currency: Optional[str] = Field("EUR", min_length=3, max_length=3)
+    price_per_m2: Optional[Decimal] = Field(None, ge=0)
+
+    area_useful_m2: Optional[float] = Field(None, ge=0)
+    area_gross_m2: Optional[float] = Field(None, ge=0)
+    area_land_m2: Optional[float] = Field(None, ge=0)
+
+    district: Optional[str] = None
+    county: Optional[str] = None
+    parish: Optional[str] = None
+    full_address: Optional[str] = None
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+
+    has_garage: Optional[bool] = None
+    has_elevator: Optional[bool] = None
+    has_balcony: Optional[bool] = None
+    has_air_conditioning: Optional[bool] = None
+    has_pool: Optional[bool] = None
+
+    advertiser: Optional[str] = None
+    contacts: Optional[str] = None
+    description: Optional[str] = None
+    enriched_description: Optional[str] = None
+    description_quality_score: Optional[int] = Field(None, ge=0, le=100)
+    meta_description: Optional[str] = None
+
+    created_at: datetime
+    updated_at: datetime
+    media_assets: List[MediaAssetRead] = Field(default_factory=list)
+    price_history: List[PriceHistoryRead] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Read (list / paginated)
 # ---------------------------------------------------------------------------

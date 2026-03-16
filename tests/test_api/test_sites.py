@@ -24,6 +24,8 @@ async def test_create_and_get_site(client: AsyncClient):
     created = create_resp.json()["data"]
     assert created["key"] == "test_site"
     assert created["name"] == "Test Site"
+    assert created["pagination_type"] == "html_next"
+    assert created["pagination_param"] is None
 
     # GET by key
     get_resp = await client.get("/api/v1/sites/test_site")
@@ -40,11 +42,13 @@ async def test_update_site(client: AsyncClient):
 
     update_resp = await client.patch(
         "/api/v1/sites/test_site",
-        json={"name": "Updated Site", "is_active": False},
+        json={"name": "Updated Site", "is_active": False, "pagination_type": "query_param", "pagination_param": "page"},
     )
     assert update_resp.status_code == 200
     assert update_resp.json()["data"]["name"] == "Updated Site"
     assert update_resp.json()["data"]["is_active"] is False
+    assert update_resp.json()["data"]["pagination_type"] == "query_param"
+    assert update_resp.json()["data"]["pagination_param"] == "page"
 
 
 @pytest.mark.asyncio

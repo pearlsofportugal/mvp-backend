@@ -14,6 +14,7 @@ FIXES (v2):
   - Fixed energy certificate extraction from <img> src when no text value exists
   - Added "business type" / "business state" to _DEFAULT_FIELD_MAP
   - _extract_name_value_pairs now falls back to img.icon alt/src when value_el is empty
+    - Direct mode now supports attribute/img fallback values and Habinédita icon block extraction
 """
 import re
 from datetime import datetime, timezone
@@ -36,9 +37,13 @@ _FIELD_MAP_CACHE: Dict[str, str] = {}
 _FEATURE_MAP_CACHE: Dict[str, str] = {}
 _CACHE_TIMESTAMP: Optional[datetime] = None
 _CACHE_TTL_SECONDS = 300  # 5 minutes
+_DEBUG_HTML_PREVIEW_CHARS = 700
 
 # Default fallback mappings (used if DB is unavailable)
 _DEFAULT_FIELD_MAP = {
+    # Summary field mappings
+    "objectivo": "business_type",
+    "objetivo": "business_type",
     # Price
     "price": "price",
     "preço": "price",
@@ -121,6 +126,18 @@ _DEFAULT_FEATURE_MAP = {
     "pool": "swimming_pool",
     "piscina": "swimming_pool",
     "swimming": "swimming_pool",
+}
+
+_SUMMARY_FIELD_MAP = {
+    "objectivo": "business_type",
+    "objetivo": "business_type",
+    "estado": "condition",
+    "tipo": "property_type",
+    "tipologia": "typology",
+    "distrito": "district",
+    "concelho": "county",
+    "freguesia": "parish",
+    "zona": "zone",
 }
 
 
@@ -263,7 +280,6 @@ def parse_listing_page(
     # Common extractions (both modes)
     data.update(_parse_images(soup, selectors, url))
     data.update(_parse_seo(soup))
-
     return data
 
 
@@ -274,7 +290,6 @@ def parse_listing_page(
 def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict[str, Any]:
     """Parse using section-based extraction (name/value pairs)."""
     data: Dict[str, Any] = {}
-
     # Title
     title_selector = selectors.get("title_selector")
     if title_selector:
@@ -311,6 +326,15 @@ def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict
     text_patterns = selectors.get("text_patterns", {})
     if text_patterns:
         data.update(_extract_via_text_patterns(soup, text_patterns))
+
+    summary_section = selectors.get("summary_section")
+    if summary_section:
+        section = _safe_select_one(soup, summary_section)
+        if section:
+            extracted = _extract_summary_pairs(section, selectors)
+            for k, v in extracted.items():
+                if k not in data:
+                    data[k] = v
 
     # Details section (price, type, district, energy cert…)
     details_section = selectors.get("details_section")
@@ -370,6 +394,61 @@ def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict
                 data["nearby"] = nearby_items
 
     return data
+
+
+def _extract_summary_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract labeled summary pairs from list-based blocks."""
+    data: Dict[str, Any] = {}
+    items = section.select(selectors.get("summary_item_selector", "li"))
+    label_selector = selectors.get("summary_label_selector", "b, .name, .icon_label")
+    value_selector = selectors.get("summary_value_selector", ".value, .lbl_valor")
+
+    for item in items:
+        label_el = item.select_one(label_selector)
+        if not label_el:
+            continue
+
+        label = label_el.get_text(" ", strip=True).rstrip(":").lower()
+        field = _SUMMARY_FIELD_MAP.get(label)
+        if not field:
+            continue
+
+        value_el = item.select_one(value_selector)
+        if value_el:
+            value = value_el.get_text(" ", strip=True)
+        else:
+            value = _extract_inline_value(item, label_el)
+
+        if not value:
+            continue
+
+        data[field] = value
+
+    return data
+
+
+def _extract_inline_value(item: Tag, label_el: Tag) -> str:
+    """Extract the value that follows a label node inside the same container."""
+    fragments: List[str] = []
+
+    for sibling in label_el.next_siblings:
+        if isinstance(sibling, Tag):
+            text = sibling.get_text(" ", strip=True)
+        else:
+            text = str(sibling).strip()
+
+        if text:
+            fragments.append(text)
+
+    if fragments:
+        return " ".join(fragments).strip()
+
+    full_text = item.get_text(" ", strip=True)
+    label_text = label_el.get_text(" ", strip=True)
+    if full_text.startswith(label_text):
+        return full_text[len(label_text):].strip(" :\t\n\r")
+
+    return ""
 
 
 def _safe_select_one(soup: BeautifulSoup, selector: str) -> Optional[Tag]:
@@ -539,6 +618,192 @@ def _extract_characteristics(section: Tag, selectors: Dict[str, Any]) -> Dict[st
     return data
 
 
+def _debug_html_snippet(node: Tag | BeautifulSoup, max_chars: int = _DEBUG_HTML_PREVIEW_CHARS) -> str:
+    """Return a compact HTML snippet for print-based debugging."""
+    raw_html = node.decode() if hasattr(node, "decode") else str(node)
+    compact_html = re.sub(r"\s+", " ", raw_html).strip()
+    if len(compact_html) <= max_chars:
+        return compact_html
+    return f"{compact_html[:max_chars]}..."
+
+
+def _selector_debug_enabled(selectors: Dict[str, Any]) -> bool:
+    """Enable print-based selector debugging only when explicitly requested."""
+    return bool(
+        selectors.get("_debug_selectors")
+        or selectors.get("__debug_selectors__")
+        or selectors.get("debug_selectors")
+    )
+
+
+def _print_selector_debug(
+    soup: BeautifulSoup,
+    enabled: bool,
+    field: str,
+    selector_key: str,
+    selector: Optional[str],
+    reason: str,
+    matched_element: Optional[Tag] = None,
+) -> None:
+    """Print detailed selector debug information."""
+    if not enabled:
+        return
+    print("[selector-debug] field:", field, flush=True)
+    print("[selector-debug] selector_key:", selector_key, flush=True)
+    print("[selector-debug] selector:", selector, flush=True)
+    print("[selector-debug] reason:", reason, flush=True)
+    print(
+        "[selector-debug] html:",
+        _debug_html_snippet(matched_element or (soup.body or soup)),
+        flush=True,
+    )
+
+
+def _extract_energy_certificate_value(raw_value: str) -> Optional[str]:
+    """Normalize energy certificate text to the expected rating token."""
+    match = re.search(r"\b([A-G])\b", raw_value, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+
+    compact = raw_value.strip().upper()
+    if compact in {"A+", "A", "B", "B-", "C", "D", "E", "F", "G"}:
+        return compact
+
+    return None
+
+
+def _extract_element_value(el: Tag, field: Optional[str] = None) -> str:
+    """Extract a meaningful value from text, attributes, or nested images."""
+    text = el.get_text(" ", strip=True)
+    if text:
+        if field == "energy_certificate":
+            normalized = _extract_energy_certificate_value(text)
+            if normalized:
+                return normalized
+        return text
+
+    for attr in ("content", "value", "alt", "title", "aria-label", "data-value"):
+        value = el.get(attr)
+        if value and str(value).strip():
+            normalized_value = str(value).strip()
+            if field == "energy_certificate":
+                normalized = _extract_energy_certificate_value(normalized_value)
+                return normalized or normalized_value
+            return normalized_value
+
+    img = el if el.name == "img" else el.select_one("img")
+    if img:
+        for attr in ("alt", "title", "src", "data-src"):
+            value = img.get(attr)
+            if not value or not str(value).strip():
+                continue
+
+            normalized_value = str(value).strip()
+            if field == "energy_certificate":
+                normalized = _extract_energy_certificate_value(normalized_value)
+                if normalized:
+                    return normalized
+
+                src_match = re.search(r"energy[-_]?([a-g])", normalized_value, re.IGNORECASE)
+                if src_match:
+                    return src_match.group(1).upper()
+
+            return normalized_value
+
+    return ""
+
+
+def _assign_feature_matches(text: str, target: Dict[str, Any]) -> None:
+    """Assign every matching feature keyword instead of stopping at the first match."""
+    normalized_text = text.lower()
+    for keyword, mapped_field in _get_feature_map().items():
+        if keyword in normalized_text:
+            target[mapped_field] = "Yes"
+
+
+def _first_selector_value(
+    soup: BeautifulSoup,
+    selectors: List[str],
+    field: Optional[str] = None,
+) -> Optional[str]:
+    """Return the first non-empty value found for a list of CSS selectors."""
+    for selector in selectors:
+        try:
+            el = soup.select_one(selector)
+        except Exception:
+            continue
+
+        if not el:
+            continue
+
+        value = _extract_element_value(el, field=field)
+        if value:
+            return value
+
+    return None
+
+
+def _is_habinedita_like_page(soup: BeautifulSoup) -> bool:
+    """Detect the Habinédita detail layout based on stable container ids."""
+    return bool(
+        soup.select_one("[id*='modulodadosicones']")
+        or soup.select_one("[id*='div_imovel_descricao']")
+    )
+
+
+def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract structured values from Habinédita's icon block when selectors miss them."""
+    if not _is_habinedita_like_page(soup):
+        return {}
+
+    extracted: Dict[str, Any] = {}
+    icon_selectors = {
+        "bedrooms": [
+            "[id*='lbl_valor_quarto']",
+            "[id*='lbl_valor_quartos']",
+        ],
+        "bathrooms": [
+            "[id*='lbl_valor_wcs']",
+            "[id*='lbl_valor_wc']",
+        ],
+        "gross_area": [
+            "[id*='lbl_valor_area_bruta']",
+        ],
+        "useful_area": [
+            "[id*='lbl_valor_area_util']",
+            "[id*='lbl_valor_area_utile']",
+        ],
+        "land_area": [
+            "[id*='lbl_valor_area_terreno']",
+        ],
+        "energy_certificate": [
+            "[id*='div_certificacao'] img",
+            "[id*='div_certificacao']",
+        ],
+    }
+
+    for field, candidate_selectors in icon_selectors.items():
+        if current_data.get(field):
+            continue
+
+        value = _first_selector_value(soup, candidate_selectors, field=field)
+        if value:
+            extracted[field] = value
+
+    description_value = current_data.get("raw_description") or _first_selector_value(
+        soup,
+        ["[id*='div_imovel_descricao']", ".descricao", ".property-description"],
+    )
+    if description_value:
+        _assign_feature_matches(description_value, extracted)
+        if not extracted.get("energy_certificate"):
+            normalized_energy = _extract_energy_certificate_value(description_value)
+            if normalized_energy:
+                extracted["energy_certificate"] = normalized_energy
+
+    return extracted
+
+
 # ═══════════════════════════════════════════════════════════
 # Direct Selector Parsing
 # ═══════════════════════════════════════════════════════════
@@ -546,7 +811,7 @@ def _extract_characteristics(section: Tag, selectors: Dict[str, Any]) -> Dict[st
 def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict[str, Any]:
     """Parse using direct CSS selectors for each field."""
     data: Dict[str, Any] = {}
-
+    debug_enabled = _selector_debug_enabled(selectors)
     simple_fields = {
         "title_selector": "title",
         "location_selector": "location",
@@ -570,10 +835,41 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
     for selector_key, field in simple_fields.items():
         selector = selectors.get(selector_key)
         if not selector:
+            _print_selector_debug(soup, debug_enabled, field, selector_key, None, "selector missing from site config")
             continue
-        el = soup.select_one(selector)
-        if el:
-            data[field] = el.get_text(strip=True)
+
+        try:
+            el = soup.select_one(selector)
+        except Exception as exc:
+            _print_selector_debug(soup, debug_enabled, field, selector_key, selector, f"invalid selector: {exc}")
+            continue
+
+        if not el:
+            _print_selector_debug(soup, debug_enabled, field, selector_key, selector, "no HTML match for selector")
+            continue
+
+        value = _extract_element_value(el, field=field)
+        if not value:
+            _print_selector_debug(
+                soup,
+                debug_enabled,
+                field,
+                selector_key,
+                selector,
+                "selector matched element but extracted text is empty",
+                matched_element=el,
+            )
+            continue
+
+        if debug_enabled:
+            print("[selector-debug] matched field:", field, flush=True)
+            print("[selector-debug] selector_key:", selector_key, flush=True)
+            print("[selector-debug] selector:", selector, flush=True)
+            print("[selector-debug] value:", value, flush=True)
+        data[field] = value
+
+    if debug_enabled:
+        print("[selector-debug] final simple field data:", data, flush=True)
 
     # Description (longer, needs length check)
     desc_selector = selectors.get("description_selector")
@@ -612,13 +908,9 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
     # Features — bulk via feature map
     features_selector = selectors.get("features_selector")
     if features_selector:
-        feature_map = _get_feature_map()
         for el in soup.select(features_selector):
             text = el.get_text(strip=True).lower()
-            for keyword, mapped_field in feature_map.items():
-                if keyword in text:
-                    data[mapped_field] = "Yes"
-                    break
+            _assign_feature_matches(text, data)
 
     # Individual feature selectors
     individual_features = {
@@ -638,6 +930,46 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
     text_patterns = selectors.get("text_patterns", {})
     if text_patterns:
         data.update(_extract_via_text_patterns(soup, text_patterns))
+
+    details_section = selectors.get("details_section")
+    if details_section and details_section != "body":
+        section = _safe_select_one(soup, details_section)
+        if section:
+            for key, value in _extract_name_value_pairs(section, selectors).items():
+                if key not in data:
+                    data[key] = value
+
+    areas_section = selectors.get("areas_section")
+    if areas_section:
+        section = _safe_select_one(soup, areas_section)
+        if section:
+            for key, value in _extract_area_pairs(section, selectors).items():
+                if key not in data:
+                    data[key] = value
+
+    divisions_section = selectors.get("divisions_section")
+    if divisions_section:
+        section = _safe_select_one(soup, divisions_section)
+        if section:
+            for key, value in _extract_divisions(section, selectors).items():
+                if key not in data:
+                    data[key] = value
+
+    chars_section = selectors.get("characteristics_section")
+    if chars_section:
+        section = _safe_select_one(soup, chars_section)
+        if section:
+            data.update(_extract_characteristics(section, selectors))
+
+    summary_section = selectors.get("summary_section")
+    if summary_section:
+        section = _safe_select_one(soup, summary_section)
+        if section:
+            data.update(_extract_summary_pairs(section, selectors))
+
+    for field, value in _extract_habinedita_fallbacks(soup, data).items():
+        if not data.get(field):
+            data[field] = value
 
     return data
 

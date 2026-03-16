@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.database import Base
 from app.api.deps import get_db
+from app.config import settings
 from app.main import app
 
 
@@ -51,7 +52,11 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides[get_db] = override_get_db
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-API-Key": settings.api_key or "123"},
+    ) as ac:
         yield ac
 
     app.dependency_overrides.clear()
@@ -96,6 +101,8 @@ def make_site_config_payload(**overrides) -> dict:
         "name": "Test Site",
         "base_url": "https://test.example.com",
         "extraction_mode": "direct",
+        "pagination_type": "html_next",
+        "pagination_param": None,
         "selectors": {
             "listing_link_selector": "a.listing",
             "title_selector": "h1.title",

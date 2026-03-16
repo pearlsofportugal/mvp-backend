@@ -58,6 +58,26 @@ _DEFAULT_CURRENCY_MAP = {
     "jpy": "JPY",
 }
 
+_LISTING_STRING_LIMITS = {
+    "partner_id": 255,
+    "source_partner": 50,
+    "source_url": 2048,
+    "title": 500,
+    "listing_type": 20,
+    "property_type": 50,
+    "typology": 10,
+    "floor": 20,
+    "price_currency": 3,
+    "district": 100,
+    "county": 100,
+    "parish": 100,
+    "full_address": 500,
+    "energy_certificate": 10,
+    "advertiser": 255,
+    "contacts": 500,
+    "page_title": 500,
+}
+
 
 async def _load_currency_map() -> Dict[str, str]:
     """Load currency symbol mappings from DB with caching."""
@@ -293,6 +313,62 @@ def calculate_price_per_m2(
     return None
 
 
+def _normalize_whitespace(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = " ".join(str(value).split())
+    return normalized or None
+
+
+def _truncate_text(value: Optional[str], max_length: int) -> Optional[str]:
+    normalized = _normalize_whitespace(value)
+    if normalized is None:
+        return None
+    return normalized[:max_length]
+
+
+def _normalize_description_text(value: Optional[str]) -> Optional[str]:
+    """Build a cleaned listing description while keeping the raw text untouched."""
+    normalized = _normalize_whitespace(value)
+    if not normalized:
+        return None
+
+    normalized = re.sub(r"^(descriç[aã]o|description)\s*[:\-]?\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+    normalized = re.sub(r"([.!?;:])(\S)", r"\1 \2", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized or None
+
+
+def _looks_like_bad_address_fragment(value: Optional[str]) -> bool:
+    normalized = _normalize_whitespace(value)
+    if not normalized:
+        return False
+    if len(normalized) > 100:
+        return True
+    sentence_markers = (". ", "!", "?", ":", " é ", " foi ", " com ")
+    return any(marker in normalized.lower() for marker in sentence_markers)
+
+
+def _normalize_habinedita_address(raw: Dict[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    district = _truncate_text(raw.get("district"), 100)
+    county = _truncate_text(raw.get("county"), 100)
+    parish = _truncate_text(raw.get("parish"), 100)
+
+    if _looks_like_bad_address_fragment(parish):
+        parish = None
+
+    location = _normalize_whitespace(raw.get("location"))
+    if location:
+        parts = [part.strip() for part in location.split(",") if part.strip()]
+        if not district and parts:
+            district = _truncate_text(parts[0], 100)
+        if not county and len(parts) > 1:
+            county = _truncate_text(parts[1], 100)
+
+    return district, county, parish
+
+
 # ───────── Partner Normalizers ─────────
 
 def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
@@ -317,6 +393,8 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
     price_per_m2_amount = calculate_price_per_m2(
         price_amount, gross_area or useful_area
     )
+    raw_description = raw.get("raw_description")
+    normalized_description = _normalize_description_text(raw_description)
 
     return PropertySchema(
         partner_id=raw.get("property_id") or raw.get("reference"),
@@ -361,7 +439,12 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
             has_pool=parse_bool(raw.get("swimming_pool")),
         ),
         descriptions={
-            "raw": raw.get("raw_description", ""),
+            key: value
+            for key, value in {
+                "raw": raw_description,
+                "pt": normalized_description,
+            }.items()
+            if value
         },
         energy_certificate=raw.get("energy_certificate"),
         construction_year=parse_int(raw.get("construction_year")),
@@ -372,10 +455,12 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
 
 def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
     """Normalize a raw Habinédita payload into canonical PropertySchema."""
-    print("this is raw data", raw)
     price_amount, price_currency = parse_price(raw.get("price"))
     useful_area = parse_area(raw.get("useful_area"))
     gross_area = parse_area(raw.get("gross_area"))
+    land_area = parse_area(raw.get("land_area"))
+    district, county, parish = _normalize_habinedita_address(raw)
+    condition = _normalize_whitespace(raw.get("condition"))
 
     bedrooms = parse_int(raw.get("bedrooms"))
     if bedrooms is None:
@@ -387,6 +472,19 @@ def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
         listing_type = "rent"
 
     price_per_m2_amount = calculate_price_per_m2(price_amount, gross_area or useful_area)
+    raw_description = raw.get("raw_description")
+    normalized_description = _normalize_description_text(raw_description)
+    seo = {
+        "page_title": raw.get("page_title"),
+        "meta_description": raw.get("meta_description"),
+        "headers": raw.get("headers"),
+    }
+    seo = {key: value for key, value in seo.items() if value}
+    is_new_construction = None
+    if condition:
+        normalized_condition = condition.lower()
+        if any(marker in normalized_condition for marker in ("novo", "new", "constru", "em planta")):
+            is_new_construction = True
 
     return PropertySchema(
         partner_id=raw.get("property_id"),
@@ -409,11 +507,13 @@ def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
         ) if price_per_m2_amount else None,
         area_useful_m2=useful_area,
         area_gross_m2=gross_area,
+        area_land_m2=land_area,
         address=Address(
             country="Portugal",
-            region=raw.get("district"),
-            city=raw.get("county"),
-            area=raw.get("parish"),
+            region=district,
+            city=county,
+            area=parish,
+            full_address=_truncate_text(raw.get("full_address"), 500),
         ),
         media=[
             MediaAsset(url=url, alt_text=alt, type="photo")
@@ -428,10 +528,17 @@ def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
             has_balcony=parse_bool(raw.get("balcony")),
             has_air_conditioning=parse_bool(raw.get("air_conditioning")),
             has_pool=parse_bool(raw.get("swimming_pool")),
+            is_new_construction=is_new_construction,
         ),
         descriptions={
-            "raw": raw.get("raw_description", ""),
+            key: value
+            for key, value in {
+                "raw": raw_description,
+                "pt": normalized_description,
+            }.items()
+            if value
         },
+        seo=seo or None,
         energy_certificate=raw.get("energy_certificate"),
         construction_year=parse_int(raw.get("construction_year")),
         advertiser=raw.get("advertiser"),
@@ -460,7 +567,7 @@ def normalize_partner_payload(raw: Dict[str, Any], partner: str) -> PropertySche
 
 def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: Optional[UUID] = None) -> Dict[str, Any]:
     """Convert a canonical PropertySchema to a dict suitable for creating a Listing ORM model."""
-    return {
+    listing_dict = {
         "partner_id": schema.partner_id,
         "source_partner": schema.source_partner,
         "source_url": str(schema.source_url) if schema.source_url else None,
@@ -493,6 +600,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: Optional[UUID]
         "advertiser": schema.advertiser,
         "contacts": schema.contacts,
         "raw_description": schema.descriptions.get("raw"),
+        "description": schema.descriptions.get("pt"),
         "description_quality_score": schema.description_quality_score,
         "page_title": schema.seo.get("page_title") if schema.seo else None,
         "headers": schema.seo.get("headers") if schema.seo else None,
@@ -500,3 +608,8 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: Optional[UUID]
         "raw_payload": schema.raw_partner_payload,
         "scrape_job_id": scrape_job_id,
     }
+
+    for field, max_length in _LISTING_STRING_LIMITS.items():
+        listing_dict[field] = _truncate_text(listing_dict.get(field), max_length)
+
+    return listing_dict

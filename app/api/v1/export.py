@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.responses import ERROR_RESPONSES
+from app.config import settings
+from app.core.exceptions import ExportError
 from app.models.listing_model import Listing
 
 router = APIRouter()
@@ -104,6 +106,17 @@ def _listing_to_dict(listing: Listing) -> dict:
     }
 
 
+async def _load_export_rows(db: AsyncSession, filters: dict) -> list[Listing]:
+    """Load export rows with a hard cap to protect API memory usage."""
+    query = _build_export_query(**filters).limit(settings.export_max_rows + 1)
+    listings = (await db.execute(query)).scalars().all()
+    if len(listings) > settings.export_max_rows:
+        raise ExportError(
+            f"Export exceeds maximum row limit of {settings.export_max_rows}. Refine filters and try again."
+        )
+    return listings
+
+
 # ---------------------------------------------------------------------------
 # Shared query params (DRY — avoids repeating 7 Query() declarations)
 # ---------------------------------------------------------------------------
@@ -146,7 +159,7 @@ async def export_csv(
     filters: dict = Depends(_export_filters),
 ):
     """Export filtered listings as CSV."""
-    listings = (await db.execute(_build_export_query(**filters))).scalars().all()
+    listings = await _load_export_rows(db, filters)
     output = io.StringIO()
 
     if listings:
@@ -177,7 +190,7 @@ async def export_json(
     filters: dict = Depends(_export_filters),
 ):
     """Export filtered listings as JSON."""
-    listings = (await db.execute(_build_export_query(**filters))).scalars().all()
+    listings = await _load_export_rows(db, filters)
     rows = [_listing_to_dict(l) for l in listings]
     content = json.dumps(rows, ensure_ascii=False, indent=2)
 
@@ -205,7 +218,7 @@ async def export_excel(
     filters: dict = Depends(_export_filters),
 ):
     """Export filtered listings as Excel (.xlsx)."""
-    listings = (await db.execute(_build_export_query(**filters))).scalars().all()
+    listings = await _load_export_rows(db, filters)
     rows = [_listing_to_dict(l) for l in listings]
 
     wb = Workbook()

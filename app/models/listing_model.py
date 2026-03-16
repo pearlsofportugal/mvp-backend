@@ -106,7 +106,7 @@ class Listing(Base):
     # Full-text search vector (PostgreSQL tsvector)
     # Created via migration with a generated column or trigger
     search_vector: Mapped[Optional[str]] = mapped_column(
-        TSVECTOR,
+        TSVECTOR().with_variant(Text(), "sqlite"),
         nullable=True,
         comment="Full-text search tsvector — managed by DB trigger",
     )

@@ -49,6 +49,17 @@ class FieldPreviewResult(BaseModel):
     raw_value: Optional[str] = Field(None, description="Raw extracted value before any mapping.")
     mapped_to: Optional[str] = Field(None, description="Canonical field name this value maps to.")
     status: Literal["ok", "empty", "error"] = Field(..., description="Extraction outcome.")
+    reason: Optional[str] = Field(None, description="Why the field is empty or suspicious.")
+
+
+class CoverageSummary(BaseModel):
+    """Coverage summary for a preview run."""
+
+    total_fields: int = Field(..., ge=0)
+    ok_fields: int = Field(..., ge=0)
+    empty_fields: int = Field(..., ge=0)
+    coverage_percent: float = Field(..., ge=0, le=100)
+    critical_missing: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +72,7 @@ class PreviewListingResponse(BaseModel):
     url: str = Field(..., description="The URL that was tested.")
     extraction_mode: Literal["section", "direct"] = Field(..., description="Extraction mode used.")
     fields: List[FieldPreviewResult] = Field(default_factory=list, description="Per-field extraction results.")
+    coverage: CoverageSummary = Field(..., description="Coverage summary for canonical fields.")
     images_found: int = Field(..., ge=0, description="Number of images extracted after applying the filter.")
     raw_data: Dict[str, Any] = Field(default_factory=dict, description="Raw extracted data keyed by field name.")
     warnings: List[str] = Field(default_factory=list, description="Non-fatal issues encountered during extraction.")

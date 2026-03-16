@@ -21,6 +21,7 @@ from app.schemas.listing_schema import (
     DuplicateEntry,
     DuplicatesResponse,
     ListingCreate,
+    ListingDetailRead,
     ListingListRead,
     ListingRead,
     ListingStats,
@@ -340,13 +341,13 @@ async def detect_duplicates(
 # ══════════════════════════════════════════════════════════════════
 #  DYNAMIC ROUTES — /{listing_id} must come LAST
 # ═════════════════════════════════════════════════════════════════
-@router.get("/{listing_id}", response_model=ApiResponse[ListingRead], responses=ERROR_RESPONSES, operation_id="get_listing")
+@router.get("/{listing_id}", response_model=ApiResponse[ListingDetailRead], responses=ERROR_RESPONSES, operation_id="get_listing")
 async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get a single listing by ID."""
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one_or_none()
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
-    return ok(ListingRead.model_validate(listing), "Listing retrieved successfully", request)
+    return ok(ListingDetailRead.model_validate(listing), "Listing retrieved successfully", request)
 
 
 @router.post("", response_model=ApiResponse[ListingRead], status_code=201, responses=ERROR_RESPONSES, operation_id="create_listing")
@@ -364,7 +365,8 @@ async def create_listing(payload: ListingCreate, request: Request, db: AsyncSess
     for asset_data in payload.media_assets:
         db.add(MediaAsset(listing_id=listing.id, **asset_data.model_dump()))
 
-    await db.flush()
+    await db.commit()
+    await db.refresh(listing)
     listing = (await db.execute(select(Listing).where(Listing.id == listing.id))).scalar_one()
     return ok(ListingRead.model_validate(listing), "Listing created successfully", request)
 
@@ -393,7 +395,8 @@ async def update_listing(
     for field, value in update_data.items():
         setattr(listing, field, value)
 
-    await db.flush()
+    await db.commit()
+    await db.refresh(listing)
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one()
     return ok(ListingRead.model_validate(listing), "Listing updated successfully", request)
 
@@ -406,4 +409,5 @@ async def delete_listing(listing_id: UUID, request: Request, db: AsyncSession = 
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
     await db.delete(listing)
+    await db.commit()
     return ok(None, "Listing deleted successfully", request)

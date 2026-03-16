@@ -33,6 +33,14 @@ class SiteConfigBase(BaseModel):
             "'section' parses name/value pairs from structured sections."
         ),
     )
+    pagination_type: Literal["html_next", "query_param", "incremental_path"] = Field(
+        "html_next",
+        description="Pagination strategy used to move across result pages.",
+    )
+    pagination_param: Optional[str] = Field(
+        None,
+        description="Query parameter name used when pagination_type='query_param' (for example 'page').",
+    )
     link_pattern: Optional[str] = Field(None, description="Regex pattern to filter listing URLs on listing pages.")
     image_filter: Optional[str] = Field(None, description="Regex pattern to filter image URLs (e.g. exclude thumbnails).")
     is_active: bool = Field(True, description="Whether this site config is enabled for scraping.")
@@ -68,6 +76,8 @@ class SiteConfigUpdate(BaseModel):
     base_url: Optional[str] = None
     selectors: Optional[Dict[str, Any]] = None
     extraction_mode: Optional[ExtractionMode] = None
+    pagination_type: Optional[Literal["html_next", "query_param", "incremental_path"]] = None
+    pagination_param: Optional[str] = None
     link_pattern: Optional[str] = None
     image_filter: Optional[str] = None
     is_active: Optional[bool] = None

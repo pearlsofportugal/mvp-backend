@@ -16,6 +16,7 @@ from app.services.parser_service import (
 )
 
 from app.schemas.preview_schema import (
+    CoverageSummary,
     FieldPreviewResult,
     PreviewListingResponse,
     PreviewListingPageResponse,
@@ -47,11 +48,15 @@ CANONICAL_FIELDS = [
     ("raw_description", "raw_description"),
 ]
 
+CRITICAL_FIELDS = {"title", "price", "property_type", "district"}
 
-def _build_field_results(raw_data: Dict[str, Any]) -> Tuple[List[FieldPreviewResult], List[str]]:
+
+def _build_field_results(raw_data: Dict[str, Any]) -> Tuple[List[FieldPreviewResult], List[str], CoverageSummary]:
     """Map raw parser output to canonical field results with status."""
     results = []
     warnings = []
+    critical_missing: List[str] = []
+    ok_fields = 0
 
     for raw_key, canonical in CANONICAL_FIELDS:
         raw_value = raw_data.get(raw_key)
@@ -61,10 +66,14 @@ def _build_field_results(raw_data: Dict[str, Any]) -> Tuple[List[FieldPreviewRes
         if raw_value is not None and str(raw_value).strip():
             status = "ok"
             display_value = str(raw_value)[:200]
+            reason = None
+            ok_fields += 1
         else:
             status = "empty"
             display_value = None
-            if raw_key in ("title", "price", "district"):
+            reason = "field not extracted from parser output"
+            if raw_key in CRITICAL_FIELDS:
+                critical_missing.append(raw_key)
                 warnings.append(f"Campo crítico '{raw_key}' não foi extraído — verifica o seletor.")
 
         results.append(FieldPreviewResult(
@@ -72,6 +81,7 @@ def _build_field_results(raw_data: Dict[str, Any]) -> Tuple[List[FieldPreviewRes
             raw_value=display_value,
             mapped_to=canonical,
             status=status,
+            reason=reason,
         ))
 
     # Surface any extra fields the parser found outside the canonical list
@@ -85,9 +95,20 @@ def _build_field_results(raw_data: Dict[str, Any]) -> Tuple[List[FieldPreviewRes
                 raw_value=str(v)[:200],
                 mapped_to=None,
                 status="ok",
+                reason=None,
             ))
 
-    return results, warnings
+    total_fields = len(CANONICAL_FIELDS)
+    empty_fields = total_fields - ok_fields
+    coverage = CoverageSummary(
+        total_fields=total_fields,
+        ok_fields=ok_fields,
+        empty_fields=empty_fields,
+        coverage_percent=round((ok_fields / total_fields) * 100, 2) if total_fields else 0.0,
+        critical_missing=critical_missing,
+    )
+
+    return results, warnings, coverage
 
 
 async def preview_listing_detail(
@@ -122,6 +143,7 @@ async def preview_listing_detail(
                 url=url,
                 extraction_mode=extraction_mode,
                 fields=[],
+                coverage=CoverageSummary(total_fields=0, ok_fields=0, empty_fields=0, coverage_percent=0.0, critical_missing=[]),
                 images_found=0,
                 raw_data={},
                 warnings=[
@@ -137,7 +159,7 @@ async def preview_listing_detail(
             extraction_mode,
         )
 
-        field_results, field_warnings = _build_field_results(raw_data)
+        field_results, field_warnings, coverage = _build_field_results(raw_data)
         warnings.extend(field_warnings)
 
         images = raw_data.get("images", [])
@@ -150,6 +172,7 @@ async def preview_listing_detail(
             url=url,
             extraction_mode=extraction_mode,
             fields=field_results,
+            coverage=coverage,
             images_found=len(images),
             raw_data={k: v for k, v in raw_data.items()
                       if k not in ("images", "alt_texts", "headers")},
@@ -162,6 +185,7 @@ async def preview_listing_detail(
             url=url,
             extraction_mode=extraction_mode,
             fields=[],
+            coverage=CoverageSummary(total_fields=0, ok_fields=0, empty_fields=0, coverage_percent=0.0, critical_missing=[]),
             images_found=0,
             raw_data={},
             warnings=[f"Erro ao fazer preview: {str(e)}"],

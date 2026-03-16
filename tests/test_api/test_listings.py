@@ -11,9 +11,9 @@ async def test_list_listings_empty(client: AsyncClient):
     body = response.json()
     assert body["success"] is True
     data = body["data"]
-    assert data["total"] == 0
     assert data["items"] == []
-    assert data["page"] == 1
+    assert body["meta"]["total"] == 0
+    assert body["meta"]["page"] == 1
 
 
 @pytest.mark.asyncio
@@ -34,7 +34,10 @@ async def test_create_and_get_listing(client: AsyncClient):
     listing_id = created["id"]
     get_resp = await client.get(f"/api/v1/listings/{listing_id}")
     assert get_resp.status_code == 200
-    assert get_resp.json()["data"]["id"] == listing_id
+    detail = get_resp.json()["data"]
+    assert detail["id"] == listing_id
+    assert "raw_description" not in detail
+    assert detail["description"] is None
 
 
 @pytest.mark.asyncio
@@ -117,9 +120,9 @@ async def test_listing_filters(client: AsyncClient):
     # Filter by district
     resp = await client.get("/api/v1/listings", params={"district": "Lisboa"})
     assert resp.status_code == 200
-    assert resp.json()["data"]["total"] == 1
+    assert resp.json()["meta"]["total"] == 1
 
     # Filter by price range
     resp = await client.get("/api/v1/listings", params={"price_min": 300000})
     assert resp.status_code == 200
-    assert resp.json()["data"]["total"] == 1
+    assert resp.json()["meta"]["total"] == 1

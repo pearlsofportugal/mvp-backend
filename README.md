@@ -135,3 +135,13 @@ backend/
 4. **Retries with exponential backoff** — 429/5xx retriable, 4xx returns None immediately
 5. **Per-domain robots.txt cache** — 1-hour TTL to avoid hammering robots.txt endpoints
 6. **URL deduplication** — within a job, the same URL is never fetched twice
+
+## Partner Onboarding Workflow
+
+Use this process before activating a new partner in production:
+
+1. Create the `SiteConfig` and validate `listing_link_selector`, `next_page_selector`, and `link_pattern` with `POST /api/v1/sites/preview/listing-page`.
+2. Validate the detail page with `POST /api/v1/sites/preview/listing` until critical fields such as `title`, `price`, `property_type`, and `district` are extracted.
+3. Only enable temporary selector debug when needed by passing `_debug_selectors: true` in the selectors payload during troubleshooting.
+4. Add regression tests with realistic HTML snippets for parser and mapper coverage before enabling scheduled scraping.
+5. Do not onboard the next partner until the current partner has stable preview coverage and no critical-field warnings during scrape jobs.

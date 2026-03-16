@@ -54,7 +54,7 @@ async def test_ai_listing_enrichment_apply(client: AsyncClient, monkeypatch):
     created = await client.post("/api/v1/listings", json=make_listing_payload())
     listing_id = created.json()["data"]["id"]
 
-    def fake_enrich_listing(listing, payload):
+    async def fake_enrich_listing(listing, payload):
         return AIListingEnrichmentResponse(
             listing_id=listing.id,
             applied=payload.apply,

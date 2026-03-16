@@ -78,6 +78,8 @@ class JobRead(BaseModel):
     urls: Optional[Dict[str, Any]] = Field(None, description="Discovered and visited URL sets.")
     error_message: Optional[str] = Field(None, description="Terminal error message when status='failed'.")
     started_at: Optional[datetime] = None
+    last_heartbeat_at: Optional[datetime] = None
+    cancel_requested_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -97,6 +99,8 @@ class JobListRead(BaseModel):
     status: JobStatus
     progress: Optional[JobProgress] = None
     started_at: Optional[datetime] = None
+    last_heartbeat_at: Optional[datetime] = None
+    cancel_requested_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None

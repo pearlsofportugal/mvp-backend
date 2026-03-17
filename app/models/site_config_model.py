@@ -23,6 +23,7 @@ class SiteConfig(Base):
     # NOVAS COLUNAS
     pagination_type: Mapped[str] = mapped_column(String(20), nullable=False, default="html_next")
     pagination_param: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    confidence_scores: Mapped[dict] = mapped_column(JSON, default=dict)
 
     link_pattern: Mapped[Optional[str]] = mapped_column(String(500))
     image_filter: Mapped[Optional[str]] = mapped_column(String(500))

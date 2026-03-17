@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.logging import get_logger, set_correlation_id
+from app.crawler.confidence import calculate_confidence, log_low_confidence_scores
 from app.database import async_session_factory
 from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
@@ -535,9 +536,27 @@ async def _complete_job(db: AsyncSession, job_id: str) -> None:
             job.mark_cancelled()
             logger.info("Job %s cancelled successfully", job_id)
         else:
+            await _update_site_confidence_scores(db, job.site_key, UUID(job_id))
             job.mark_completed()
             logger.info("Job %s completed successfully", job_id)
         await db.commit()
+
+
+async def _update_site_confidence_scores(db: AsyncSession, site_key: str, job_uuid: UUID) -> None:
+    """Persist field extraction confidence back to the site configuration."""
+    listings = (
+        await db.execute(select(Listing).where(Listing.scrape_job_id == job_uuid))
+    ).scalars().all()
+    scores = calculate_confidence(listings)
+
+    site = (
+        await db.execute(select(SiteConfig).where(SiteConfig.key == site_key))
+    ).scalar_one_or_none()
+    if site is None:
+        return
+
+    site.confidence_scores = scores
+    log_low_confidence_scores(site_key, scores)
 
 
 async def _fail_job(db: AsyncSession, job_id: str, error: str) -> None:

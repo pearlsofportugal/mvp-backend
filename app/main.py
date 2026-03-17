@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.deps import RequireApiKey
+from app.api.routes.site_config import router as site_config_router
 from app.api.responses import ok
 from app.api.v1.ai_enrichment import router as ai_enrichment_router
 from app.api.v1.export import router as export_router
@@ -193,6 +194,11 @@ def create_app() -> FastAPI:
         sites_router,
         prefix="/api/v1/sites",
         tags=["sites"],
+        dependencies=auth_dependencies,
+    )
+    application.include_router(
+        site_config_router,
+        tags=["site-config"],
         dependencies=auth_dependencies,
     )
     application.include_router(

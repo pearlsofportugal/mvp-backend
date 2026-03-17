@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 
 ExtractionMode = Literal["section", "direct"]
@@ -94,5 +94,41 @@ class SiteConfigRead(SiteConfigBase):
 
     id: UUID
     key: str
+    confidence_scores: Dict[str, float] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+
+class SelectorCandidate(BaseModel):
+    """A ranked selector candidate for a target field."""
+
+    selector: str
+    sample: str
+    score: float = Field(..., ge=0, le=1)
+
+
+class SiteConfigSuggestRequest(BaseModel):
+    """Request payload for selector suggestion."""
+
+    url: AnyHttpUrl
+
+
+class SiteConfigSuggestResponse(BaseModel):
+    """Suggested selectors grouped by target field."""
+
+    source: Literal["json-ld", "heuristic"]
+    candidates: Dict[str, list[SelectorCandidate]]
+
+
+class SiteConfigPreviewRequest(BaseModel):
+    """Request payload for selector live preview."""
+
+    url: AnyHttpUrl
+    selector: str
+
+
+class SiteConfigPreviewResponse(BaseModel):
+    """Preview data returned for a selector against a page."""
+
+    matches: int = Field(..., ge=0)
+    preview: list[str] = Field(default_factory=list)

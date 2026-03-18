@@ -1,7 +1,7 @@
-"""FieldMapping SQLAlchemy model — configurable field name translations for parser."""
+﻿"""FieldMapping SQLAlchemy model — configurable field name translations for parser."""
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+
 
 from sqlalchemy import Boolean, DateTime, String
 from sqlalchemy.dialects.postgresql import UUID
@@ -54,7 +54,7 @@ class FieldMapping(Base):
     )
     
     # Optional site-specific mapping
-    site_key: Mapped[Optional[str]] = mapped_column(
+    site_key: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
         index=True,

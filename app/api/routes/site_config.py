@@ -1,4 +1,4 @@
-"""Legacy aliases for site-config tooling routes.
+﻿"""Legacy aliases for site-config tooling routes.
 
 Canonical endpoints now live under /api/v1/sites/preview/*.
 """

@@ -1,4 +1,4 @@
-"""Export API router — download listings as CSV, JSON, or Excel.
+﻿"""Export API router — download listings as CSV, JSON, or Excel.
 /api/v1/export
 """
 
@@ -6,7 +6,7 @@ import csv
 import io
 import json
 from decimal import Decimal
-from typing import Optional
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -31,13 +31,13 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 def _build_export_query(
-    district: Optional[str] = None,
-    county: Optional[str] = None,
-    property_type: Optional[str] = None,
-    source_partner: Optional[str] = None,
-    scrape_job_id: Optional[UUID] = None,
-    price_min: Optional[Decimal] = None,
-    price_max: Optional[Decimal] = None,
+    district: str | None = None,
+    county: str | None = None,
+    property_type: str | None = None,
+    source_partner: str | None = None,
+    scrape_job_id: UUID | None = None,
+    price_min: Decimal | None = None,
+    price_max: Decimal | None = None,
 ):
     """Build a filtered, ordered query for listing export."""
     filters = []
@@ -122,13 +122,13 @@ async def _load_export_rows(db: AsyncSession, filters: dict) -> list[Listing]:
 # ---------------------------------------------------------------------------
 
 def _export_filters(
-    district: Optional[str] = Query(None),
-    county: Optional[str] = Query(None),
-    property_type: Optional[str] = Query(None),
-    source_partner: Optional[str] = Query(None),
-    scrape_job_id: Optional[UUID] = Query(None),
-    price_min: Optional[Decimal] = Query(None),
-    price_max: Optional[Decimal] = Query(None),
+    district: str | None = Query(None),
+    county: str | None = Query(None),
+    property_type: str | None = Query(None),
+    source_partner: str | None = Query(None),
+    scrape_job_id: UUID | None = Query(None),
+    price_min: Decimal | None = Query(None),
+    price_max: Decimal | None = Query(None),
 ):
     return dict(
         district=district,

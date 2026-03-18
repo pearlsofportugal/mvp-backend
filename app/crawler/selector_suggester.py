@@ -1,14 +1,15 @@
-"""Selector suggestion and live preview helpers for site configuration."""
+﻿"""Selector suggestion and live preview helpers for site configuration."""
 
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from app.config import settings
 from app.core.logging import get_logger
@@ -34,6 +35,41 @@ _FIELD_ORDER = (
 )
 _JSON_LD_SELECTOR = "script[type='application/ld+json']"
 _GENERIC_SELECTOR_FALLBACKS = {"div", "span", "strong", "p", "img"}
+
+# ── Scoring weights (centralised to make tuning explicit) ─────────────────────
+class _W:
+    """Static scoring weights referenced throughout the scoring pipeline."""
+    # _score_candidate base score
+    BASE_MAX: float = 0.55
+    BASE_STEP: float = 0.04  # penalty per heuristic rank position
+    # _score_candidate component bonuses
+    SPECIFICITY: float = 0.08   # selector contains ., # or [
+    SPECIFICITY_FALLBACK: float = 0.02
+    RELATION: float = 0.05      # selector has a descendant combinator
+    EXPECTED_MAX: float = 0.25  # max bonus when sample matches JSON-LD value
+    STRUCTURED_BONUS: float = 0.08  # structured label match bonus
+    # _field_quality_score — field-specific
+    TITLE_BASE: float = 0.18
+    TITLE_H1_BONUS: float = 0.06
+    TITLE_KEYWORD_BONUS: float = 0.08
+    IMAGES_URL: float = 0.22
+    PRICE_EXPLICIT: float = 0.22
+    PRICE_IMPLICIT: float = 0.08
+    AREA_UTIL: float = 0.24
+    AREA_BRUTA: float = 0.12
+    LAND_TERRENO: float = 0.24
+    GENERIC_VALID: float = 0.18
+    GENERIC_FALLBACK: float = 0.12
+    # _selector_context_score
+    POSITIVE_HIT: float = 0.06
+    NEGATIVE_HIT: float = -0.12
+    # Penalty thresholds
+    TITLE_CARD_PENALTY: float = -0.16
+    TITLE_BAD_TOKEN_PENALTY: float = -0.18
+    TITLE_REF_PENALTY: float = -0.08
+    TITLE_SHORT_PENALTY: float = -0.12
+    # JSON-LD promotion similarity threshold
+    JSONLD_PROMO_THRESHOLD: float = 0.85
 _ADDRESS_LABELS: dict[str, tuple[str, ...]] = {
     "district": ("distrito", "district", "regiao", "região"),
     "county": ("concelho", "county", "cidade", "municipio", "município"),
@@ -44,6 +80,7 @@ _STRUCTURED_FIELD_LABELS: dict[str, tuple[str, ...]] = {
     "area": ("area", "área", "área útil", "area util", "área bruta", "area bruta", "gross area", "useful area"),
     "land_area": ("area terreno", "área terreno", "land area", "plot area", "lot area", "terreno"),
     "bathrooms": ("bathrooms", "casas de banho", "casa de banho", "wc", "wcs", "banho", "banhos"),
+    "rooms": ("rooms", "quartos", "bedrooms", "assoalhadas", "divisoes", "divisões"),
     "property_type": ("property type", "tipo de imóvel", "tipo imovel", "tipo", "type"),
     "typology": ("typology", "tipologia"),
     "condition": ("estado", "condition", "state"),
@@ -87,6 +124,18 @@ _TITLE_STOPWORDS = {
     "pesquisa",
     "pesquisar",
     "pedido de contacto",
+    "para mais informacoes",
+    "para mais informações",
+    "marcar uma visita",
+    "gerais",
+    "caracteristicas",
+    "características",
+    "areas",
+    "áreas",
+    "descricao",
+    "descrição",
+    "consultor responsavel",
+    "consultor responsável",
 }
 _LOCATION_STOPWORDS = {
     "referencia do imovel",
@@ -97,7 +146,17 @@ _LOCATION_STOPWORDS = {
     "favoritos",
     "pedido de contacto",
     "partilhar",
+    "n/d",
+    "nd",
+    "n.a.",
+    "nao disponivel",
+    "não disponível",
 }
+# Word-boundary patterns for stopwords that are common substrings (e.g. "na" in "na planta")
+_LOCATION_STOPWORD_PATTERNS = re.compile(
+    r"^\s*(?:na|n\.?a\.?|nd|n/d)\s*$",
+    re.IGNORECASE,
+)
 
 _FIELD_SELECTOR_HINTS: dict[str, dict[str, tuple[str, ...]]] = {
     "price": {
@@ -106,7 +165,7 @@ _FIELD_SELECTOR_HINTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "title": {
         "positive": ("title", "titulo", "título", "nome", "imovel", "imovel-titulo", "headline"),
-        "negative": ("favorite", "favoritos", "share", "partilha", "contact", "menu", "nav", "breadcrumb", "modal", "privacy", "litigios", "litígios", "card"),
+        "negative": ("favorite", "favoritos", "share", "partilha", "contact", "menu", "nav", "breadcrumb", "modal", "privacy", "litigios", "litígios", "card", "ang", "consultor", "agencia", "agência", "caracteristicas", "gerais", "descricao"),
     },
     "area": {
         "positive": ("area", "m2", "metros", "bruta", "util", "útil", "gross", "useful"),
@@ -303,6 +362,9 @@ async def suggest_selectors(url: str) -> dict[str, Any]:
         for field in _FIELD_ORDER
     }
 
+    # Cross-field dedup: area and land_area must not share the same top selector
+    _dedup_area_candidates(candidates)
+
     source = "json-ld" if any(reference_values.values()) else "heuristic"
     return {"source": source, "candidates": candidates}
 
@@ -343,13 +405,14 @@ def _collect_candidates(soup: BeautifulSoup, field: str, expected_values: list[s
             if not sample:
                 continue
 
-            selector = _build_selector(element, heuristic_selector)
+            selector = _build_selector(soup, element, heuristic_selector)
             score = _score_candidate(
                 field=field,
                 selector=selector,
                 sample=sample,
                 heuristic_index=heuristic_index,
                 expected_values=expected_values,
+                element=element,
             )
             if score <= 0:
                 continue
@@ -358,18 +421,49 @@ def _collect_candidates(soup: BeautifulSoup, field: str, expected_values: list[s
             candidate = {
                 "selector": selector,
                 "sample": sample,
-                "score": round(min(score, 0.99), 2),
+                "score": round(min(score / 1.5, 0.99), 2),
             }
             if existing is None or candidate["score"] > existing["score"]:
                 ranked[selector] = candidate
 
     if field in _STRUCTURED_FIELD_LABELS:
         for candidate in _collect_structured_field_candidates(soup, field, expected_values):
+            # Structured candidates are already normalised by _collect_structured_field_candidates
             existing = ranked.get(candidate["selector"])
             if existing is None or candidate["score"] > existing["score"]:
                 ranked[candidate["selector"]] = candidate
 
-    return sorted(ranked.values(), key=lambda item: item["score"], reverse=True)[:3]
+    results = sorted(ranked.values(), key=lambda item: item["score"], reverse=True)[:3]
+
+    # JSON-LD ground-truth promotion: if any candidate matches expected_values
+    # with high similarity, pin it to the front regardless of raw score.
+    if expected_values and results:
+        for i, candidate in enumerate(results):
+            best_sim = max(_similarity(candidate["sample"], ev) for ev in expected_values)
+            if best_sim >= _W.JSONLD_PROMO_THRESHOLD and i > 0:
+                results.insert(0, results.pop(i))
+                break
+
+    return results
+
+
+def _dedup_area_candidates(candidates: dict[str, list[dict[str, Any]]]) -> None:
+    """Ensure area and land_area don't share the same top-ranked selector.
+
+    If both fields point to the same selector as their best candidate, drop it
+    from whichever field has a weaker context signal (land_area loses to area
+    when context is ambiguous, since area is more commonly indexed).
+    """
+    area_list = candidates.get("area", [])
+    land_list = candidates.get("land_area", [])
+    if not area_list or not land_list:
+        return
+
+    if area_list[0]["selector"] == land_list[0]["selector"]:
+        # Keep the match for the field whose context is more specific.
+        # land_area is only valid when the label explicitly mentions terreno/land/lot.
+        # In ambiguous cases, keep area and drop the conflict from land_area.
+        land_list.pop(0)
 
 
 def _safe_select(soup: BeautifulSoup | Tag, selector: str) -> list[Tag]:
@@ -485,10 +579,11 @@ def _score_candidate(
     sample: str,
     heuristic_index: int,
     expected_values: list[str],
+    element: Tag | None = None,
 ) -> float:
     """Assign a confidence score to a selector candidate."""
-    base_score = max(0.2, 0.55 - heuristic_index * 0.04)
-    quality_score = _field_quality_score(field, sample, selector)
+    base_score = max(0.2, _W.BASE_MAX - heuristic_index * _W.BASE_STEP)
+    quality_score = _field_quality_score(field, sample, selector, _structured_context_label(element))
     if quality_score < 0:
         return 0.0
 
@@ -496,17 +591,17 @@ def _score_candidate(
     if selector_score < -0.1:
         return 0.0
 
-    specificity_score = 0.08 if any(token in selector for token in (".", "#", "[")) else 0.02
-    relation_score = 0.05 if " " in selector else 0.0
+    specificity_score = _W.SPECIFICITY if any(token in selector for token in (".", "#", "[")) else _W.SPECIFICITY_FALLBACK
+    relation_score = _W.RELATION if " " in selector else 0.0
     expected_match_score = 0.0
 
     if expected_values:
-        expected_match_score = max(_similarity(sample, expected_value) for expected_value in expected_values) * 0.25
+        expected_match_score = max(_similarity(sample, ev) for ev in expected_values) * _W.EXPECTED_MAX
 
     return base_score + quality_score + selector_score + specificity_score + relation_score + expected_match_score
 
 
-def _field_quality_score(field: str, sample: str, selector: str) -> float:
+def _field_quality_score(field: str, sample: str, selector: str, context_label: str | None = None) -> float:
     """Score whether the extracted sample resembles the target field."""
     if field == "title":
         normalized = _normalize_text(sample)
@@ -516,16 +611,26 @@ def _field_quality_score(field: str, sample: str, selector: str) -> float:
             return -0.25
         normalized_selector = _normalize_text(selector)
         if "card" in normalized_selector and "h1" not in normalized_selector:
-            return -0.16
+            return _W.TITLE_CARD_PENALTY
+        if any(token in normalized_selector for token in ("lbl_ang", "consultor", "caracteristicas", "descricao")):
+            return _W.TITLE_BAD_TOKEN_PENALTY
+        if any(token in normalized for token in ("ref.", "ref ", "850.000", "€", " eur")):
+            return _W.TITLE_REF_PENALTY
+        if any(token in normalized for token in ("venda", "buy", "rent")) and not any(keyword in normalized for keyword in _PROPERTY_KEYWORDS):
+            return _W.TITLE_REF_PENALTY
+        if sample.count(" ") == 1 and not any(keyword in normalized for keyword in _PROPERTY_KEYWORDS):
+            return _W.TITLE_SHORT_PENALTY
         if "," in sample and not any(keyword in normalized for keyword in _PROPERTY_KEYWORDS):
-            return -0.12
-        bonus = 0.06 if normalized_selector.startswith("h1") else 0.0
-        return 0.18 + bonus if len(sample) >= 5 and not sample.isnumeric() else 0.0
+            return _W.TITLE_SHORT_PENALTY
+        bonus = _W.TITLE_H1_BONUS if normalized_selector.startswith("h1") else 0.0
+        if any(keyword in normalized for keyword in _PROPERTY_KEYWORDS) and not any(token in normalized for token in ("ref", "€", " eur")):
+            bonus += _W.TITLE_KEYWORD_BONUS
+        return _W.TITLE_BASE + bonus if len(sample) >= 5 and not sample.isnumeric() else 0.0
 
     if field == "images":
         if any(token in _normalize_text(selector) for token in _FIELD_SELECTOR_HINTS["images"]["negative"]):
             return -0.3
-        return 0.22 if sample.startswith(("http://", "https://", "/", "//")) else 0.0
+        return _W.IMAGES_URL if sample.startswith(("http://", "https://", "/", "//")) else 0.0
 
     normalized_sample = _normalize_text(sample)
 
@@ -546,6 +651,26 @@ def _field_quality_score(field: str, sample: str, selector: str) -> float:
             return -0.18
         if normalized_sample in {"area", "área", "areas", "áreas", "util", "útil", "bruta"}:
             return -0.2
+        normalized_selector = _normalize_text(selector)
+        normalized_context = _normalize_text(context_label or "")
+        if field == "area":
+            if any(token in normalized_sample for token in ("area terreno", "área terreno", "terreno")):
+                return -0.16
+            if "terreno" in normalized_selector:
+                return -0.14
+            if any(token in normalized_context for token in ("area util", "área útil", "util")):
+                return _W.AREA_UTIL
+            if any(token in normalized_context for token in ("area bruta", "área bruta", "bruta")):
+                return _W.AREA_BRUTA
+            if any(token in normalized_sample for token in ("area bruta", "área bruta", "bruta")):
+                return _W.AREA_BRUTA + 0.02
+        if field == "land_area":
+            if any(token in normalized_context for token in ("area terreno", "área terreno", "terreno")):
+                return _W.LAND_TERRENO
+            if any(token in normalized_sample for token in ("area terreno", "área terreno", "terreno")) or "terreno" in normalized_selector:
+                return _W.LAND_TERRENO
+            if any(token in normalized_sample for token in ("area util", "área útil", "util", "area bruta", "área bruta", "bruta")):
+                return -0.12
 
     if field == "rooms":
         if re.fullmatch(r"\d{1,2}", normalized_sample):
@@ -565,45 +690,48 @@ def _field_quality_score(field: str, sample: str, selector: str) -> float:
         if any(token in normalized_sample for token in _PROPERTY_KEYWORDS):
             if len(sample) > 60 or sample.count(" ") > 8:
                 return -0.15
-            return 0.18
+            return _W.GENERIC_VALID
         if any(token in normalized_sample for token in ("venda", "arrendamento", "usado", "novo", "t0", "t1", "t2", "t3", "t4", "t5")):
             return -0.18
 
     if field == "typology":
         if _FIELD_VALIDATORS["typology"].search(sample):
-            return 0.2
+            return _W.GENERIC_VALID + 0.02
         return -0.15
 
     if field == "condition":
         if _FIELD_VALIDATORS["condition"].search(sample):
-            return 0.18
+            return _W.GENERIC_VALID
         return -0.12
 
     if field == "business_type":
         if _FIELD_VALIDATORS["business_type"].search(sample):
-            return 0.18
+            return _W.GENERIC_VALID
         return -0.12
 
     if field in _ADDRESS_LABELS:
-        if normalized_sample in _LOCATION_STOPWORDS:
+        if normalized_sample in _LOCATION_STOPWORDS or _LOCATION_STOPWORD_PATTERNS.match(normalized_sample):
             return -0.4
         if len(sample) < 3 or re.fullmatch(r"\d+(?:[.,]\d+)?", normalized_sample):
             return -0.2
         if len(sample) > 80:
             return -0.25
-        if sample.count(" ") > 8:
+        max_words = 12 if field == "parish" else 8
+        if sample.count(" ") > max_words:
             return -0.2
         if any(token in normalized_sample for token in _ADDRESS_LABELS[field]):
-            return 0.18
+            return _W.GENERIC_VALID
         if re.search(r"\b[A-ZÀ-Ý][a-zà-ÿ]+\b", sample) and sample.count(" ") <= 4:
-            return 0.12
+            return _W.GENERIC_FALLBACK
+        if field == "parish" and "," in sample:
+            return _W.GENERIC_VALID
 
     pattern = _FIELD_VALIDATORS.get(field)
     if pattern is not None and pattern.search(sample):
-        return 0.18
+        return _W.GENERIC_VALID
 
     if field in _ADDRESS_LABELS and len(sample) >= 3:
-        return 0.12
+        return _W.GENERIC_FALLBACK
 
     return 0.0
 
@@ -618,7 +746,7 @@ def _selector_context_score(field: str, selector: str) -> float:
     positive_hits = sum(1 for token in hints["positive"] if token in normalized_selector)
     negative_hits = sum(1 for token in hints["negative"] if token in normalized_selector)
 
-    return positive_hits * 0.06 - negative_hits * 0.12
+    return positive_hits * _W.POSITIVE_HIT + negative_hits * _W.NEGATIVE_HIT
 
 
 def _collect_structured_field_candidates(
@@ -626,12 +754,20 @@ def _collect_structured_field_candidates(
     field: str,
     expected_values: list[str],
 ) -> list[dict[str, Any]]:
-    """Extract candidates from generic PT/EN label/value summary blocks."""
+    """Extract candidates from generic PT/EN label/value summary blocks.
+
+    Searches within semantic containers first (main, article, section, .content,
+    etc.) to avoid scanning the entire DOM for every field.
+    """
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     all_structured_labels = {item for values in _STRUCTURED_FIELD_LABELS.values() for item in values}
 
-    for node in soup.select("li, div, p, tr"):
+    # Prefer focused containers; fall back to body if none found
+    containers = soup.select("main, article, section, .content, .detail, .property, .imovel, body")
+    search_root: BeautifulSoup | Tag = containers[0] if containers else soup
+
+    for node in search_root.select("li, div, p, tr"):
         if len(node.get_text(" ", strip=True)) > 120:
             continue
         label_text = _find_structured_label(node, field)
@@ -642,20 +778,22 @@ def _collect_structured_field_candidates(
         if not sample:
             continue
 
-        selector = _build_selector(value_element or node, node.name or "div")
+        selector = _build_selector(soup, value_element or node, node.name or "div")
         if selector in seen:
             continue
         seen.add(selector)
 
-        score = _score_candidate(
+        base_score = _score_candidate(
             field=field,
             selector=selector,
             sample=sample,
             heuristic_index=0,
             expected_values=expected_values,
-        ) + 0.08
-        if score <= 0:
+            element=value_element or node,
+        )
+        if base_score <= 0:
             continue
+        score = base_score + _W.STRUCTURED_BONUS
 
         candidates.append(
             {
@@ -686,26 +824,33 @@ def _find_structured_label(node: Tag, field: str) -> str | None:
 def _extract_structured_field_value(node: Tag, label_text: str, all_structured_labels: set[str]) -> tuple[str | None, Tag | None]:
     """Extract the value side of a generic label/value row or icon block."""
     for candidate in node.select(".value, .lbl_valor, p.info-item.float-right, .info-item.float-right, .info-item, td, dd"):
-        candidate_text = _truncate_whitespace(candidate.get_text(" ", strip=True))
-        normalized = _normalize_text(candidate_text)
-        if candidate_text and normalized and normalized != label_text and normalized not in all_structured_labels:
+        candidate_text = _clean_structured_value(candidate.get_text(" ", strip=True))
+        if _is_valid_structured_value(candidate_text, label_text, all_structured_labels):
             return candidate_text, candidate
 
     for candidate in node.select("span"):
         if "icon_label" in (candidate.get("class") or []):
             continue
-        candidate_text = _truncate_whitespace(candidate.get_text(" ", strip=True))
-        normalized = _normalize_text(candidate_text)
-        if candidate_text and normalized and normalized != label_text and normalized not in all_structured_labels:
+        candidate_text = _clean_structured_value(candidate.get_text(" ", strip=True))
+        if _is_valid_structured_value(candidate_text, label_text, all_structured_labels):
             return candidate_text, candidate
 
+    for child in node.children:
+        if isinstance(child, Tag):
+            child_text = _clean_structured_value(child.get_text(" ", strip=True))
+            if _is_valid_structured_value(child_text, label_text, all_structured_labels):
+                return child_text, child
+        elif isinstance(child, NavigableString):
+            child_text = _clean_structured_value(str(child))
+            if _is_valid_structured_value(child_text, label_text, all_structured_labels):
+                return child_text, node
+
     full_text = _truncate_whitespace(node.get_text(" ", strip=True))
-    pattern = rf"{re.escape(label_text)}\s*:?\s*(.+)$"
-    match = re.search(pattern, _normalize_text(full_text), re.IGNORECASE)
+    match = re.search(rf"(?i){re.escape(label_text)}\s*:?\s*(.+)$", full_text)
     if match:
-        extracted = match.group(1).strip()
-        if extracted:
-            return extracted.title(), None
+        extracted = _clean_structured_value(match.group(1))
+        if _is_valid_structured_value(extracted, label_text, all_structured_labels):
+            return extracted, node
 
     return None, None
 
@@ -735,17 +880,29 @@ def _typology_from_strings(*values: str | None) -> str | None:
     return None
 
 
-def _build_selector(element: Tag, fallback_selector: str) -> str:
+def _build_selector(root: BeautifulSoup | Tag, element: Tag, fallback_selector: str) -> str:
     """Build a specific CSS selector for the matched element when possible."""
     current_selector = _element_selector(element)
-    if current_selector and current_selector not in _GENERIC_SELECTOR_FALLBACKS:
+    if current_selector and current_selector not in _GENERIC_SELECTOR_FALLBACKS and _selector_occurrence_count(root, current_selector) == 1:
         return current_selector
 
+    child_selector = current_selector or (element.name or fallback_selector)
+
     parent = element.parent if isinstance(element.parent, Tag) else None
-    if parent is not None:
+    while parent is not None:
         parent_selector = _element_selector(parent)
         if parent_selector and parent_selector not in _GENERIC_SELECTOR_FALLBACKS:
-            return f"{parent_selector} {element.name}"
+            combined_selector = f"{parent_selector} {child_selector}"
+            if _selector_occurrence_count(root, combined_selector) == 1:
+                return combined_selector
+        parent = parent.parent if isinstance(parent.parent, Tag) else None
+
+    positional_selector = _build_positional_selector(element)
+    if positional_selector and _selector_occurrence_count(root, positional_selector) == 1:
+        return positional_selector
+
+    if current_selector and current_selector not in _GENERIC_SELECTOR_FALLBACKS:
+        return current_selector
 
     return fallback_selector
 
@@ -766,6 +923,52 @@ def _element_selector(element: Tag) -> str:
     return selector
 
 
+def _selector_occurrence_count(root: BeautifulSoup | Tag, selector: str) -> int:
+    """Return how many elements match a selector within the current document."""
+    if not selector:
+        return 0
+    return len(_safe_select(root, selector))
+
+
+def _build_positional_selector(element: Tag) -> str | None:
+    """Build a stable selector using nth-of-type when ids/classes are not enough."""
+    index = _nth_of_type_index(element)
+    if index is None or not element.name:
+        return None
+
+    parent = element.parent if isinstance(element.parent, Tag) else None
+    ancestors: list[Tag] = []
+    while parent is not None:
+        ancestors.append(parent)
+        parent = parent.parent if isinstance(parent.parent, Tag) else None
+
+    preferred_ancestors = [ancestor for ancestor in ancestors if ancestor.get("id")]
+    if not preferred_ancestors:
+        preferred_ancestors = ancestors
+
+    for ancestor in preferred_ancestors:
+        parent_selector = _element_selector(ancestor)
+        if parent_selector and parent_selector not in _GENERIC_SELECTOR_FALLBACKS:
+            selector = f"{parent_selector} {element.name}:nth-of-type({index})"
+            if _selector_occurrence_count(ancestor, f":scope {element.name}:nth-of-type({index})") == 1:
+                return selector
+
+    return None
+
+
+def _nth_of_type_index(element: Tag) -> int | None:
+    """Return the 1-based nth-of-type index of an element among its siblings."""
+    parent = element.parent if isinstance(element.parent, Tag) else None
+    if parent is None or not element.name:
+        return None
+
+    siblings = [child for child in parent.find_all(element.name, recursive=False)]
+    for index, sibling in enumerate(siblings, start=1):
+        if sibling is element:
+            return index
+    return None
+
+
 def _extract_sample_text(element: Tag, field: str) -> str:
     """Extract a representative sample value from a matched element."""
     if field == "images" or element.name == "img":
@@ -776,6 +979,19 @@ def _extract_sample_text(element: Tag, field: str) -> str:
         return _truncate_whitespace(text_value)
 
     return _truncate_whitespace(element.get("content") or element.get("value") or "")
+
+
+def _structured_context_label(element: Tag | None) -> str | None:
+    """Extract a nearby structured label from the current node or its ancestors."""
+    current = element
+    while current is not None:
+        label = current.select_one("b, strong, th, .name, .label, dt, .icon_label")
+        if label is not None:
+            text = _truncate_whitespace(label.get_text(" ", strip=True))
+            if text:
+                return text
+        current = current.parent if isinstance(current.parent, Tag) else None
+    return None
 
 
 def _address_parts(address_value: Any) -> tuple[str | None, str | None, str | None]:
@@ -840,14 +1056,40 @@ def _truncate_whitespace(value: str) -> str:
     return normalized[:160]
 
 
+def _clean_structured_value(value: str) -> str:
+    """Normalize extracted structured values by trimming separators around them."""
+    return _truncate_whitespace(value).strip(" :|-")
+
+
+def _is_valid_structured_value(value: str, label_text: str, all_structured_labels: set[str]) -> bool:
+    """Check whether a structured row fragment looks like a field value instead of a label."""
+    if not value:
+        return False
+
+    normalized = _normalize_text(value).strip(" :|-")
+    if not normalized:
+        return False
+    if normalized == label_text:
+        return False
+    if normalized in all_structured_labels:
+        return False
+    if normalized in _LOCATION_STOPWORDS or _LOCATION_STOPWORD_PATTERNS.match(normalized):
+        return False
+    if normalized in {"/", "-", "|"}:
+        return False
+    return True
+
+
 def _normalize_text(value: str) -> str:
-    """Normalize text for semantic matching and scoring."""
+    """Normalize text for semantic matching and scoring.
+
+    Uses NFKD decomposition to strip all diacritics in one pass, then
+    lowercases and collapses whitespace.
+    """
     lowered = _truncate_whitespace(value).lower()
-    lowered = lowered.replace("á", "a").replace("à", "a").replace("ã", "a")
-    lowered = lowered.replace("â", "a").replace("é", "e").replace("ê", "e")
-    lowered = lowered.replace("í", "i").replace("ó", "o").replace("ô", "o")
-    lowered = lowered.replace("õ", "o").replace("ú", "u").replace("ç", "c")
-    return lowered
+    # NFKD decomposes characters like 'é' → 'e' + combining accent,
+    # then encode/decode strips the combining marks.
+    return unicodedata.normalize("NFKD", lowered).encode("ascii", "ignore").decode()
 
 
 def _similarity(left: str, right: str) -> float:

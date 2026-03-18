@@ -1,7 +1,7 @@
-"""Pydantic schemas for SiteConfig API requests and responses."""
+﻿"""Pydantic schemas for SiteConfig API requests and responses."""
 
 from datetime import datetime
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
@@ -19,7 +19,7 @@ class SiteConfigBase(BaseModel):
 
     name: str = Field(..., min_length=1, description="Human-readable site name.")
     base_url: str = Field(..., description="Base URL of the target site (e.g. 'https://example.com').")
-    selectors: Dict[str, Any] = Field(
+    selectors: dict[str, Any] = Field(
         default_factory=dict,
         description=(
             "CSS selectors used for parsing. Expected keys: "
@@ -37,12 +37,12 @@ class SiteConfigBase(BaseModel):
         "html_next",
         description="Pagination strategy used to move across result pages.",
     )
-    pagination_param: Optional[str] = Field(
+    pagination_param: str | None = Field(
         None,
         description="Query parameter name used when pagination_type='query_param' (for example 'page').",
     )
-    link_pattern: Optional[str] = Field(None, description="Regex pattern to filter listing URLs on listing pages.")
-    image_filter: Optional[str] = Field(None, description="Regex pattern to filter image URLs (e.g. exclude thumbnails).")
+    link_pattern: str | None = Field(None, description="Regex pattern to filter listing URLs on listing pages.")
+    image_filter: str | None = Field(None, description="Regex pattern to filter image URLs (e.g. exclude thumbnails).")
     is_active: bool = Field(True, description="Whether this site config is enabled for scraping.")
 
 
@@ -72,15 +72,15 @@ class SiteConfigUpdate(BaseModel):
     All fields are optional; only supplied fields are applied.
     """
 
-    name: Optional[str] = Field(None, min_length=1)
-    base_url: Optional[str] = None
-    selectors: Optional[Dict[str, Any]] = None
-    extraction_mode: Optional[ExtractionMode] = None
-    pagination_type: Optional[Literal["html_next", "query_param", "incremental_path"]] = None
-    pagination_param: Optional[str] = None
-    link_pattern: Optional[str] = None
-    image_filter: Optional[str] = None
-    is_active: Optional[bool] = None
+    name: str | None = Field(None, min_length=1)
+    base_url: str | None = None
+    selectors: dict[str, Any] | None = None
+    extraction_mode: ExtractionMode | None = None
+    pagination_type: Literal["html_next", "query_param", "incremental_path"] | None = None
+    pagination_param: str | None = None
+    link_pattern: str | None = None
+    image_filter: str | None = None
+    is_active: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ class SiteConfigRead(SiteConfigBase):
 
     id: UUID
     key: str
-    confidence_scores: Dict[str, float] = Field(default_factory=dict)
+    confidence_scores: dict[str, float] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -117,7 +117,7 @@ class SiteConfigSuggestResponse(BaseModel):
     """Suggested selectors grouped by target field."""
 
     source: Literal["json-ld", "heuristic"]
-    candidates: Dict[str, list[SelectorCandidate]]
+    candidates: dict[str, list[SelectorCandidate]]
 
 
 class SiteConfigPreviewRequest(BaseModel):

@@ -1,4 +1,4 @@
-"""Scraper service — orchestrates scraping jobs via BackgroundTasks.
+﻿"""Scraper service — orchestrates scraping jobs via BackgroundTasks.
 
 This service:
 1. Runs as an async background task (scheduled via FastAPI BackgroundTasks)
@@ -16,7 +16,7 @@ import asyncio
 import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, or_, select
@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 _CRITICAL_PARSER_FIELDS = ("title", "price", "property_type", "district")
 
 
-def _missing_critical_parser_fields(raw_data: Dict[str, Any]) -> List[str]:
+def _missing_critical_parser_fields(raw_data: dict[str, Any]) -> list[str]:
     """Return critical parser fields that are absent or blank."""
     missing = []
     for field in _CRITICAL_PARSER_FIELDS:
@@ -120,7 +120,7 @@ async def run_scrape_job(job_id: str) -> None:
             job.mark_running()
             await db.commit()
 
-            await _run_scrape_async(    
+            await _run_scrape_async(
                 db=db,
                 job_id=str(job.id),
                 site_key=job.site_key,
@@ -134,6 +134,7 @@ async def run_scrape_job(job_id: str) -> None:
                 config=job.config or {},
                 pagination_type=site_config.pagination_type,
                 pagination_param=site_config.pagination_param,
+                request_headers=getattr(site_config, "request_headers", None) or {},
             )
 
         except Exception as e:
@@ -156,21 +157,34 @@ async def _run_scrape_async(
     base_url: str,
     start_url: str,
     max_pages: int,
-    selectors: Dict[str, Any],
+    selectors: dict[str, Any],
     extraction_mode: str,
-    link_pattern: Optional[str],
-    image_filter: Optional[str],
-    config: Dict[str, Any],
-    pagination_type: str = "html_next",      # NOVO
-    pagination_param: Optional[str] = None, # NOVO
+    link_pattern: str | None,
+    image_filter: str | None,
+    config: dict[str, Any],
+    pagination_type: str = "html_next",
+    pagination_param: str | None = None,
+    request_headers: dict[str, str] | None = None,
 ) -> None:
     """Async scraping loop — recebe a sessão DB existente em vez de abrir novas."""
+    if extraction_mode not in ("direct", "section"):
+        logger.warning("Unknown extraction_mode '%s' for job %s — defaulting to 'direct'", extraction_mode, job_id)
+        extraction_mode = "direct"
+
     scraper = EthicalScraper(
         min_delay=config.get("min_delay") or settings.default_min_delay,
         max_delay=config.get("max_delay") or settings.default_max_delay,
         user_agent=config.get("user_agent") or settings.default_user_agent,
         timeout=settings.request_timeout,
+        extra_headers=request_headers or {},
     )
+
+    # Load the job object ONCE and reuse it throughout — eliminates N+1 SELECT queries.
+    job_result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
+    job = job_result.scalar_one_or_none()
+    if not job:
+        logger.error("Job %s not found at scrape start", job_id)
+        return
 
     try:
         full_selectors = {**selectors}
@@ -185,31 +199,34 @@ async def _run_scrape_async(
         listings_scraped = 0
         errors = 0
 
-        await _touch_job_heartbeat(db, job_id)
+        job.touch_heartbeat()
+        await db.commit()
 
         for page_num in range(max_pages):
+            # Re-read only status/cancel fields — lightweight scalar query
             if await _check_job_cancelled(db, job_id):
                 logger.info("Job %s was cancelled", job_id)
                 break
 
-            await _touch_job_heartbeat(db, job_id)
+            job.touch_heartbeat()
+            await db.commit()
 
             logger.info("Scraping page %d: %s", page_num + 1, current_url)
 
             response = await asyncio.to_thread(scraper.get, current_url)
             if not response:
                 logger.warning("Failed to fetch page: %s", current_url)
-                await _add_job_log(db, job_id, "error", f"Failed to fetch page: {current_url}", current_url)
+                job.add_log("error", f"Failed to fetch page: {current_url}", current_url)
                 errors += 1
-                await _update_job_progress(
-                    db,
-                    job_id,
+                job.update_progress(
                     pages_visited=pages_visited,
                     listings_found=listings_found,
                     listings_scraped=listings_scraped,
                     errors=errors,
                 )
-                await _fail_job(db, job_id, f"Failed to fetch page: {current_url}")
+                job.touch_heartbeat()
+                await db.commit()
+                await _fail_job(db, job, f"Failed to fetch page: {current_url}")
                 return
 
             pages_visited += 1
@@ -218,8 +235,10 @@ async def _run_scrape_async(
             links = parse_listing_links(html, base_url, full_selectors)
             listings_found += len(links)
 
+            # Batch-track found URLs — single commit per page
             for link in links:
-                await _track_url_no_commit(db, job_id, "found", link)
+                job.add_url("found", link)
+            job.touch_heartbeat()
             await db.commit()
 
             for link in links:
@@ -229,8 +248,10 @@ async def _run_scrape_async(
                 try:
                     detail_response = await asyncio.to_thread(scraper.get, link)
                     if not detail_response:
-                        await _track_url(db, job_id, "failed", link)
-                        await _add_job_log(db, job_id, "warning", "Failed to fetch listing page", link)
+                        job.add_url("failed", link)
+                        job.add_log("warning", "Failed to fetch listing page", link)
+                        job.touch_heartbeat()
+                        await db.commit()
                         continue
 
                     raw_data = parse_listing_page(
@@ -242,9 +263,7 @@ async def _run_scrape_async(
 
                     missing_fields = _missing_critical_parser_fields(raw_data)
                     if missing_fields:
-                        await _add_job_log(
-                            db,
-                            job_id,
+                        job.add_log(
                             "warning",
                             f"Critical parser fields missing: {', '.join(missing_fields)}",
                             link,
@@ -252,31 +271,31 @@ async def _run_scrape_async(
 
                     property_schema = normalize_partner_payload(raw_data, site_key)
                     await _persist_listing(db, job_id, property_schema, site_key)
-                    await _track_url(db, job_id, "scraped", link)
+                    job.add_url("scraped", link)
                     listings_scraped += 1
 
-                    await _update_job_progress(
-                        db,
-                        job_id,
+                    job.update_progress(
                         pages_visited=pages_visited,
                         listings_found=listings_found,
                         listings_scraped=listings_scraped,
                         errors=errors,
                     )
+                    job.touch_heartbeat()
+                    await db.commit()
 
                 except Exception as e:
                     logger.error("Error processing listing %s: %s", link, str(e))
                     await db.rollback()
-                    await _track_url(db, job_id, "failed", link)
-                    await _add_job_log(db, job_id, "error", f"Error processing listing: {str(e)}", link)
+                    job.add_url("failed", link)
+                    job.add_log("error", f"Error processing listing: {str(e)}", link)
                     errors += 1
+                    job.touch_heartbeat()
+                    await db.commit()
 
             # ---------- PAGINATION UNIVERSAL ----------
             if pagination_type == "incremental_path":
-                # Ex: https://site.com/properties/2
                 current_url = f"{start_url.rstrip('/')}/{page_num + 2}"
             elif pagination_type == "query_param" and pagination_param:
-                # Ex: https://site.com/properties?page=2
                 sep = "&" if "?" in start_url else "?"
                 current_url = f"{start_url}{sep}{pagination_param}={page_num + 2}"
             elif pagination_type == "html_next":
@@ -287,15 +306,15 @@ async def _run_scrape_async(
                 current_url = next_url
             else:
                 logger.warning("Unknown pagination_type %s — stopping", pagination_type)
-                await _fail_job(db, job_id, f"Unknown pagination_type: {pagination_type}")
+                await _fail_job(db, job, f"Unknown pagination_type: {pagination_type}")
                 return
 
-        await _complete_job(db, job_id)
+        await _complete_job(db, job)
 
     except Exception as e:
         logger.error("Scraping error: %s\n%s", str(e), traceback.format_exc())
         await db.rollback()
-        await _fail_job(db, job_id, str(e))
+        await _fail_job(db, job, str(e))
     finally:
         scraper.close()
 
@@ -305,7 +324,7 @@ async def _run_scrape_async(
 # ---------------------------------------------------------------------------
 
 async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:
-    """Verifica se o job foi cancelado — reutiliza a sessão existente."""
+    """Lightweight check: only fetches status + cancel fields."""
     result = await db.execute(
         select(ScrapeJob.status, ScrapeJob.cancel_requested_at).where(ScrapeJob.id == UUID(job_id))
     )
@@ -316,67 +335,18 @@ async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:
     return status == "cancelled" or cancel_requested_at is not None
 
 
-async def _touch_job_heartbeat(db: AsyncSession, job_id: str, commit: bool = True) -> None:
-    """Atualiza o heartbeat do job para permitir deteção de workers órfãos."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-    job = result.scalar_one_or_none()
-    if job:
-        job.touch_heartbeat()
-        if commit:
-            await db.commit()
-
-
-async def _add_job_log(
-    db: AsyncSession,
-    job_id: str,
-    level: str,
-    message: str,
-    url: Optional[str] = None,
-) -> None:
-    """Adiciona uma entrada de log ao job e faz commit imediato (visibilidade em tempo real)."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-    job = result.scalar_one_or_none()
-    if job:
-        job.add_log(level, message, url)
-        job.touch_heartbeat()
-        await db.commit()
-
-
-async def _track_url(db: AsyncSession, job_id: str, status: str, url: str) -> None:
-    """Regista o estado de processamento de uma URL e faz commit imediato."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-    job = result.scalar_one_or_none()
-    if job:
-        job.add_url(status, url)
-        job.touch_heartbeat()
-        await db.commit()
-
-
-async def _track_url_no_commit(db: AsyncSession, job_id: str, status: str, url: str) -> None:
-    """Regista o estado de uma URL SEM commit — usado para batch commits por página."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-    job = result.scalar_one_or_none()
-    if job:
-        job.add_url(status, url)
-        job.touch_heartbeat()
-
-
-async def _update_job_progress(db: AsyncSession, job_id: str, **progress) -> None:
-    """Atualiza contadores de progresso e faz commit imediato (visibilidade em tempo real)."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-    job = result.scalar_one_or_none()
-    if job:
-        job.update_progress(**progress)
-        job.touch_heartbeat()
-        await db.commit()
-
-
 async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str) -> None:
     """Persist a listing atomically, using PostgreSQL upsert when possible."""
     listing_data = schema_to_listing_dict(schema, scrape_job_id=UUID(job_id))
     source_url = listing_data.get("source_url")
 
-    if source_url and db.get_bind().dialect.name == "postgresql":
+    # SQLAlchemy 2.x: inspect engine dialect via the session's bind
+    try:
+        dialect_name = db.get_bind().dialect.name
+    except Exception:
+        dialect_name = engine.dialect.name
+
+    if source_url and dialect_name == "postgresql":
         await _persist_listing_with_postgres_upsert(db, job_id, schema, listing_data)
         return
 
@@ -387,7 +357,7 @@ async def _persist_listing_with_postgres_upsert(
     db: AsyncSession,
     job_id: str,
     schema,
-    listing_data: Dict[str, Any],
+    listing_data: dict[str, Any],
 ) -> None:
     """Persist a listing with lock-aware PostgreSQL conflict handling."""
     source_url = listing_data["source_url"]
@@ -462,7 +432,7 @@ async def _persist_listing_legacy(
     db: AsyncSession,
     job_id: str,
     schema,
-    listing_data: Dict[str, Any],
+    listing_data: dict[str, Any],
 ) -> None:
     """Fallback persistence path for non-PostgreSQL environments."""
     existing = None
@@ -527,18 +497,16 @@ async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> N
         )
 
 
-async def _complete_job(db: AsyncSession, job_id: str) -> None:
+async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
     """Marca o job como completo."""
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-    job = result.scalar_one_or_none()
     if job and job.status == "running":
         if job.cancel_requested_at is not None:
             job.mark_cancelled()
-            logger.info("Job %s cancelled successfully", job_id)
+            logger.info("Job %s cancelled successfully", job.id)
         else:
-            await _update_site_confidence_scores(db, job.site_key, UUID(job_id))
+            await _update_site_confidence_scores(db, job.site_key, job.id)
             job.mark_completed()
-            logger.info("Job %s completed successfully", job_id)
+            logger.info("Job %s completed successfully", job.id)
         await db.commit()
 
 
@@ -559,12 +527,10 @@ async def _update_site_confidence_scores(db: AsyncSession, site_key: str, job_uu
     log_low_confidence_scores(site_key, scores)
 
 
-async def _fail_job(db: AsyncSession, job_id: str, error: str) -> None:
+async def _fail_job(db: AsyncSession, job: ScrapeJob, error: str) -> None:
     """Marca o job como falhado."""
     await db.rollback()
-    result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
-    job = result.scalar_one_or_none()
     if job and job.status == "running":
         job.mark_failed(error)
         await db.commit()
-        logger.error("Job %s failed: %s", job_id, error)
+        logger.error("Job %s failed: %s", job.id, error)

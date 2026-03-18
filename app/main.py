@@ -1,4 +1,4 @@
-"""FastAPI application factory and startup configuration."""
+﻿"""FastAPI application factory and startup configuration."""
 
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -50,6 +50,14 @@ async def lifespan(app: FastAPI):
         recovered_jobs = await recover_stale_jobs(session)
         if recovered_jobs:
             logger.warning("Recovered %d stale scrape job(s) during startup", recovered_jobs)
+
+    # Pre-warm parser field mapping cache so the first scrape request uses DB values
+    try:
+        from app.services.parser_service import _load_field_mappings
+        await _load_field_mappings()
+        logger.info("Parser field mapping cache warmed on startup")
+    except Exception as exc:
+        logger.warning("Could not warm parser field mapping cache: %s", exc)
 
     yield
 
@@ -211,7 +219,7 @@ def create_app() -> FastAPI:
         export_router,
         prefix="/api/v1/export",
         tags=["export"],
-        # dependencies=auth_dependencies,
+        dependencies=auth_dependencies,
     )
 
     # ── Public endpoints ───────────────────────────────────────────────────

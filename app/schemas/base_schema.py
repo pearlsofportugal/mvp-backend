@@ -1,10 +1,10 @@
-"""Base Pydantic schemas shared across the entire API.
+﻿"""Base Pydantic schemas shared across the entire API.
 
 Defines the uniform API envelope (ApiResponse), pagination metadata (Meta),
 error detail (ErrorDetail), and system health (SystemHealth).
 """
 
-from typing import Generic, List, Literal, Optional, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,16 +16,16 @@ class ErrorDetail(BaseModel):
 
     code: str = Field(..., description="Machine-readable error code (e.g. 'NOT_FOUND', 'VALIDATION_ERROR').")
     message: str = Field(..., description="Human-readable error description.")
-    field: Optional[str] = Field(None, description="Name of the field that caused the error, if applicable.")
+    field: str | None = Field(None, description="Name of the field that caused the error, if applicable.")
 
 
 class Meta(BaseModel):
     """Pagination metadata attached to list responses."""
 
-    page: Optional[int] = Field(None, ge=1, description="Current page number (1-indexed).")
-    page_size: Optional[int] = Field(None, ge=1, description="Number of items per page.")
-    total: Optional[int] = Field(None, ge=0, description="Total number of items across all pages.")
-    pages: Optional[int] = Field(None, ge=0, description="Total number of pages.")
+    page: int | None = Field(None, ge=1, description="Current page number (1-indexed).")
+    page_size: int | None = Field(None, ge=1, description="Number of items per page.")
+    total: int | None = Field(None, ge=0, description="Total number of items across all pages.")
+    pages: int | None = Field(None, ge=0, description="Total number of pages.")
 
 
 class ApiResponse(BaseModel, Generic[T]):
@@ -39,10 +39,10 @@ class ApiResponse(BaseModel, Generic[T]):
     model_config = ConfigDict(from_attributes=True)
 
     success: bool = Field(..., description="Whether the request succeeded.")
-    data: Optional[T] = Field(None, description="Response payload; present when success=True.")
-    meta: Optional[Meta] = Field(None, description="Pagination metadata for list responses.")
+    data: T | None = Field(None, description="Response payload; present when success=True.")
+    meta: Meta | None = Field(None, description="Pagination metadata for list responses.")
     message: str = Field("", description="Optional human-readable message.")
-    errors: List[ErrorDetail] = Field(default_factory=list, description="Error details; present when success=False.")
+    errors: list[ErrorDetail] = Field(default_factory=list, description="Error details; present when success=False.")
     trace_id: str = Field("", description="Correlation ID for distributed tracing.")
 
 

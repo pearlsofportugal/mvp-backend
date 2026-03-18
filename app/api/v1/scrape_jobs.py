@@ -1,11 +1,11 @@
-"""Scrape Jobs API router — launch, monitor, and manage scraping jobs.
+﻿"""Scrape Jobs API router — launch, monitor, and manage scraping jobs.
 /api/v1/jobs
 """
 
 import asyncio
 import json
 import math
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
@@ -82,7 +82,7 @@ async def create_job(
 async def list_jobs(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    status: Optional[str] = Query(None, pattern="^(pending|running|completed|failed|cancelled)$"),
+    status: str | None = Query(None, pattern="^(pending|running|completed|failed|cancelled)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -182,8 +182,8 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
       3. An unrecoverable error occurs
     """
     tick = 0
-    last_progress: Optional[dict] = None
-    last_status: Optional[str] = None
+    last_progress: dict | None = None
+    last_status: str | None = None
 
     try:
         async with async_session_factory() as db:

@@ -1,4 +1,4 @@
-"""PriceHistory SQLAlchemy model — tracks listing price changes over time."""
+﻿"""PriceHistory SQLAlchemy model — tracks listing price changes over time."""
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal

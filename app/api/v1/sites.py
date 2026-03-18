@@ -1,4 +1,4 @@
-"""Site Configs API router — CRUD for scraping site configurations.
+﻿"""Site Configs API router — CRUD for scraping site configurations.
 /api/v1/sites
 """
 

@@ -1,4 +1,4 @@
-"""Application settings loaded from environment variables."""
+﻿"""Application settings loaded from environment variables."""
 
 from pathlib import Path
 from typing import Literal

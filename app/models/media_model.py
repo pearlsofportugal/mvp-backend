@@ -1,7 +1,7 @@
-"""MediaAsset SQLAlchemy model — images, floorplans, videos linked to listings."""
+﻿"""MediaAsset SQLAlchemy model — images, floorplans, videos linked to listings."""
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
@@ -23,9 +23,9 @@ class MediaAsset(Base):
         index=True,
     )
     url: Mapped[str] = mapped_column(String(2048))
-    alt_text: Mapped[Optional[str]] = mapped_column(String(500))
-    type: Mapped[Optional[str]] = mapped_column(String(20), comment="photo, floorplan, video")
-    position: Mapped[Optional[int]] = mapped_column(Integer, comment="Display order")
+    alt_text: Mapped[str | None] = mapped_column(String(500))
+    type: Mapped[str | None] = mapped_column(String(20), comment="photo, floorplan, video")
+    position: Mapped[int | None] = mapped_column(Integer, comment="Display order")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     # Relationship

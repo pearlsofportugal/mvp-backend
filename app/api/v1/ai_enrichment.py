@@ -1,6 +1,6 @@
-"""AI enrichment API router — optimize text and selected listing fields with AI.
+﻿"""AI enrichment API router — optimize text and selected listing fields with AI.
 /api/v1/enrichment/ai"""
-from typing import Optional
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -97,7 +97,7 @@ async def preview_enrichment(
 async def enrichment_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    source_partner: Optional[str] = Query(None, description="Filter stats by source partner"),
+    source_partner: str | None = Query(None, description="Filter stats by source partner"),
 ):
     """Aggregated enrichment statistics across all listings."""
     # Total de listings (com filtro opcional por source_partner)

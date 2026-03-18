@@ -44,10 +44,14 @@ def test_calculate_confidence_returns_field_coverage() -> None:
         "rooms": 0.5,
         "location": 1.0,
         "images": 0.5,
+        "property_type": 0.0,
+        "typology": 0.0,
+        "condition": 0.0,
+        "business_type": 0.0,
+        "land_area": 0.0,
     }
 
 
-@pytest.mark.asyncio
 async def test_complete_job_persists_site_confidence_scores(db_session: AsyncSession) -> None:
     job_id = uuid4()
     site = SiteConfig(
@@ -78,7 +82,7 @@ async def test_complete_job_persists_site_confidence_scores(db_session: AsyncSes
     db_session.add_all([site, job, listing])
     await db_session.commit()
 
-    await _complete_job(db_session, str(job_id))
+    await _complete_job(db_session, job)
 
     persisted_site = (
         await db_session.execute(select(SiteConfig).where(SiteConfig.key == "test_site"))
@@ -95,4 +99,9 @@ async def test_complete_job_persists_site_confidence_scores(db_session: AsyncSes
         "rooms": 1.0,
         "location": 1.0,
         "images": 0.0,
+        "property_type": 0.0,
+        "typology": 0.0,
+        "condition": 0.0,
+        "business_type": 0.0,
+        "land_area": 0.0,
     }

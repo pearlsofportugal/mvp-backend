@@ -12,6 +12,10 @@ cp .env.example .env
 docker-compose up --build
 ```
 
+The example `.env` is host-friendly by default:
+- `DATABASE_URL` / `DATABASE_URL_SYNC` use `localhost`, so commands like `alembic upgrade head` work from your Windows shell or virtualenv.
+- Docker overrides those values for the `api` container and uses `DOCKER_DATABASE_URL` / `DOCKER_DATABASE_URL_SYNC`, where the PostgreSQL host is `db`.
+
 The API will be available at `http://localhost:8000`.
 - **Docs**: http://localhost:8000/docs (Swagger UI)
 - **ReDoc**: http://localhost:8000/redoc
@@ -31,12 +35,20 @@ docker run -d --name mvp-pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGR
 # Configure environment
 cp .env.example .env
 # Edit .env with your settings
+# Keep DATABASE_URL/DATABASE_URL_SYNC on localhost when running Alembic from the host.
 
 # Run migrations
 alembic upgrade head
 
 # Start the server
 uvicorn app.main:app --reload
+```
+
+If PostgreSQL is running via Compose, start the database first:
+
+```bash
+docker-compose up -d db
+alembic upgrade head
 ```
 
 ### Run Tests
@@ -135,3 +147,13 @@ backend/
 4. **Retries with exponential backoff** — 429/5xx retriable, 4xx returns None immediately
 5. **Per-domain robots.txt cache** — 1-hour TTL to avoid hammering robots.txt endpoints
 6. **URL deduplication** — within a job, the same URL is never fetched twice
+
+## Partner Onboarding Workflow
+
+Use this process before activating a new partner in production:
+
+1. Create the `SiteConfig` and use `POST /api/v1/sites/preview/selector-suggestions` to bootstrap candidate selectors for the detail page.
+2. Validate individual selectors with `POST /api/v1/sites/preview/selector` until critical fields such as `title`, `price`, `property_type`, and `district` are extracted.
+3. Only enable temporary selector debug when needed by passing `_debug_selectors: true` in the selectors payload during troubleshooting.
+4. Add regression tests with realistic HTML snippets for parser and mapper coverage before enabling scheduled scraping.
+5. Do not onboard the next partner until the current partner has stable preview coverage and no critical-field warnings during scrape jobs.

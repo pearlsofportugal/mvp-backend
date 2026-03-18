@@ -3,7 +3,6 @@ import pytest
 from httpx import AsyncClient
 
 
-@pytest.mark.asyncio
 async def test_list_listings_empty(client: AsyncClient):
     """GET /api/v1/listings returns empty list initially."""
     response = await client.get("/api/v1/listings")
@@ -11,12 +10,11 @@ async def test_list_listings_empty(client: AsyncClient):
     body = response.json()
     assert body["success"] is True
     data = body["data"]
-    assert data["total"] == 0
     assert data["items"] == []
-    assert data["page"] == 1
+    assert body["meta"]["total"] == 0
+    assert body["meta"]["page"] == 1
 
 
-@pytest.mark.asyncio
 async def test_create_and_get_listing(client: AsyncClient):
     """POST + GET /api/v1/listings creates and retrieves a listing."""
     from tests.conftest import make_listing_payload
@@ -34,10 +32,12 @@ async def test_create_and_get_listing(client: AsyncClient):
     listing_id = created["id"]
     get_resp = await client.get(f"/api/v1/listings/{listing_id}")
     assert get_resp.status_code == 200
-    assert get_resp.json()["data"]["id"] == listing_id
+    detail = get_resp.json()["data"]
+    assert detail["id"] == listing_id
+    assert "raw_description" not in detail
+    assert detail["description"] is None
 
 
-@pytest.mark.asyncio
 async def test_create_duplicate_source_url(client: AsyncClient):
     """POST /api/v1/listings rejects duplicate source_url."""
     from tests.conftest import make_listing_payload
@@ -48,7 +48,6 @@ async def test_create_duplicate_source_url(client: AsyncClient):
     assert dup_resp.status_code == 409
 
 
-@pytest.mark.asyncio
 async def test_update_listing(client: AsyncClient):
     """PATCH /api/v1/listings/{id} updates fields."""
     from tests.conftest import make_listing_payload
@@ -66,7 +65,6 @@ async def test_update_listing(client: AsyncClient):
     assert float(update_resp.json()["data"]["price_amount"]) == 275000.00
 
 
-@pytest.mark.asyncio
 async def test_delete_listing(client: AsyncClient):
     """DELETE /api/v1/listings/{id} removes a listing."""
     from tests.conftest import make_listing_payload
@@ -83,7 +81,6 @@ async def test_delete_listing(client: AsyncClient):
     assert get_resp.status_code == 404
 
 
-@pytest.mark.asyncio
 async def test_listing_stats(client: AsyncClient):
     """GET /api/v1/listings/stats returns aggregated stats."""
     from tests.conftest import make_listing_payload
@@ -102,7 +99,6 @@ async def test_listing_stats(client: AsyncClient):
     assert stats["avg_price"] is not None
 
 
-@pytest.mark.asyncio
 async def test_listing_filters(client: AsyncClient):
     """GET /api/v1/listings with filters works correctly."""
     from tests.conftest import make_listing_payload
@@ -117,9 +113,9 @@ async def test_listing_filters(client: AsyncClient):
     # Filter by district
     resp = await client.get("/api/v1/listings", params={"district": "Lisboa"})
     assert resp.status_code == 200
-    assert resp.json()["data"]["total"] == 1
+    assert resp.json()["meta"]["total"] == 1
 
     # Filter by price range
     resp = await client.get("/api/v1/listings", params={"price_min": 300000})
     assert resp.status_code == 200
-    assert resp.json()["data"]["total"] == 1
+    assert resp.json()["meta"]["total"] == 1

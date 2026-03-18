@@ -1,4 +1,4 @@
-"""Structured JSON logging with correlation IDs per scrape job."""
+﻿"""Structured JSON logging with correlation IDs per scrape job."""
 import logging
 import json
 import sys

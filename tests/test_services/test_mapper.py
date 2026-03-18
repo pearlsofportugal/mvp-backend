@@ -9,7 +9,10 @@ from app.services.mapper_service import (
     parse_bool,
     typology_to_bedrooms,
     calculate_price_per_m2,
+    _normalize_description_text,
+    normalize_habinedita_payload,
     normalize_pearls_payload,
+    schema_to_listing_dict,
 )
 
 
@@ -102,6 +105,15 @@ class TestCalculatePricePerM2:
         assert calculate_price_per_m2(None, 100.0) is None
 
 
+class TestNormalizeDescriptionText:
+    def test_strips_leading_description_label_and_normalizes_spacing(self):
+        raw = "DescriçãoS. Pedro da Cova.Gondomar. Moradia V3 com garagem para 2 carros."
+
+        normalized = _normalize_description_text(raw)
+
+        assert normalized == "S. Pedro da Cova. Gondomar. Moradia V3 com garagem para 2 carros."
+
+
 class TestNormalizePearlsPayload:
     def test_full_normalization(self):
         raw = {
@@ -140,3 +152,56 @@ class TestNormalizePearlsPayload:
         assert schema.features.has_pool is None
         assert len(schema.media) == 2
         assert schema.address.region == "Lisboa"
+        assert schema.descriptions["raw"] == "A nice apartment."
+        assert schema.descriptions["pt"] == "A nice apartment."
+
+
+class TestNormalizeHabineditaPayload:
+    def test_maps_land_area_and_seo_fields(self):
+        raw = {
+            "url": "https://habinedita.example/imovel/1",
+            "property_id": "HB123",
+            "title": "Moradia em Banda T3",
+            "price": "517 500 €",
+            "business_type": "Venda",
+            "property_type": "Moradia em Banda",
+            "typology": "T3",
+            "bathrooms": "5",
+            "useful_area": "185 m²",
+            "gross_area": "268 m²",
+            "land_area": "185 m²",
+            "district": "Porto",
+            "county": "Gondomar",
+            "parish": "Fânzeres e São Pedro da Cova",
+            "condition": "Novo",
+            "energy_certificate": "A",
+            "raw_description": "DescriçãoMoradia nova com garagem e jardim.",
+            "page_title": "Moradia em Banda T3 Porto Gondomar Venda 517.500 Ref. HB123",
+            "meta_description": "Moradia nova em Gondomar.",
+            "headers": [{"level": "h1", "text": "Moradia em Banda T3"}],
+            "images": ["https://example.com/1.jpg"],
+            "alt_texts": ["Frente"],
+            "contacts": "mail@example.com 912345678",
+            "advertiser": "Pedro Sousa",
+        }
+
+        schema = normalize_habinedita_payload(raw)
+        listing_data = schema_to_listing_dict(schema)
+
+        assert schema.source_partner == "habinedita"
+        assert schema.area_land_m2 == 185.0
+        assert schema.energy_certificate == "A"
+        assert schema.descriptions["raw"] == "DescriçãoMoradia nova com garagem e jardim."
+        assert schema.descriptions["pt"] == "Moradia nova com garagem e jardim."
+        assert schema.seo == {
+            "page_title": "Moradia em Banda T3 Porto Gondomar Venda 517.500 Ref. HB123",
+            "meta_description": "Moradia nova em Gondomar.",
+            "headers": [{"level": "h1", "text": "Moradia em Banda T3"}],
+        }
+        assert schema.features.is_new_construction is True
+        assert listing_data["area_land_m2"] == 185.0
+        assert listing_data["raw_description"] == "DescriçãoMoradia nova com garagem e jardim."
+        assert listing_data["description"] == "Moradia nova com garagem e jardim."
+        assert listing_data["page_title"] == "Moradia em Banda T3 Porto Gondomar Venda 517.500 Ref. HB123"
+        assert listing_data["meta_description"] == "Moradia nova em Gondomar."
+        assert listing_data["headers"] == [{"level": "h1", "text": "Moradia em Banda T3"}]

@@ -1,4 +1,4 @@
-"""FastAPI application factory and startup configuration."""
+﻿"""FastAPI application factory and startup configuration."""
 
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.deps import RequireApiKey
+from app.api.routes.site_config import router as site_config_router
 from app.api.responses import ok
 from app.api.v1.ai_enrichment import router as ai_enrichment_router
 from app.api.v1.export import router as export_router
@@ -24,6 +25,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger, setup_logging
 from app.schemas.base_schema import ApiResponse, ErrorDetail, SystemHealth
+from app.services.scraper_service import recover_stale_jobs
 
 logger = get_logger(__name__)
 
@@ -41,6 +43,21 @@ async def lifespan(app: FastAPI):
 
     if not settings.api_key:
         logger.warning("API_KEY is not configured. Protected routes will reject requests.")
+
+    from app.database import async_session_factory
+
+    async with async_session_factory() as session:
+        recovered_jobs = await recover_stale_jobs(session)
+        if recovered_jobs:
+            logger.warning("Recovered %d stale scrape job(s) during startup", recovered_jobs)
+
+    # Pre-warm parser field mapping cache so the first scrape request uses DB values
+    try:
+        from app.services.parser_service import _load_field_mappings
+        await _load_field_mappings()
+        logger.info("Parser field mapping cache warmed on startup")
+    except Exception as exc:
+        logger.warning("Could not warm parser field mapping cache: %s", exc)
 
     yield
 
@@ -185,6 +202,11 @@ def create_app() -> FastAPI:
         sites_router,
         prefix="/api/v1/sites",
         tags=["sites"],
+        dependencies=auth_dependencies,
+    )
+    application.include_router(
+        site_config_router,
+        tags=["site-config"],
         dependencies=auth_dependencies,
     )
     application.include_router(

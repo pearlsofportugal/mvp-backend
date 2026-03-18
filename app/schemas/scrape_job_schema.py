@@ -1,7 +1,7 @@
-"""Pydantic schemas for ScrapeJob API requests and responses."""
+﻿"""Pydantic schemas for ScrapeJob API requests and responses."""
 
 from datetime import datetime
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -19,7 +19,7 @@ class JobConfig(BaseModel):
 
     min_delay: float = Field(2.0, ge=0.5, description="Minimum delay between requests (seconds).")
     max_delay: float = Field(5.0, ge=1.0, description="Maximum delay between requests (seconds).")
-    user_agent: Optional[str] = Field(
+    user_agent: str | None = Field(
         None,
         description="Custom User-Agent string. Should include bot name and a contact URL or email.",
     )
@@ -41,7 +41,7 @@ class JobCreate(BaseModel):
     site_key: str = Field(..., min_length=1, description="Site configuration key (e.g. 'pearls').")
     start_url: str = Field(..., description="URL to begin scraping from.")
     max_pages: int = Field(10, ge=1, le=500, description="Maximum number of listing pages to scrape.")
-    config: Optional[JobConfig] = Field(None, description="Optional runtime configuration overrides.")
+    config: JobConfig | None = Field(None, description="Optional runtime configuration overrides.")
 
 
 # ---------------------------------------------------------------------------
@@ -68,19 +68,21 @@ class JobRead(BaseModel):
 
     id: UUID
     site_key: str
-    base_url: Optional[str] = None
+    base_url: str | None = None
     start_url: str
     max_pages: int
     status: JobStatus
-    progress: Optional[JobProgress] = None
-    config: Optional[JobConfig] = None
-    logs: Optional[Dict[str, Any]] = Field(None, description="Structured log entries keyed by step or timestamp.")
-    urls: Optional[Dict[str, Any]] = Field(None, description="Discovered and visited URL sets.")
-    error_message: Optional[str] = Field(None, description="Terminal error message when status='failed'.")
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    progress: JobProgress | None = None
+    config: JobConfig | None = None
+    logs: dict[str, Any] | None = Field(None, description="Structured log entries keyed by step or timestamp.")
+    urls: dict[str, Any] | None = Field(None, description="Discovered and visited URL sets.")
+    error_message: str | None = Field(None, description="Terminal error message when status='failed'.")
+    started_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    completed_at: datetime | None = None
     created_at: datetime
-    updated_at: Optional[datetime] = None
+    updated_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +97,10 @@ class JobListRead(BaseModel):
     id: UUID
     site_key: str
     status: JobStatus
-    progress: Optional[JobProgress] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    progress: JobProgress | None = None
+    started_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    completed_at: datetime | None = None
     created_at: datetime
-    updated_at: Optional[datetime] = None
+    updated_at: datetime | None = None

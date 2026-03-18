@@ -1,4 +1,4 @@
-"""Mapper service — normalizes raw parsed data into the canonical schema and DB models.
+﻿"""Mapper service — normalizes raw parsed data into the canonical schema and DB models.
 
 Handles:
 - Price parsing: "250 000 €" → (250000.0, "EUR")
@@ -18,7 +18,7 @@ Expandable per partner — dispatcher pattern.
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from uuid import UUID
 
 from app.core.logging import get_logger
@@ -38,8 +38,8 @@ logger = get_logger(__name__)
 # Configuration Cache
 # ═══════════════════════════════════════════════════════════
 
-_CURRENCY_MAP_CACHE: Dict[str, str] = {}
-_CACHE_TIMESTAMP: Optional[datetime] = None
+_CURRENCY_MAP_CACHE: dict[str, str] = {}
+_CACHE_TIMESTAMP: datetime | None = None
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 # Default fallback currency mappings
@@ -58,8 +58,28 @@ _DEFAULT_CURRENCY_MAP = {
     "jpy": "JPY",
 }
 
+_LISTING_STRING_LIMITS = {
+    "partner_id": 255,
+    "source_partner": 50,
+    "source_url": 2048,
+    "title": 500,
+    "listing_type": 20,
+    "property_type": 50,
+    "typology": 10,
+    "floor": 20,
+    "price_currency": 3,
+    "district": 100,
+    "county": 100,
+    "parish": 100,
+    "full_address": 500,
+    "energy_certificate": 10,
+    "advertiser": 255,
+    "contacts": 500,
+    "page_title": 500,
+}
 
-async def _load_currency_map() -> Dict[str, str]:
+
+async def _load_currency_map() -> dict[str, str]:
     """Load currency symbol mappings from DB with caching."""
     global _CURRENCY_MAP_CACHE, _CACHE_TIMESTAMP
 
@@ -105,7 +125,7 @@ async def _load_currency_map() -> Dict[str, str]:
     return _DEFAULT_CURRENCY_MAP
 
 
-def _get_currency_map() -> Dict[str, str]:
+def _get_currency_map() -> dict[str, str]:
     """Get cached currency map synchronously."""
     if _CURRENCY_MAP_CACHE:
         return _CURRENCY_MAP_CACHE
@@ -134,7 +154,7 @@ _PRICE_PATTERN = re.compile(r"[\d\s.,]+")
 
 
 
-def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
+def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
     """Parse a price string like '250 000 €' into (Decimal(250000), 'EUR')."""
     if not raw:
         return None, None
@@ -193,7 +213,7 @@ def parse_price(raw: Optional[str]) -> Tuple[Optional[Decimal], Optional[str]]:
 _AREA_PATTERN = re.compile(r"([\d\s.,]+)\s*m[²2]?", re.IGNORECASE)
 
 
-def parse_area(raw: Optional[str]) -> Optional[float]:
+def parse_area(raw: str | None) -> float | None:
     """Parse an area string like '120 m²' into 120.0."""
     if not raw:
         return None
@@ -218,7 +238,7 @@ def parse_area(raw: Optional[str]) -> Optional[float]:
 
 # ───────── Integer Parsing ─────────
 
-def parse_int(raw: Optional[str]) -> Optional[int]:
+def parse_int(raw: str | None) -> int | None:
     """Parse integer from string, handling 'T3' → 3 for typology."""
     if not raw:
         return None
@@ -230,7 +250,7 @@ def parse_int(raw: Optional[str]) -> Optional[int]:
 
 # ───────── Boolean Mapping ─────────
 
-def parse_bool(raw: Optional[str]) -> Optional[bool]:
+def parse_bool(raw: str | None) -> bool | None:
     """Map 'Yes'/truthy values to True, None/empty to None."""
     if raw is None:
         return None
@@ -256,7 +276,7 @@ _DATE_FORMATS = [
 ]
 
 
-def parse_date(raw: Optional[str]) -> Optional[datetime]:
+def parse_date(raw: str | None) -> datetime | None:
     """Parse a date string in various formats."""
     if not raw:
         return None
@@ -271,7 +291,7 @@ def parse_date(raw: Optional[str]) -> Optional[datetime]:
 
 # ───────── Typology → Bedrooms ─────────
 
-def typology_to_bedrooms(typology: Optional[str]) -> Optional[int]:
+def typology_to_bedrooms(typology: str | None) -> int | None:
     """Extract bedrooms from typology string: 'T3' → 3, 'T0' → 0."""
     if not typology:
         return None
@@ -284,18 +304,74 @@ def typology_to_bedrooms(typology: Optional[str]) -> Optional[int]:
 # ───────── Price per m² Calculation ─────────
 
 def calculate_price_per_m2(
-    price_amount: Optional[Decimal],
-    area: Optional[float],
-) -> Optional[Decimal]:
+    price_amount: Decimal | None,
+    area: float | None,
+) -> Decimal | None:
     """Calculate price per m² from price and area."""
     if price_amount and area and area > 0:
         return Decimal(str(round(float(price_amount) / area, 2)))
     return None
 
 
+def _normalize_whitespace(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(str(value).split())
+    return normalized or None
+
+
+def _truncate_text(value: str | None, max_length: int) -> str | None:
+    normalized = _normalize_whitespace(value)
+    if normalized is None:
+        return None
+    return normalized[:max_length]
+
+
+def _normalize_description_text(value: str | None) -> str | None:
+    """Build a cleaned listing description while keeping the raw text untouched."""
+    normalized = _normalize_whitespace(value)
+    if not normalized:
+        return None
+
+    normalized = re.sub(r"^(descriç[aã]o|description)\s*[:\-]?\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+    normalized = re.sub(r"([.!?;:])(\S)", r"\1 \2", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized or None
+
+
+def _looks_like_bad_address_fragment(value: str | None) -> bool:
+    normalized = _normalize_whitespace(value)
+    if not normalized:
+        return False
+    if len(normalized) > 100:
+        return True
+    sentence_markers = (". ", "!", "?", ":", " é ", " foi ", " com ")
+    return any(marker in normalized.lower() for marker in sentence_markers)
+
+
+def _normalize_habinedita_address(raw: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    district = _truncate_text(raw.get("district"), 100)
+    county = _truncate_text(raw.get("county"), 100)
+    parish = _truncate_text(raw.get("parish"), 100)
+
+    if _looks_like_bad_address_fragment(parish):
+        parish = None
+
+    location = _normalize_whitespace(raw.get("location"))
+    if location:
+        parts = [part.strip() for part in location.split(",") if part.strip()]
+        if not district and parts:
+            district = _truncate_text(parts[0], 100)
+        if not county and len(parts) > 1:
+            county = _truncate_text(parts[1], 100)
+
+    return district, county, parish
+
+
 # ───────── Partner Normalizers ─────────
 
-def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
+def normalize_pearls_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw Pearls of Portugal payload into canonical PropertySchema."""
     price_amount, price_currency = parse_price(raw.get("price"))
     useful_area = parse_area(raw.get("useful_area"))
@@ -317,6 +393,8 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
     price_per_m2_amount = calculate_price_per_m2(
         price_amount, gross_area or useful_area
     )
+    raw_description = raw.get("raw_description")
+    normalized_description = _normalize_description_text(raw_description)
 
     return PropertySchema(
         partner_id=raw.get("property_id") or raw.get("reference"),
@@ -361,7 +439,12 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
             has_pool=parse_bool(raw.get("swimming_pool")),
         ),
         descriptions={
-            "raw": raw.get("raw_description", ""),
+            key: value
+            for key, value in {
+                "raw": raw_description,
+                "pt": normalized_description,
+            }.items()
+            if value
         },
         energy_certificate=raw.get("energy_certificate"),
         construction_year=parse_int(raw.get("construction_year")),
@@ -370,12 +453,14 @@ def normalize_pearls_payload(raw: Dict[str, Any]) -> PropertySchema:
         raw_partner_payload=raw,
     )
 
-def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
+def normalize_habinedita_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw Habinédita payload into canonical PropertySchema."""
-    print("this is raw data", raw)
     price_amount, price_currency = parse_price(raw.get("price"))
     useful_area = parse_area(raw.get("useful_area"))
     gross_area = parse_area(raw.get("gross_area"))
+    land_area = parse_area(raw.get("land_area"))
+    district, county, parish = _normalize_habinedita_address(raw)
+    condition = _normalize_whitespace(raw.get("condition"))
 
     bedrooms = parse_int(raw.get("bedrooms"))
     if bedrooms is None:
@@ -387,6 +472,19 @@ def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
         listing_type = "rent"
 
     price_per_m2_amount = calculate_price_per_m2(price_amount, gross_area or useful_area)
+    raw_description = raw.get("raw_description")
+    normalized_description = _normalize_description_text(raw_description)
+    seo = {
+        "page_title": raw.get("page_title"),
+        "meta_description": raw.get("meta_description"),
+        "headers": raw.get("headers"),
+    }
+    seo = {key: value for key, value in seo.items() if value}
+    is_new_construction = None
+    if condition:
+        normalized_condition = condition.lower()
+        if any(marker in normalized_condition for marker in ("novo", "new", "constru", "em planta")):
+            is_new_construction = True
 
     return PropertySchema(
         partner_id=raw.get("property_id"),
@@ -409,11 +507,13 @@ def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
         ) if price_per_m2_amount else None,
         area_useful_m2=useful_area,
         area_gross_m2=gross_area,
+        area_land_m2=land_area,
         address=Address(
             country="Portugal",
-            region=raw.get("district"),
-            city=raw.get("county"),
-            area=raw.get("parish"),
+            region=district,
+            city=county,
+            area=parish,
+            full_address=_truncate_text(raw.get("full_address"), 500),
         ),
         media=[
             MediaAsset(url=url, alt_text=alt, type="photo")
@@ -428,10 +528,17 @@ def normalize_habinedita_payload(raw: Dict[str, Any]) -> PropertySchema:
             has_balcony=parse_bool(raw.get("balcony")),
             has_air_conditioning=parse_bool(raw.get("air_conditioning")),
             has_pool=parse_bool(raw.get("swimming_pool")),
+            is_new_construction=is_new_construction,
         ),
         descriptions={
-            "raw": raw.get("raw_description", ""),
+            key: value
+            for key, value in {
+                "raw": raw_description,
+                "pt": normalized_description,
+            }.items()
+            if value
         },
+        seo=seo or None,
         energy_certificate=raw.get("energy_certificate"),
         construction_year=parse_int(raw.get("construction_year")),
         advertiser=raw.get("advertiser"),
@@ -448,7 +555,7 @@ _PARTNER_NORMALIZERS = {
 }
 
 
-def normalize_partner_payload(raw: Dict[str, Any], partner: str) -> PropertySchema:
+def normalize_partner_payload(raw: dict[str, Any], partner: str) -> PropertySchema:
     """Dispatch normalization to the appropriate partner normalizer."""
     normalizer = _PARTNER_NORMALIZERS.get(partner)
     if not normalizer:
@@ -458,9 +565,9 @@ def normalize_partner_payload(raw: Dict[str, Any], partner: str) -> PropertySche
 
 # ───────── PropertySchema → DB model fields ─────────
 
-def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: Optional[UUID] = None) -> Dict[str, Any]:
+def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = None) -> dict[str, Any]:
     """Convert a canonical PropertySchema to a dict suitable for creating a Listing ORM model."""
-    return {
+    listing_dict = {
         "partner_id": schema.partner_id,
         "source_partner": schema.source_partner,
         "source_url": str(schema.source_url) if schema.source_url else None,
@@ -493,6 +600,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: Optional[UUID]
         "advertiser": schema.advertiser,
         "contacts": schema.contacts,
         "raw_description": schema.descriptions.get("raw"),
+        "description": schema.descriptions.get("pt"),
         "description_quality_score": schema.description_quality_score,
         "page_title": schema.seo.get("page_title") if schema.seo else None,
         "headers": schema.seo.get("headers") if schema.seo else None,
@@ -500,3 +608,8 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: Optional[UUID]
         "raw_payload": schema.raw_partner_payload,
         "scrape_job_id": scrape_job_id,
     }
+
+    for field, max_length in _LISTING_STRING_LIMITS.items():
+        listing_dict[field] = _truncate_text(listing_dict.get(field), max_length)
+
+    return listing_dict

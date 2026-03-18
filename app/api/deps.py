@@ -1,4 +1,4 @@
-"""API dependencies — database session, authentication, and common utilities.
+﻿"""API dependencies — database session, authentication, and common utilities.
 
 FIX (prioridade alta): Adicionada autenticação por API key.
 

@@ -1,9 +1,9 @@
-"""Listings API router — full CRUD with filtering, pagination, sorting, stats.
+﻿"""Listings API router — full CRUD with filtering, pagination, sorting, stats.
 /api/v1/listings"""
 import math
 from decimal import Decimal
 from datetime import datetime
-from typing import Optional
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -21,6 +21,7 @@ from app.schemas.listing_schema import (
     DuplicateEntry,
     DuplicatesResponse,
     ListingCreate,
+    ListingDetailRead,
     ListingListRead,
     ListingRead,
     ListingStats,
@@ -117,26 +118,26 @@ SORT_FIELDS = {
 async def list_listings(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    district: Optional[str] = Query(None),
-    county: Optional[str] = Query(None),
-    parish: Optional[str] = Query(None),
-    property_type: Optional[str] = Query(None),
-    typology: Optional[str] = Query(None),
-    listing_type: Optional[str] = Query(None, pattern="^(sale|rent)$"),
-    source_partner: Optional[str] = Query(None),
-    scrape_job_id: Optional[UUID] = Query(None),
-    price_min: Optional[Decimal] = Query(None),
-    price_max: Optional[Decimal] = Query(None),
-    area_min: Optional[float] = Query(None),
-    area_max: Optional[float] = Query(None),
-    bedrooms_min: Optional[int] = Query(None),
-    bedrooms_max: Optional[int] = Query(None),
-    has_garage: Optional[bool] = Query(None),
-    has_pool: Optional[bool] = Query(None),
-    has_elevator: Optional[bool] = Query(None),
-    created_after: Optional[datetime] = Query(None),
-    created_before: Optional[datetime] = Query(None),
-    search: Optional[str] = Query(None),
+    district: str | None = Query(None),
+    county: str | None = Query(None),
+    parish: str | None = Query(None),
+    property_type: str | None = Query(None),
+    typology: str | None = Query(None),
+    listing_type: str | None = Query(None, pattern="^(sale|rent)$"),
+    source_partner: str | None = Query(None),
+    scrape_job_id: UUID | None = Query(None),
+    price_min: Decimal | None = Query(None),
+    price_max: Decimal | None = Query(None),
+    area_min: float | None = Query(None),
+    area_max: float | None = Query(None),
+    bedrooms_min: int | None = Query(None),
+    bedrooms_max: int | None = Query(None),
+    has_garage: bool | None = Query(None),
+    has_pool: bool | None = Query(None),
+    has_elevator: bool | None = Query(None),
+    created_after: datetime | None = Query(None),
+    created_before: datetime | None = Query(None),
+    search: str | None = Query(None),
     sort_by: str = Query("created_at", enum=list(SORT_FIELDS.keys())),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -176,9 +177,9 @@ async def list_listings(
 async def search_listings(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    q: Optional[str] = Query(None, min_length=2),
-    source_partner: Optional[str] = Query(None),
-    is_enriched: Optional[bool] = Query(None),
+    q: str | None = Query(None),
+    source_partner: str | None = Query(None),
+    is_enriched: bool | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -222,7 +223,7 @@ async def search_listings(
 
     items: list[ListingSearchItem] = []
     for listing in listings:
-        thumbnail_url: Optional[str] = None
+        thumbnail_url: str | None = None
         if listing.media_assets:
             first = min(listing.media_assets, key=lambda m: m.position or 999)
             thumbnail_url = first.url
@@ -256,8 +257,8 @@ async def search_listings(
 async def listing_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    source_partner: Optional[str] = Query(None),
-    scrape_job_id: Optional[UUID] = Query(None),
+    source_partner: str | None = Query(None),
+    scrape_job_id: UUID | None = Query(None),
 ):
     """Aggregated listing statistics."""
     base_filter = []
@@ -340,13 +341,13 @@ async def detect_duplicates(
 # ══════════════════════════════════════════════════════════════════
 #  DYNAMIC ROUTES — /{listing_id} must come LAST
 # ═════════════════════════════════════════════════════════════════
-@router.get("/{listing_id}", response_model=ApiResponse[ListingRead], responses=ERROR_RESPONSES, operation_id="get_listing")
+@router.get("/{listing_id}", response_model=ApiResponse[ListingDetailRead], responses=ERROR_RESPONSES, operation_id="get_listing")
 async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get a single listing by ID."""
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one_or_none()
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
-    return ok(ListingRead.model_validate(listing), "Listing retrieved successfully", request)
+    return ok(ListingDetailRead.model_validate(listing), "Listing retrieved successfully", request)
 
 
 @router.post("", response_model=ApiResponse[ListingRead], status_code=201, responses=ERROR_RESPONSES, operation_id="create_listing")
@@ -364,7 +365,8 @@ async def create_listing(payload: ListingCreate, request: Request, db: AsyncSess
     for asset_data in payload.media_assets:
         db.add(MediaAsset(listing_id=listing.id, **asset_data.model_dump()))
 
-    await db.flush()
+    await db.commit()
+    await db.refresh(listing)
     listing = (await db.execute(select(Listing).where(Listing.id == listing.id))).scalar_one()
     return ok(ListingRead.model_validate(listing), "Listing created successfully", request)
 
@@ -393,7 +395,8 @@ async def update_listing(
     for field, value in update_data.items():
         setattr(listing, field, value)
 
-    await db.flush()
+    await db.commit()
+    await db.refresh(listing)
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one()
     return ok(ListingRead.model_validate(listing), "Listing updated successfully", request)
 
@@ -406,4 +409,5 @@ async def delete_listing(listing_id: UUID, request: Request, db: AsyncSession = 
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
     await db.delete(listing)
+    await db.commit()
     return ok(None, "Listing deleted successfully", request)

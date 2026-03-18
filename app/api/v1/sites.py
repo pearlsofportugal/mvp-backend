@@ -1,4 +1,4 @@
-"""Site Configs API router — CRUD for scraping site configurations.
+﻿"""Site Configs API router — CRUD for scraping site configurations.
 /api/v1/sites
 """
 
@@ -8,70 +8,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.responses import ERROR_RESPONSES, ok
+from app.crawler.selector_suggester import preview_selector, suggest_selectors
 from app.core.exceptions import DuplicateError, NotFoundError
 from app.models.site_config_model import SiteConfig
 from app.schemas.base_schema import ApiResponse
-from app.schemas.preview_schema import (
-    PreviewListingPageRequest,
-    PreviewListingPageResponse,
-    PreviewListingRequest,
-    PreviewListingResponse,
+from app.schemas.site_config_schema import (
+    SiteConfigCreate,
+    SiteConfigPreviewRequest,
+    SiteConfigPreviewResponse,
+    SiteConfigRead,
+    SiteConfigSuggestRequest,
+    SiteConfigSuggestResponse,
+    SiteConfigUpdate,
 )
-from app.schemas.site_config_schema import SiteConfigCreate, SiteConfigRead, SiteConfigUpdate
-from app.services.preview_service import preview_listing_detail, preview_listing_page
 
 router = APIRouter()
 
 
-# ---------------------------------------------------------------------------
-# Preview endpoints (no DB — test selectors against live pages)
-# ---------------------------------------------------------------------------
-
 @router.post(
-    "/preview/listing",
-    response_model=ApiResponse[PreviewListingResponse],
+    "/preview/selector-suggestions",
+    response_model=ApiResponse[SiteConfigSuggestResponse],
     responses=ERROR_RESPONSES,
-    operation_id="preview_listing",
+    operation_id="suggest_site_selectors",
 )
-async def preview_listing_endpoint(payload: PreviewListingRequest, request: Request):
-    """Test selectors against a real listing detail page.
-
-    Fetches the URL, runs the parser with the provided selectors, and returns
-    field-by-field results showing what was extracted vs what is missing.
-    Does NOT save anything to the database.
-
-    Use this before saving a site config to validate your selectors.
-    """
-    result = await preview_listing_detail(
-        url=payload.url,
-        selectors=payload.selectors,
-        extraction_mode=payload.extraction_mode,
-        base_url=payload.base_url,
-        image_filter=payload.image_filter,
-    )
-    return ok(result, "Preview completed", request)
+async def suggest_site_selectors(payload: SiteConfigSuggestRequest, request: Request):
+    """Suggest likely selectors for a listing detail page before saving a site config."""
+    result = await suggest_selectors(str(payload.url))
+    return ok(SiteConfigSuggestResponse.model_validate(result), "Selector suggestions generated", request)
 
 
 @router.post(
-    "/preview/listing-page",
-    response_model=ApiResponse[PreviewListingPageResponse],
+    "/preview/selector",
+    response_model=ApiResponse[SiteConfigPreviewResponse],
     responses=ERROR_RESPONSES,
-    operation_id="preview_listing_page",
+    operation_id="preview_site_selector",
 )
-async def preview_listing_page_endpoint(payload: PreviewListingPageRequest, request: Request):
-    """Test listing link extraction against a real search/listing page.
-
-    Fetches the URL and returns all listing links found + next page URL.
-    Use this to validate 'listing_link_selector', 'link_pattern', and 'next_page_selector'.
-    Does NOT save anything to the database.
-    """
-    result = await preview_listing_page(
-        url=payload.url,
-        selectors=payload.selectors,
-        base_url=payload.base_url,
-        link_pattern=payload.link_pattern,
-    )
-    return ok(result, "Listing page preview completed", request)
+async def preview_site_selector(payload: SiteConfigPreviewRequest, request: Request):
+    """Preview live matches for a single selector against a detail page."""
+    result = await preview_selector(str(payload.url), payload.selector)
+    return ok(SiteConfigPreviewResponse.model_validate(result), "Selector preview completed", request)
 
 
 # ---------------------------------------------------------------------------

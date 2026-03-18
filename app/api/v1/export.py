@@ -1,4 +1,4 @@
-"""Export API router — download listings as CSV, JSON, or Excel.
+﻿"""Export API router — download listings as CSV, JSON, or Excel.
 /api/v1/export
 """
 
@@ -6,7 +6,7 @@ import csv
 import io
 import json
 from decimal import Decimal
-from typing import Optional
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.responses import ERROR_RESPONSES
+from app.config import settings
+from app.core.exceptions import ExportError
 from app.models.listing_model import Listing
 
 router = APIRouter()
@@ -29,13 +31,13 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 def _build_export_query(
-    district: Optional[str] = None,
-    county: Optional[str] = None,
-    property_type: Optional[str] = None,
-    source_partner: Optional[str] = None,
-    scrape_job_id: Optional[UUID] = None,
-    price_min: Optional[Decimal] = None,
-    price_max: Optional[Decimal] = None,
+    district: str | None = None,
+    county: str | None = None,
+    property_type: str | None = None,
+    source_partner: str | None = None,
+    scrape_job_id: UUID | None = None,
+    price_min: Decimal | None = None,
+    price_max: Decimal | None = None,
 ):
     """Build a filtered, ordered query for listing export."""
     filters = []
@@ -104,18 +106,29 @@ def _listing_to_dict(listing: Listing) -> dict:
     }
 
 
+async def _load_export_rows(db: AsyncSession, filters: dict) -> list[Listing]:
+    """Load export rows with a hard cap to protect API memory usage."""
+    query = _build_export_query(**filters).limit(settings.export_max_rows + 1)
+    listings = (await db.execute(query)).scalars().all()
+    if len(listings) > settings.export_max_rows:
+        raise ExportError(
+            f"Export exceeds maximum row limit of {settings.export_max_rows}. Refine filters and try again."
+        )
+    return listings
+
+
 # ---------------------------------------------------------------------------
 # Shared query params (DRY — avoids repeating 7 Query() declarations)
 # ---------------------------------------------------------------------------
 
 def _export_filters(
-    district: Optional[str] = Query(None),
-    county: Optional[str] = Query(None),
-    property_type: Optional[str] = Query(None),
-    source_partner: Optional[str] = Query(None),
-    scrape_job_id: Optional[UUID] = Query(None),
-    price_min: Optional[Decimal] = Query(None),
-    price_max: Optional[Decimal] = Query(None),
+    district: str | None = Query(None),
+    county: str | None = Query(None),
+    property_type: str | None = Query(None),
+    source_partner: str | None = Query(None),
+    scrape_job_id: UUID | None = Query(None),
+    price_min: Decimal | None = Query(None),
+    price_max: Decimal | None = Query(None),
 ):
     return dict(
         district=district,
@@ -146,7 +159,7 @@ async def export_csv(
     filters: dict = Depends(_export_filters),
 ):
     """Export filtered listings as CSV."""
-    listings = (await db.execute(_build_export_query(**filters))).scalars().all()
+    listings = await _load_export_rows(db, filters)
     output = io.StringIO()
 
     if listings:
@@ -177,7 +190,7 @@ async def export_json(
     filters: dict = Depends(_export_filters),
 ):
     """Export filtered listings as JSON."""
-    listings = (await db.execute(_build_export_query(**filters))).scalars().all()
+    listings = await _load_export_rows(db, filters)
     rows = [_listing_to_dict(l) for l in listings]
     content = json.dumps(rows, ensure_ascii=False, indent=2)
 
@@ -205,7 +218,7 @@ async def export_excel(
     filters: dict = Depends(_export_filters),
 ):
     """Export filtered listings as Excel (.xlsx)."""
-    listings = (await db.execute(_build_export_query(**filters))).scalars().all()
+    listings = await _load_export_rows(db, filters)
     rows = [_listing_to_dict(l) for l in listings]
 
     wb = Workbook()

@@ -1,11 +1,11 @@
-"""Scrape Jobs API router — launch, monitor, and manage scraping jobs.
+﻿"""Scrape Jobs API router — launch, monitor, and manage scraping jobs.
 /api/v1/jobs
 """
 
 import asyncio
 import json
 import math
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
@@ -21,7 +21,7 @@ from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
 from app.schemas.base_schema import ApiResponse, Meta
 from app.schemas.scrape_job_schema import JobCreate, JobListRead, JobRead
-from app.services.scraper_service import run_scrape_job
+from app.services.scraper_service import recover_stale_jobs, run_scrape_job
 
 router = APIRouter()
 
@@ -42,9 +42,14 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Launch a new scrape job. Runs in background (MVP: one job at a time per worker)."""
+    await recover_stale_jobs(db)
+
     running = (await db.execute(
-        select(ScrapeJob).where(ScrapeJob.status == "running")
-    )).scalar_one_or_none()
+        select(ScrapeJob)
+        .where(ScrapeJob.status == "running")
+        .order_by(desc(ScrapeJob.started_at), desc(ScrapeJob.created_at))
+        .limit(1)
+    )).scalars().first()
     if running:
         raise JobAlreadyRunningError(
             "A scrape job is already running. Wait for it to finish or cancel it."
@@ -77,7 +82,7 @@ async def create_job(
 async def list_jobs(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    status: Optional[str] = Query(None, pattern="^(pending|running|completed|failed|cancelled)$"),
+    status: str | None = Query(None, pattern="^(pending|running|completed|failed|cancelled)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -123,13 +128,23 @@ async def cancel_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
     if not job:
         raise NotFoundError(f"Scrape job {job_id} not found")
 
-    # FIX: use AppException for invalid state — JobAlreadyRunningError is for "already running"
+    if job.status == "pending":
+        job.mark_cancelled()
+        await db.commit()
+        return ok(JobRead.model_validate(job), "Job cancelled successfully", request)
+
+    if job.status == "running":
+        if job.cancel_requested_at is None:
+            job.request_cancel()
+            await db.commit()
+            return ok(JobRead.model_validate(job), "Job cancellation requested successfully", request)
+
+        return ok(JobRead.model_validate(job), "Job cancellation was already requested", request)
+
     if job.status not in ("pending", "running"):
         raise AppException(f"Job {job_id} cannot be cancelled (status: {job.status})")
 
-    job.mark_cancelled()
-    await db.commit()
-    return ok(JobRead.model_validate(job), "Job cancelled successfully", request)
+    raise AppException(f"Job {job_id} cannot be cancelled (status: {job.status})")
 
 
 @router.delete("/{job_id}", response_model=ApiResponse[None], status_code=200, responses=ERROR_RESPONSES, operation_id="delete_job")
@@ -167,8 +182,8 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
       3. An unrecoverable error occurs
     """
     tick = 0
-    last_progress: Optional[dict] = None
-    last_status: Optional[str] = None
+    last_progress: dict | None = None
+    last_status: str | None = None
 
     try:
         async with async_session_factory() as db:

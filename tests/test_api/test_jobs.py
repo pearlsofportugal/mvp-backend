@@ -3,7 +3,6 @@ import pytest
 from httpx import AsyncClient
 
 
-@pytest.mark.asyncio
 async def test_list_jobs_empty(client: AsyncClient):
     """GET /api/v1/jobs returns empty list initially."""
     response = await client.get("/api/v1/jobs")
@@ -16,7 +15,6 @@ async def test_list_jobs_empty(client: AsyncClient):
     assert body["meta"]["total"] == 0
 
 
-@pytest.mark.asyncio
 async def test_create_job_requires_site(client: AsyncClient):
     """POST /api/v1/jobs fails without valid site config."""
     payload = {
@@ -28,7 +26,6 @@ async def test_create_job_requires_site(client: AsyncClient):
     assert resp.status_code == 404
 
 
-@pytest.mark.asyncio
 async def test_create_job_with_site(client: AsyncClient):
     """POST /api/v1/jobs succeeds with a valid site config."""
     from tests.conftest import make_site_config_payload
@@ -51,7 +48,6 @@ async def test_create_job_with_site(client: AsyncClient):
     assert job["max_pages"] == 2
 
 
-@pytest.mark.asyncio
 async def test_get_job(client: AsyncClient):
     """GET /api/v1/jobs/{id} retrieves a job."""
     from tests.conftest import make_site_config_payload

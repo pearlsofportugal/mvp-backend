@@ -1,8 +1,8 @@
-"""Pydantic schemas for Listing API requests and responses."""
+﻿"""Pydantic schemas for Listing API requests and responses."""
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Literal, Optional
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,21 +19,21 @@ class MediaAssetRead(BaseModel):
 
     id: UUID
     url: str
-    alt_text: Optional[str] = None
-    type: Optional[Literal["photo", "floorplan", "video"]] = None
-    position: Optional[int] = Field(None, ge=0)
+    alt_text: str | None = None
+    type: Literal["photo", "floorplan", "video"] | None = None
+    position: int | None = Field(None, ge=0)
 
 
 class MediaAssetCreate(BaseModel):
     """Media asset payload for listing creation."""
 
     url: str = Field(..., description="Absolute URL to the media asset.")
-    alt_text: Optional[str] = Field(None, description="Accessibility alt text.")
-    type: Optional[Literal["photo", "floorplan", "video"]] = Field(
+    alt_text: str | None = Field(None, description="Accessibility alt text.")
+    type: Literal["photo", "floorplan", "video"] | None = Field(
         None,
         description="Asset type: photo, floorplan, or video.",
     )
-    position: Optional[int] = Field(None, ge=0, description="Display order (0-indexed).")
+    position: int | None = Field(None, ge=0, description="Display order (0-indexed).")
 
 
 # ---------------------------------------------------------------------------
@@ -63,53 +63,53 @@ class ListingBase(BaseModel):
     """
 
     # ── Classification ────────────────────────────────────────────────────
-    listing_type: Optional[Literal["sale", "rent"]] = Field(None, description="Listing transaction type.")
-    property_type: Optional[str] = Field(None, description="Property type (e.g. 'apartment', 'house').")
-    typology: Optional[str] = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
+    listing_type: Literal["sale", "rent"] | None = Field(None, description="Listing transaction type.")
+    property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house').")
+    typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
 
     # ── Details ───────────────────────────────────────────────────────────
-    title: Optional[str] = Field(None, description="Listing headline.")
-    bedrooms: Optional[int] = Field(None, ge=0)
-    bathrooms: Optional[int] = Field(None, ge=0)
-    floor: Optional[str] = Field(None, description="Floor label (e.g. '3', 'R/C', 'último').")
-    construction_year: Optional[int] = Field(None, ge=1800, description="Year of construction.")
-    energy_certificate: Optional[str] = Field(None, description="Energy certificate rating.")
+    title: str | None = Field(None, description="Listing headline.")
+    bedrooms: int | None = Field(None, ge=0)
+    bathrooms: int | None = Field(None, ge=0)
+    floor: str | None = Field(None, description="Floor label (e.g. '3', 'R/C', 'último').")
+    construction_year: int | None = Field(None, ge=1800, description="Year of construction.")
+    energy_certificate: str | None = Field(None, description="Energy certificate rating.")
 
     # ── Pricing ───────────────────────────────────────────────────────────
-    price_amount: Optional[Decimal] = Field(None, ge=0)
-    price_currency: Optional[str] = Field("EUR", min_length=3, max_length=3, description="ISO 4217 currency code.")
-    price_per_m2: Optional[Decimal] = Field(None, ge=0)
+    price_amount: Decimal | None = Field(None, ge=0)
+    price_currency: str | None = Field("EUR", min_length=3, max_length=3, description="ISO 4217 currency code.")
+    price_per_m2: Decimal | None = Field(None, ge=0)
 
     # ── Area ──────────────────────────────────────────────────────────────
-    area_useful_m2: Optional[float] = Field(None, ge=0, description="Useful / habitable area in m².")
-    area_gross_m2: Optional[float] = Field(None, ge=0, description="Gross area in m².")
-    area_land_m2: Optional[float] = Field(None, ge=0, description="Land / plot area in m².")
+    area_useful_m2: float | None = Field(None, ge=0, description="Useful / habitable area in m².")
+    area_gross_m2: float | None = Field(None, ge=0, description="Gross area in m².")
+    area_land_m2: float | None = Field(None, ge=0, description="Land / plot area in m².")
 
     # ── Location ──────────────────────────────────────────────────────────
-    district: Optional[str] = None
-    county: Optional[str] = None
-    parish: Optional[str] = None
-    full_address: Optional[str] = None
-    latitude: Optional[float] = Field(None, ge=-90, le=90, description="WGS-84 latitude.")
-    longitude: Optional[float] = Field(None, ge=-180, le=180, description="WGS-84 longitude.")
+    district: str | None = None
+    county: str | None = None
+    parish: str | None = None
+    full_address: str | None = None
+    latitude: float | None = Field(None, ge=-90, le=90, description="WGS-84 latitude.")
+    longitude: float | None = Field(None, ge=-180, le=180, description="WGS-84 longitude.")
 
     # ── Features ──────────────────────────────────────────────────────────
-    has_garage: Optional[bool] = None
-    has_elevator: Optional[bool] = None
-    has_balcony: Optional[bool] = None
-    has_air_conditioning: Optional[bool] = None
-    has_pool: Optional[bool] = None
+    has_garage: bool | None = None
+    has_elevator: bool | None = None
+    has_balcony: bool | None = None
+    has_air_conditioning: bool | None = None
+    has_pool: bool | None = None
 
     # ── Contact / advertiser ──────────────────────────────────────────────
-    advertiser: Optional[str] = None
-    contacts: Optional[str] = None
+    advertiser: str | None = None
+    contacts: str | None = None
 
     # ── Content ───────────────────────────────────────────────────────────
-    raw_description: Optional[str] = Field(None, description="Raw description as scraped (unprocessed).")
-    description: Optional[str] = Field(None, description="Cleaned / normalised description.")
-    enriched_description: Optional[str] = Field(None, description="AI-enriched description.")
-    description_quality_score: Optional[int] = Field(None, ge=0, le=100, description="AI quality score (0–100).")
-    meta_description: Optional[str] = Field(None, description="SEO meta description.")
+    raw_description: str | None = Field(None, description="Raw description as scraped (unprocessed).")
+    description: str | None = Field(None, description="Cleaned / normalised description.")
+    enriched_description: str | None = Field(None, description="AI-enriched description.")
+    description_quality_score: int | None = Field(None, ge=0, le=100, description="AI quality score (0–100).")
+    meta_description: str | None = Field(None, description="SEO meta description.")
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +120,11 @@ class ListingCreate(ListingBase):
     """Schema for creating a new listing (scraper → API)."""
 
     source_partner: str = Field(..., description="Slug identifying the data source partner.")
-    source_url: Optional[str] = Field(None, description="Canonical URL of the listing on the partner site.")
-    partner_id: Optional[str] = Field(None, description="Partner's own listing identifier.")
-    page_title: Optional[str] = Field(None, description="Raw <title> of the scraped page.")
-    media_assets: List[MediaAssetCreate] = Field(default_factory=list)
-    raw_payload: Optional[Dict] = Field(None, description="Full raw partner payload, preserved for debugging.")
+    source_url: str | None = Field(None, description="Canonical URL of the listing on the partner site.")
+    partner_id: str | None = Field(None, description="Partner's own listing identifier.")
+    page_title: str | None = Field(None, description="Raw <title> of the scraped page.")
+    media_assets: list[MediaAssetCreate] = Field(default_factory=list)
+    raw_payload: dict | None = Field(None, description="Full raw partner payload, preserved for debugging.")
 
 
 # ---------------------------------------------------------------------------
@@ -139,38 +139,38 @@ class ListingUpdate(BaseModel):
     Only supplied fields are applied.
     """
 
-    listing_type: Optional[Literal["sale", "rent"]] = None
-    property_type: Optional[str] = None
-    typology: Optional[str] = None
-    title: Optional[str] = None
-    bedrooms: Optional[int] = Field(None, ge=0)
-    bathrooms: Optional[int] = Field(None, ge=0)
-    floor: Optional[str] = None
-    construction_year: Optional[int] = Field(None, ge=1800)
-    energy_certificate: Optional[str] = None
-    price_amount: Optional[Decimal] = Field(None, ge=0)
-    price_currency: Optional[str] = Field(None, min_length=3, max_length=3)
-    price_per_m2: Optional[Decimal] = Field(None, ge=0)
-    area_useful_m2: Optional[float] = Field(None, ge=0)
-    area_gross_m2: Optional[float] = Field(None, ge=0)
-    area_land_m2: Optional[float] = Field(None, ge=0)
-    district: Optional[str] = None
-    county: Optional[str] = None
-    parish: Optional[str] = None
-    full_address: Optional[str] = None
-    latitude: Optional[float] = Field(None, ge=-90, le=90)
-    longitude: Optional[float] = Field(None, ge=-180, le=180)
-    has_garage: Optional[bool] = None
-    has_elevator: Optional[bool] = None
-    has_balcony: Optional[bool] = None
-    has_air_conditioning: Optional[bool] = None
-    has_pool: Optional[bool] = None
-    advertiser: Optional[str] = None
-    contacts: Optional[str] = None
-    description: Optional[str] = None
-    enriched_description: Optional[str] = None
-    description_quality_score: Optional[int] = Field(None, ge=0, le=100)
-    meta_description: Optional[str] = None
+    listing_type: Literal["sale", "rent"] | None = None
+    property_type: str | None = None
+    typology: str | None = None
+    title: str | None = None
+    bedrooms: int | None = Field(None, ge=0)
+    bathrooms: int | None = Field(None, ge=0)
+    floor: str | None = None
+    construction_year: int | None = Field(None, ge=1800)
+    energy_certificate: str | None = None
+    price_amount: Decimal | None = Field(None, ge=0)
+    price_currency: str | None = Field(None, min_length=3, max_length=3)
+    price_per_m2: Decimal | None = Field(None, ge=0)
+    area_useful_m2: float | None = Field(None, ge=0)
+    area_gross_m2: float | None = Field(None, ge=0)
+    area_land_m2: float | None = Field(None, ge=0)
+    district: str | None = None
+    county: str | None = None
+    parish: str | None = None
+    full_address: str | None = None
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+    has_garage: bool | None = None
+    has_elevator: bool | None = None
+    has_balcony: bool | None = None
+    has_air_conditioning: bool | None = None
+    has_pool: bool | None = None
+    advertiser: str | None = None
+    contacts: str | None = None
+    description: str | None = None
+    enriched_description: str | None = None
+    description_quality_score: int | None = Field(None, ge=0, le=100)
+    meta_description: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -183,14 +183,69 @@ class ListingRead(ListingBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    partner_id: Optional[str] = None
+    partner_id: str | None = None
     source_partner: str
-    source_url: Optional[str] = None
-    scrape_job_id: Optional[UUID] = None
+    source_url: str | None = None
+    scrape_job_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
-    media_assets: List[MediaAssetRead] = Field(default_factory=list)
-    price_history: List[PriceHistoryRead] = Field(default_factory=list)
+    media_assets: list[MediaAssetRead] = Field(default_factory=list)
+    price_history: list[PriceHistoryRead] = Field(default_factory=list)
+
+
+class ListingDetailRead(BaseModel):
+    """Public listing detail response without internal raw scraped text."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    partner_id: str | None = None
+    source_partner: str
+    source_url: str | None = None
+    scrape_job_id: UUID | None = None
+
+    listing_type: Literal["sale", "rent"] | None = None
+    property_type: str | None = None
+    typology: str | None = None
+    title: str | None = None
+    bedrooms: int | None = Field(None, ge=0)
+    bathrooms: int | None = Field(None, ge=0)
+    floor: str | None = None
+    construction_year: int | None = Field(None, ge=1800)
+    energy_certificate: str | None = None
+
+    price_amount: Decimal | None = Field(None, ge=0)
+    price_currency: str | None = Field("EUR", min_length=3, max_length=3)
+    price_per_m2: Decimal | None = Field(None, ge=0)
+
+    area_useful_m2: float | None = Field(None, ge=0)
+    area_gross_m2: float | None = Field(None, ge=0)
+    area_land_m2: float | None = Field(None, ge=0)
+
+    district: str | None = None
+    county: str | None = None
+    parish: str | None = None
+    full_address: str | None = None
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+
+    has_garage: bool | None = None
+    has_elevator: bool | None = None
+    has_balcony: bool | None = None
+    has_air_conditioning: bool | None = None
+    has_pool: bool | None = None
+
+    advertiser: str | None = None
+    contacts: str | None = None
+    description: str | None = None
+    enriched_description: str | None = None
+    description_quality_score: int | None = Field(None, ge=0, le=100)
+    meta_description: str | None = None
+
+    created_at: datetime
+    updated_at: datetime
+    media_assets: list[MediaAssetRead] = Field(default_factory=list)
+    price_history: list[PriceHistoryRead] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -203,20 +258,20 @@ class ListingListRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    title: Optional[str] = None
+    title: str | None = None
     source_partner: str
-    listing_type: Optional[Literal["sale", "rent"]] = None
-    property_type: Optional[str] = None
-    typology: Optional[str] = None
-    price_amount: Optional[Decimal] = None
-    price_currency: Optional[str] = None
-    price_per_m2: Optional[Decimal] = None
-    district: Optional[str] = None
-    county: Optional[str] = None
-    area_useful_m2: Optional[float] = None
-    bedrooms: Optional[int] = None
-    bathrooms: Optional[int] = None
-    source_url: Optional[str] = None
+    listing_type: Literal["sale", "rent"] | None = None
+    property_type: str | None = None
+    typology: str | None = None
+    price_amount: Decimal | None = None
+    price_currency: str | None = None
+    price_per_m2: Decimal | None = None
+    district: str | None = None
+    county: str | None = None
+    area_useful_m2: float | None = None
+    bedrooms: int | None = None
+    bathrooms: int | None = None
+    source_url: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -229,14 +284,14 @@ class ListingStats(BaseModel):
     """Aggregated listing statistics."""
 
     total_listings: int = 0
-    avg_price: Optional[float] = None
-    min_price: Optional[float] = None
-    max_price: Optional[float] = None
-    avg_area: Optional[float] = None
-    by_district: Dict[str, int] = Field(default_factory=dict)
-    by_property_type: Dict[str, int] = Field(default_factory=dict)
-    by_source_partner: Dict[str, int] = Field(default_factory=dict)
-    by_typology: Dict[str, int] = Field(default_factory=dict)
+    avg_price: float | None = None
+    min_price: float | None = None
+    max_price: float | None = None
+    avg_area: float | None = None
+    by_district: dict[str, int] = Field(default_factory=dict)
+    by_property_type: dict[str, int] = Field(default_factory=dict)
+    by_source_partner: dict[str, int] = Field(default_factory=dict)
+    by_typology: dict[str, int] = Field(default_factory=dict)
 
 
 class PaginatedResponse(BaseModel):
@@ -247,7 +302,7 @@ class PaginatedResponse(BaseModel):
     location regardless of which endpoint it calls.
     """
 
-    items: List[ListingListRead] = Field(default_factory=list)
+    items: list[ListingListRead] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -264,4 +319,4 @@ class DuplicateEntry(BaseModel):
 class DuplicatesResponse(BaseModel):
     """Response body for GET /duplicates."""
 
-    duplicates: List[DuplicateEntry] = Field(default_factory=list)
+    duplicates: list[DuplicateEntry] = Field(default_factory=list)

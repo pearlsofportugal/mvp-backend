@@ -1,7 +1,7 @@
-"""ScrapeJob SQLAlchemy model — tracks scraping job status and progress."""
+﻿"""ScrapeJob SQLAlchemy model — tracks scraping job status and progress."""
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import DateTime, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -15,7 +15,7 @@ class ScrapeJob(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     site_key: Mapped[str] = mapped_column(String(50), index=True, comment="pearls")
-    base_url: Mapped[Optional[str]] = mapped_column(String(2048))
+    base_url: Mapped[str | None] = mapped_column(String(2048))
     start_url: Mapped[str] = mapped_column(String(2048))
     max_pages: Mapped[int] = mapped_column(Integer, default=10)
     
@@ -26,32 +26,32 @@ class ScrapeJob(Base):
         index=True,
         comment="pending, running, completed, failed, cancelled",
     )
-    progress: Mapped[Optional[dict]] = mapped_column(
+    progress: Mapped[dict | None] = mapped_column(
         JSON,
         default=dict,
         comment='{"pages_visited": 0, "listings_found": 0, "listings_scraped": 0, "errors": 0}',
     )
-    config: Mapped[Optional[dict]] = mapped_column(
+    config: Mapped[dict | None] = mapped_column(
         JSON,
         comment="Runtime config: min_delay, max_delay, user_agent, etc.",
     )
-    logs: Mapped[Optional[dict]] = mapped_column(
+    logs: Mapped[dict | None] = mapped_column(
         JSON,
         default=dict,
         comment='{"errors": [], "warnings": [], "info": []}',
     )
-    urls: Mapped[Optional[dict]] = mapped_column(
+    urls: Mapped[dict | None] = mapped_column(
         JSON,
         default=dict,
         comment='{"found": [], "scraped": [], "failed": []}',
     )
-    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
 
     # Timestamps
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    cancel_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -119,7 +119,7 @@ class ScrapeJob(Base):
         updated = {**self.progress, **kwargs}
         self.progress = updated
 
-    def add_log(self, level: str, message: str, url: Optional[str] = None) -> None:
+    def add_log(self, level: str, message: str, url: str | None = None) -> None:
         """Add a log entry. Level: 'error', 'warning', 'info'."""
         if self.logs is None:
             self.logs = {"errors": [], "warnings": [], "info": []}

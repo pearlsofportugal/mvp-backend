@@ -1,4 +1,4 @@
-"""Database engine, session factory, and base model."""
+﻿"""Database engine, session factory, and base model."""
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 

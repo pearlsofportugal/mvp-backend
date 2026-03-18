@@ -1,9 +1,9 @@
-"""AI enrichment service for SEO title/description/meta_description generation."""
+﻿"""AI enrichment service for SEO title/description/meta_description generation."""
 import json
 import time
 from collections import deque
 from threading import Lock
-from typing import Any, Dict, List, Sequence
+from typing import Any, Sequence
 
 from app.config import settings
 from app.core.exceptions import EnrichmentError
@@ -23,33 +23,46 @@ _AI_REQUEST_TIMESTAMPS = deque()
 _AI_RATE_LIMIT_LOCK = Lock()
 
 _SYSTEM_INSTRUCTION_SEO = """
-Atua como um Especialista em Copywriting Imobiliário e SEO. 
-Sua missão é transformar descrições técnicas em textos de venda persuasivos e otimizados.
+You are an expert in Real Estate Copywriting and SEO.
+Your mission is to transform technical property descriptions into persuasive, sales-driven texts that are fully optimized for search engines.
 
-REGRAS DE ESCRITA:
-- FORMATO: Utilize exclusivamente texto corrido organizado em parágrafos. É expressamente PROIBIDO o uso de listas ou bullet points.
-- ESTRUTURA NARRATIVA:
-    1. Introdução: Gancho emocional forte e menção à localização.
-    2. Desenvolvimento: Foco no conforto, design e detalhes interiores.
-    3. Sustentabilidade: Secção dedicada a especificações técnicas (ex: painéis solares, isolamento, eficiência) traduzidas em benefícios (poupança, conforto térmico).
-    4. Encerramento: Áreas exteriores e um Apelo à Ação (CTA) direto.
-- TOM DE VOZ: Profissional, inspirador e moderno.
-- SEO: Integre as palavras-chave fornecidas de forma fluida e natural no texto.
+LANGUAGE RULE (MANDATORY):
+You must ALWAYS respond in English, regardless of the language of the input.
+If the technical description, keywords, or any other input is provided in Portuguese or any other language, translate and process everything internally and respond exclusively in English.
 
-REGRAS DE OUTPUT (JSON):
-Responda obrigatoriamente em JSON válido com as seguintes chaves:
+INPUT PROVIDED:
+- Technical description: {raw_description}
+- SEO keywords: {keywords}
+- Property type: {property_type}
+- Location: {location}
+
+WRITING RULES:
+- FORMAT: Use exclusively continuous prose organized in paragraphs. The use of lists or bullet points is strictly PROHIBITED.
+- LENGTH: The description must be strictly between 250 and 400 words. If the source text is longer, summarize — do not translate verbatim.
+- REWRITING: Do NOT translate the source text verbatim. Use it only as a factual reference. Rewrite entirely with fresh, original copywriting in English.
+- NARRATIVE STRUCTURE:
+    1. Introduction: Strong emotional hook with a clear mention of the location.
+    2. Development: Focus on comfort, design, and interior details.
+    3. Sustainability: Dedicated section translating technical specs (e.g. solar panels, insulation, energy efficiency) into tangible benefits (savings, thermal comfort, lower bills).
+    4. Closing: Outdoor areas followed by a direct Call-to-Action (CTA).
+- TONE OF VOICE: Professional, inspiring, and modern.
+- SEO: Integrate the provided keywords naturally into the text. Include at least one keyword in the first paragraph and one in the closing. Maximum 3 repetitions per keyword.
+- KEYWORDS TRANSLATION: If any keyword is a Portuguese real estate term (e.g. T1, T2, T3), translate it to its English equivalent (e.g. 1-bedroom, 2-bedroom, 3-bedroom) before integrating it into the text.
+
+OUTPUT RULES (JSON):
+Respond exclusively with valid JSON using the following keys — no markdown, no code blocks, no extra text.
+All JSON values must be written in English, even if the input was in another language:
 {
-  "title": "Título SEO (máx 60 chars)",
-  "description": "O texto corrido persuasivo e completo",
-  "meta_description": "Resumo para Google (140-155 chars)"
+    "title": "SEO title in English (max 60 characters)",
+    "description": "Full persuasive prose text in English (strictly 250-400 words)",
+    "meta_description": "Google summary — EXACTLY 140-155 characters, no more, no less"
 }
 """.strip()
 
-
-def _sanitize_keywords(keywords: Sequence[str]) -> List[str]:
+def _sanitize_keywords(keywords: Sequence[str]) -> list[str]:
     clean = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
     # preserve order and uniqueness
-    unique: List[str] = []
+    unique: list[str] = []
     seen = set()
     for keyword in clean:
         if keyword.lower() in seen:
@@ -59,7 +72,7 @@ def _sanitize_keywords(keywords: Sequence[str]) -> List[str]:
     return unique
 
 
-def _extract_json(text: str) -> Dict[str, Any]:
+def _extract_json(text: str) -> dict[str, Any]:
     candidate = text.strip()
     if candidate.startswith("```"):
         candidate = candidate.strip("`")
@@ -126,7 +139,7 @@ def _check_ai_rate_limit(now: float | None = None) -> None:
 
         _AI_REQUEST_TIMESTAMPS.append(current_time)
 
-def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
+def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> dict[str, Any]:
     _check_ai_rate_limit()
     client = _get_client()
     prompt = _build_prompt(content, keywords)
@@ -149,11 +162,11 @@ def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
         logger.exception("AI SEO generation failed")
         raise EnrichmentError("Failed to generate AI SEO output", detail=str(exc)) from exc
 
-async def _call_ai_for_seo_async(content: str, keywords: Sequence[str]) -> Dict[str, Any]:
+async def _call_ai_for_seo_async(content: str, keywords: Sequence[str]) -> dict[str, Any]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _call_ai_for_seo, content, keywords)
 
-def _normalize_output(payload: Dict[str, Any]) -> AIEnrichmentOutput:
+def _normalize_output(payload: dict[str, Any]) -> AIEnrichmentOutput:
     return AIEnrichmentOutput(
         title=(payload.get("title") or payload.get("meta_title") or None),
         description=(payload.get("description") or payload.get("enriched_description") or None),
@@ -173,7 +186,7 @@ def optimize_text_with_ai(content: str, keywords: Sequence[str]) -> AITextOptimi
     )
 
 
-def infer_listing_keywords(listing: Listing) -> List[str]:
+def infer_listing_keywords(listing: Listing) -> list[str]:
     """Infer SEO keywords from listing attributes when user does not provide any."""
     derived = [
         listing.property_type,
@@ -218,7 +231,7 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
         "meta_description": output.meta_description,
     }
 
-    results: List[AIEnrichmentFieldResult] = []
+    results: list[AIEnrichmentFieldResult] = []
     for field in fields:
         original = original_values.get(field)
         enriched = field_value_map.get(field)

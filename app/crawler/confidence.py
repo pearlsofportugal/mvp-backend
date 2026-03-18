@@ -1,7 +1,8 @@
-"""Confidence scoring for post-crawl field extraction coverage."""
+﻿"""Confidence scoring for post-crawl field extraction coverage."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -9,7 +10,28 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-_SCORABLE_FIELDS = ("price", "title", "area", "rooms", "location", "images")
+_SCORABLE_FIELDS = (
+    "price",
+    "title",
+    "area",
+    "rooms",
+    "location",
+    "images",
+    # Extended fields
+    "property_type",
+    "typology",
+    "condition",
+    "business_type",
+    "land_area",
+)
+
+# Validators mirror those in selector_suggester to score quality, not just presence
+_PRICE_RE = re.compile(r"\d.*(?:€|eur|euro)", re.IGNORECASE)
+_AREA_RE = re.compile(r"\d+(?:[\.,]\d+)?\s*(?:m2|m²|metros?)", re.IGNORECASE)
+_TYPOLOGY_RE = re.compile(r"\bT\d+(?:\+\d+)?\b", re.IGNORECASE)
+_CONDITION_RE = re.compile(r"\b(?:usado|novo|renovado|recuperado|excelente|bom\s+estado|em\s+construcao|na\s+planta|para\s+recuperar)\b", re.IGNORECASE)
+_BUSINESS_RE = re.compile(r"\b(?:venda|comprar|arrendar|arrendamento|sale|rent|buy)\b", re.IGNORECASE)
+_PROPERTY_TYPE_RE = re.compile(r"\b(?:moradia|apartamento|terreno|loja|armaz[eé]m|escrit[oó]rio|garagem|quintinha|quinta|vivenda)\b", re.IGNORECASE)
 
 
 def calculate_confidence(results: list[Any]) -> dict[str, float]:
@@ -32,6 +54,16 @@ def calculate_confidence(results: list[Any]) -> dict[str, float]:
             presence_counts["location"] += 1
         if _has_images(result):
             presence_counts["images"] += 1
+        if _has_valid_field(result, "property_type", _PROPERTY_TYPE_RE):
+            presence_counts["property_type"] += 1
+        if _has_valid_field(result, "typology", _TYPOLOGY_RE):
+            presence_counts["typology"] += 1
+        if _has_valid_field(result, "condition", _CONDITION_RE):
+            presence_counts["condition"] += 1
+        if _has_valid_field(result, "business_type", _BUSINESS_RE):
+            presence_counts["business_type"] += 1
+        if _has_land_area(result):
+            presence_counts["land_area"] += 1
 
     return {
         field: round(presence_counts[field] / total, 2)
@@ -111,6 +143,22 @@ def _has_images(result: Any) -> bool:
         return len(media) > 0
 
     return False
+
+
+def _has_valid_field(result: Any, field: str, pattern: re.Pattern) -> bool:
+    """Return True only when the field value passes a quality regex check."""
+    value = _attr(result, field)
+    if not _present(value):
+        return False
+    return bool(pattern.search(str(value)))
+
+
+def _has_land_area(result: Any) -> bool:
+    value = _attr(result, "area_land_m2")
+    if value is not None:
+        return True
+    value = _attr(result, "land_area")
+    return _present(value) and bool(_AREA_RE.search(str(value)))
 
 
 def _attr(obj: Any, name: str) -> Any:

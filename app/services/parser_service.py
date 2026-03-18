@@ -1,4 +1,4 @@
-"""Parser service — HTML parsing for property listings with DB-configurable field mappings.
+﻿"""Parser service — HTML parsing for property listings with DB-configurable field mappings.
 
 Supports two extraction modes:
 1. Section-based: extracts from sections with .name/.value pairs (e.g., Pearls of Portugal)
@@ -18,7 +18,7 @@ FIXES (v2):
 """
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
@@ -33,9 +33,9 @@ logger = get_logger(__name__)
 # Configuration Cache
 # ═══════════════════════════════════════════════════════════
 
-_FIELD_MAP_CACHE: Dict[str, str] = {}
-_FEATURE_MAP_CACHE: Dict[str, str] = {}
-_CACHE_TIMESTAMP: Optional[datetime] = None
+_FIELD_MAP_CACHE: dict[str, str] = {}
+_FEATURE_MAP_CACHE: dict[str, str] = {}
+_CACHE_TIMESTAMP: datetime | None = None
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 _DEBUG_HTML_PREVIEW_CHARS = 700
 
@@ -141,6 +141,17 @@ _SUMMARY_FIELD_MAP = {
 }
 
 
+def _get_summary_field_map() -> dict[str, str]:
+    """Return the summary field map, preferring DB-loaded mappings when available."""
+    db_map = _get_field_map()
+    if db_map is _DEFAULT_FIELD_MAP:
+        # DB map not yet loaded or fallback — use the static summary map as-is
+        return _SUMMARY_FIELD_MAP
+    # Merge: DB map wins; static summary map fills in keys absent from DB
+    merged = {**_SUMMARY_FIELD_MAP, **db_map}
+    return merged
+
+
 async def _load_field_mappings() -> None:
     """Load field mappings from DB with caching."""
     global _FIELD_MAP_CACHE, _FEATURE_MAP_CACHE, _CACHE_TIMESTAMP
@@ -191,13 +202,13 @@ async def _load_field_mappings() -> None:
         _FEATURE_MAP_CACHE = _DEFAULT_FEATURE_MAP.copy()
 
 
-def _get_field_map() -> Dict[str, str]:
+def _get_field_map() -> dict[str, str]:
     if _FIELD_MAP_CACHE:
         return _FIELD_MAP_CACHE
     return _DEFAULT_FIELD_MAP
 
 
-def _get_feature_map() -> Dict[str, str]:
+def _get_feature_map() -> dict[str, str]:
     if _FEATURE_MAP_CACHE:
         return _FEATURE_MAP_CACHE
     return _DEFAULT_FEATURE_MAP
@@ -219,8 +230,8 @@ def invalidate_parser_cache():
 def parse_listing_links(
     html: str,
     base_url: str,
-    selectors: Dict[str, Any],
-) -> List[str]:
+    selectors: dict[str, Any],
+) -> list[str]:
     """Extract listing page URLs from a listing/search results page."""
     soup = BeautifulSoup(html, "lxml")
     link_selector = selectors.get("listing_link_selector", "a")
@@ -246,8 +257,8 @@ def parse_listing_links(
 def parse_next_page(
     html: str,
     base_url: str,
-    selectors: Dict[str, Any],
-) -> Optional[str]:
+    selectors: dict[str, Any],
+) -> str | None:
     """Extract the next page URL from pagination."""
     soup = BeautifulSoup(html, "lxml")
     next_selector = selectors.get("next_page_selector")
@@ -265,12 +276,12 @@ def parse_next_page(
 def parse_listing_page(
     html: str,
     url: str,
-    selectors: Dict[str, Any],
+    selectors: dict[str, Any],
     extraction_mode: str = "direct",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Parse a single listing detail page into a raw dict."""
     soup = BeautifulSoup(html, "lxml")
-    data: Dict[str, Any] = {"url": url}
+    data: dict[str, Any] = {"url": url}
 
     if extraction_mode == "section":
         data.update(_parse_section_based(soup, selectors))
@@ -287,9 +298,9 @@ def parse_listing_page(
 # Section-Based Parsing
 # ═══════════════════════════════════════════════════════════
 
-def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_section_based(soup: BeautifulSoup, selectors: dict[str, Any]) -> dict[str, Any]:
     """Parse using section-based extraction (name/value pairs)."""
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
     # Title
     title_selector = selectors.get("title_selector")
     if title_selector:
@@ -396,12 +407,13 @@ def _parse_section_based(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict
     return data
 
 
-def _extract_summary_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_summary_pairs(section: Tag, selectors: dict[str, Any]) -> dict[str, Any]:
     """Extract labeled summary pairs from list-based blocks."""
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
     items = section.select(selectors.get("summary_item_selector", "li"))
     label_selector = selectors.get("summary_label_selector", "b, .name, .icon_label")
     value_selector = selectors.get("summary_value_selector", ".value, .lbl_valor")
+    summary_map = _get_summary_field_map()
 
     for item in items:
         label_el = item.select_one(label_selector)
@@ -409,7 +421,7 @@ def _extract_summary_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str,
             continue
 
         label = label_el.get_text(" ", strip=True).rstrip(":").lower()
-        field = _SUMMARY_FIELD_MAP.get(label)
+        field = summary_map.get(label)
         if not field:
             continue
 
@@ -429,7 +441,7 @@ def _extract_summary_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str,
 
 def _extract_inline_value(item: Tag, label_el: Tag) -> str:
     """Extract the value that follows a label node inside the same container."""
-    fragments: List[str] = []
+    fragments: list[str] = []
 
     for sibling in label_el.next_siblings:
         if isinstance(sibling, Tag):
@@ -451,7 +463,7 @@ def _extract_inline_value(item: Tag, label_el: Tag) -> str:
     return ""
 
 
-def _safe_select_one(soup: BeautifulSoup, selector: str) -> Optional[Tag]:
+def _safe_select_one(soup: BeautifulSoup, selector: str) -> Tag | None:
     """Select one element, with a fallback for pseudo-selectors that soupsieve
     may not support reliably (e.g. :last-of-type combined with ID selectors).
 
@@ -482,7 +494,7 @@ def _safe_select_one(soup: BeautifulSoup, selector: str) -> Optional[Tag]:
 # Section Helpers
 # ═══════════════════════════════════════════════════════════
 
-def _extract_name_value_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_name_value_pairs(section: Tag, selectors: dict[str, Any]) -> dict[str, Any]:
     """Extract name/value pairs from a details section.
 
     FIX: When the value element is missing or empty (e.g. energy certificate
@@ -540,7 +552,7 @@ def _extract_name_value_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[s
     return data
 
 
-def _extract_divisions(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_divisions(section: Tag, selectors: dict[str, Any]) -> dict[str, Any]:
     """Extract bedrooms/bathrooms/living rooms from a divisions section.
 
     Pearls of Portugal layout:
@@ -578,7 +590,7 @@ def _extract_divisions(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any
     return data
 
 
-def _extract_area_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_area_pairs(section: Tag, selectors: dict[str, Any]) -> dict[str, Any]:
     """Extract area measurements from an areas section."""
     data = {}
     items = section.select(selectors.get("area_item_selector", ".area"))
@@ -602,7 +614,7 @@ def _extract_area_pairs(section: Tag, selectors: Dict[str, Any]) -> Dict[str, An
     return data
 
 
-def _extract_characteristics(section: Tag, selectors: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_characteristics(section: Tag, selectors: dict[str, Any]) -> dict[str, Any]:
     """Extract boolean characteristics/amenities from a features section."""
     data = {}
     items = section.select(selectors.get("char_item_selector", ".name"))
@@ -627,7 +639,7 @@ def _debug_html_snippet(node: Tag | BeautifulSoup, max_chars: int = _DEBUG_HTML_
     return f"{compact_html[:max_chars]}..."
 
 
-def _selector_debug_enabled(selectors: Dict[str, Any]) -> bool:
+def _selector_debug_enabled(selectors: dict[str, Any]) -> bool:
     """Enable print-based selector debugging only when explicitly requested."""
     return bool(
         selectors.get("_debug_selectors")
@@ -641,9 +653,9 @@ def _print_selector_debug(
     enabled: bool,
     field: str,
     selector_key: str,
-    selector: Optional[str],
+    selector: str | None,
     reason: str,
-    matched_element: Optional[Tag] = None,
+    matched_element: Tag | None = None,
 ) -> None:
     """Print detailed selector debug information."""
     if not enabled:
@@ -659,7 +671,7 @@ def _print_selector_debug(
     )
 
 
-def _extract_energy_certificate_value(raw_value: str) -> Optional[str]:
+def _extract_energy_certificate_value(raw_value: str) -> str | None:
     """Normalize energy certificate text to the expected rating token."""
     match = re.search(r"\b([A-G])\b", raw_value, re.IGNORECASE)
     if match:
@@ -672,7 +684,7 @@ def _extract_energy_certificate_value(raw_value: str) -> Optional[str]:
     return None
 
 
-def _extract_element_value(el: Tag, field: Optional[str] = None) -> str:
+def _extract_element_value(el: Tag, field: str | None = None) -> str:
     """Extract a meaningful value from text, attributes, or nested images."""
     text = el.get_text(" ", strip=True)
     if text:
@@ -713,7 +725,7 @@ def _extract_element_value(el: Tag, field: Optional[str] = None) -> str:
     return ""
 
 
-def _assign_feature_matches(text: str, target: Dict[str, Any]) -> None:
+def _assign_feature_matches(text: str, target: dict[str, Any]) -> None:
     """Assign every matching feature keyword instead of stopping at the first match."""
     normalized_text = text.lower()
     for keyword, mapped_field in _get_feature_map().items():
@@ -723,9 +735,9 @@ def _assign_feature_matches(text: str, target: Dict[str, Any]) -> None:
 
 def _first_selector_value(
     soup: BeautifulSoup,
-    selectors: List[str],
-    field: Optional[str] = None,
-) -> Optional[str]:
+    selectors: list[str],
+    field: str | None = None,
+) -> str | None:
     """Return the first non-empty value found for a list of CSS selectors."""
     for selector in selectors:
         try:
@@ -751,12 +763,12 @@ def _is_habinedita_like_page(soup: BeautifulSoup) -> bool:
     )
 
 
-def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, Any]) -> dict[str, Any]:
     """Extract structured values from Habinédita's icon block when selectors miss them."""
     if not _is_habinedita_like_page(soup):
         return {}
 
-    extracted: Dict[str, Any] = {}
+    extracted: dict[str, Any] = {}
     icon_selectors = {
         "bedrooms": [
             "[id*='lbl_valor_quarto']",
@@ -808,9 +820,9 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: Dict[str, A
 # Direct Selector Parsing
 # ═══════════════════════════════════════════════════════════
 
-def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> dict[str, Any]:
     """Parse using direct CSS selectors for each field."""
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
     debug_enabled = _selector_debug_enabled(selectors)
     simple_fields = {
         "title_selector": "title",
@@ -978,9 +990,9 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: Dict[str, Any]) -> D
 # Common Extractions
 # ═══════════════════════════════════════════════════════════
 
-def _parse_images(soup: BeautifulSoup, selectors: Dict[str, Any], base_url: str) -> Dict[str, Any]:
+def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str) -> dict[str, Any]:
     """Extract images from the listing page."""
-    data: Dict[str, Any] = {"images": [], "alt_texts": []}
+    data: dict[str, Any] = {"images": [], "alt_texts": []}
 
     image_selector = selectors.get("image_selector", "img")
     image_filter = selectors.get("image_filter")
@@ -1001,7 +1013,7 @@ def _parse_images(soup: BeautifulSoup, selectors: Dict[str, Any], base_url: str)
     return data
 
 
-def _parse_seo(soup: BeautifulSoup) -> Dict[str, Any]:
+def _parse_seo(soup: BeautifulSoup) -> dict[str, Any]:
     """Extract SEO-relevant elements from the page."""
     data = {}
 
@@ -1025,7 +1037,7 @@ def _parse_seo(soup: BeautifulSoup) -> Dict[str, Any]:
     return data
 
 
-def _extract_via_text_patterns(soup: BeautifulSoup, patterns: Dict[str, str]) -> Dict[str, Any]:
+def _extract_via_text_patterns(soup: BeautifulSoup, patterns: dict[str, str]) -> dict[str, Any]:
     """Extract data using regex patterns applied to the full page text."""
     data = {}
     full_text = soup.get_text(separator=" ", strip=True)
@@ -1048,12 +1060,12 @@ def _extract_via_text_patterns(soup: BeautifulSoup, patterns: Dict[str, str]) ->
 
 def parse_listing_card(
     card_html: str,
-    selectors: Dict[str, Any],
+    selectors: dict[str, Any],
     base_url: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Parse a listing card from the search results page (minimal data)."""
     soup = BeautifulSoup(card_html, "lxml")
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
 
     for field, selector_key in [
         ("title", "card_title_selector"),

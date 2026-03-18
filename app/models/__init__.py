@@ -1,4 +1,4 @@
-"""SQLAlchemy models for MVP Scraper."""
+﻿"""SQLAlchemy models for MVP Scraper."""
 from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory

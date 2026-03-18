@@ -34,7 +34,6 @@ services:
       DATABASE_URL_SYNC: ${DOCKER_DATABASE_URL_SYNC:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       API_KEY: ${API_KEY:?API_KEY is required}
       CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
-      GOOGLE_GENAI_API_KEY: ${GOOGLE_GENAI_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

@@ -1,4 +1,4 @@
-"""EthicalScraper service — preserves all ethical scraping rules.
+﻿"""EthicalScraper service — preserves all ethical scraping rules.
 
 Rules preserved:
 1. Fail-closed robots.txt: if robots.txt fails to load, BLOCK all requests
@@ -11,7 +11,7 @@ Rules preserved:
 import random
 import re
 import time
-from typing import Optional
+
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -40,6 +40,7 @@ class EthicalScraper:
         timeout: int = 120,
         max_retries: int = 3,
         backoff_factor: float = 2.0,
+        extra_headers: dict | None = None,
     ):
         self.min_delay = min_delay
         self.max_delay = max_delay
@@ -67,6 +68,11 @@ class EthicalScraper:
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
         self._session.headers.update({"User-Agent": self.user_agent})
+        # Apply site-specific headers (e.g. Accept-Language, Referer) after User-Agent
+        if extra_headers:
+            # Prevent overriding User-Agent via extra_headers
+            safe_headers = {k: v for k, v in extra_headers.items() if k.lower() != "user-agent"}
+            self._session.headers.update(safe_headers)
 
         # Validate user agent
         if not USER_AGENT_PATTERN.match(self.user_agent):
@@ -146,7 +152,7 @@ class EthicalScraper:
         """Reset visited URLs (for a new job)."""
         self._visited_urls.clear()
 
-    def get(self, url: str) -> Optional[requests.Response]:
+    def get(self, url: str) -> requests.Response | None:
         """
         Fetch a URL ethically.
 

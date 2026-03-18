@@ -1,7 +1,7 @@
-"""Pydantic schemas for GET /api/v1/listings/search."""
+﻿"""Pydantic schemas for GET /api/v1/listings/search."""
 
 from decimal import Decimal
-from typing import List, Literal, Optional
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,23 +21,23 @@ class ListingSearchItem(BaseModel):
     source_partner: str = Field(..., description="Slug identifying the data source partner.")
 
     # ── Display ───────────────────────────────────────────────────────────
-    title: Optional[str] = None
-    property_type: Optional[str] = None
-    typology: Optional[str] = Field(None, description="Portuguese typology code (e.g. 'T2').")
-    bedrooms: Optional[int] = Field(None, ge=0)
-    area_useful_m2: Optional[float] = Field(None, ge=0, description="Useful area in m².")
+    title: str | None = None
+    property_type: str | None = None
+    typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2').")
+    bedrooms: int | None = Field(None, ge=0)
+    area_useful_m2: float | None = Field(None, ge=0, description="Useful area in m².")
 
     # ── Location ──────────────────────────────────────────────────────────
-    district: Optional[str] = None
-    county: Optional[str] = None
+    district: str | None = None
+    county: str | None = None
 
     # ── Financial ─────────────────────────────────────────────────────────
-    listing_type: Optional[Literal["sale", "rent"]] = None
-    price_amount: Optional[Decimal] = Field(None, ge=0)
-    price_currency: Optional[str] = Field(None, min_length=3, max_length=3, description="ISO 4217 currency code.")
+    listing_type: Literal["sale", "rent"] | None = None
+    price_amount: Decimal | None = Field(None, ge=0)
+    price_currency: str | None = Field(None, min_length=3, max_length=3, description="ISO 4217 currency code.")
 
     # ── Selector extras ───────────────────────────────────────────────────
-    thumbnail_url: Optional[str] = Field(
+    thumbnail_url: str | None = Field(
         None,
         description="URL of the first media asset (position=0), if available.",
     )
@@ -54,4 +54,4 @@ class ListingSearchResponse(BaseModel):
     ``ApiResponse.meta``.
     """
 
-    items: List[ListingSearchItem] = Field(default_factory=list)
+    items: list[ListingSearchItem] = Field(default_factory=list)

@@ -1,5 +1,5 @@
-# app/api/responses.py
-from typing import Any, Optional
+﻿# app/api/responses.py
+from typing import Any
 
 from fastapi import Request
 
@@ -14,15 +14,15 @@ ERROR_RESPONSES: dict = {422: {"model": ApiResponse}}
 def ok(
     data: Any,
     message: str,
-    request: Optional[Request] = None,
-    meta: Optional[Meta | dict] = None,
+    request: Request | None = None,
+    meta: Meta | dict | None = None,
 ) -> ApiResponse:
     """Wrap a successful response in the standard ApiResponse envelope.
 
     ``meta`` accepts either a ``Meta`` instance or a plain dict, which Pydantic
     will coerce automatically — keeping router call-sites concise.
     """
-    resolved_meta: Optional[Meta] = None
+    resolved_meta: Meta | None = None
     if isinstance(meta, dict):
         resolved_meta = Meta(**meta)
     elif isinstance(meta, Meta):

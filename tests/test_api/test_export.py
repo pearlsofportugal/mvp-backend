@@ -5,7 +5,6 @@ import pytest
 from httpx import AsyncClient
 
 
-@pytest.mark.asyncio
 async def test_export_json_returns_filtered_rows(client: AsyncClient):
     """GET /api/v1/export/json returns a downloadable JSON payload."""
     from tests.conftest import make_listing_payload
@@ -20,7 +19,6 @@ async def test_export_json_returns_filtered_rows(client: AsyncClient):
     assert rows[0]["source_url"] == "https://example.com/export-1"
 
 
-@pytest.mark.asyncio
 async def test_export_json_rejects_over_limit(client: AsyncClient, monkeypatch):
     """GET /api/v1/export/json refuses exports above the configured cap."""
     from tests.conftest import make_listing_payload

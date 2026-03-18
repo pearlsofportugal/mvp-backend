@@ -10,7 +10,6 @@ from app.schemas.ai_enrichment_schema import (
 )
 
 
-@pytest.mark.asyncio
 async def test_ai_optimize_text(client: AsyncClient, monkeypatch):
     """POST /api/v1/enrichment/ai/optimize returns AI output payload."""
 
@@ -46,7 +45,6 @@ async def test_ai_optimize_text(client: AsyncClient, monkeypatch):
     assert data["output"]["meta_description"] is None
 
 
-@pytest.mark.asyncio
 async def test_ai_listing_enrichment_apply(client: AsyncClient, monkeypatch):
     """POST /api/v1/enrichment/ai/listing enriches selected listing fields."""
     from tests.conftest import make_listing_payload

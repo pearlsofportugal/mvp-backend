@@ -1,7 +1,7 @@
-"""SiteConfig SQLAlchemy model — site scraping configuration stored in DB."""
+﻿"""SiteConfig SQLAlchemy model — site scraping configuration stored in DB."""
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+
 
 from sqlalchemy import Boolean, DateTime, JSON, String
 from sqlalchemy.dialects.postgresql import UUID
@@ -22,11 +22,11 @@ class SiteConfig(Base):
 
     # NOVAS COLUNAS
     pagination_type: Mapped[str] = mapped_column(String(20), nullable=False, default="html_next")
-    pagination_param: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    pagination_param: Mapped[str | None] = mapped_column(String(50), nullable=True)
     confidence_scores: Mapped[dict] = mapped_column(JSON, default=dict)
 
-    link_pattern: Mapped[Optional[str]] = mapped_column(String(500))
-    image_filter: Mapped[Optional[str]] = mapped_column(String(500))
+    link_pattern: Mapped[str | None] = mapped_column(String(500))
+    image_filter: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

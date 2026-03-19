@@ -44,10 +44,15 @@ WRITING RULES:
     1. Introduction: Strong emotional hook with a clear mention of the location.
     2. Development: Focus on comfort, design, and interior details.
     3. Sustainability: Dedicated section translating technical specs (e.g. solar panels, insulation, energy efficiency) into tangible benefits (savings, thermal comfort, lower bills).
-    4. Closing: Outdoor areas followed by a direct Call-to-Action (CTA).
+    4. Closing: Outdoor areas followed by a generic Call-to-Action (CTA).
 - TONE OF VOICE: Professional, inspiring, and modern.
 - SEO: Integrate the provided keywords naturally into the text. Include at least one keyword in the first paragraph and one in the closing. Maximum 3 repetitions per keyword.
 - KEYWORDS TRANSLATION: If any keyword is a Portuguese real estate term (e.g. T1, T2, T3), translate it to its English equivalent (e.g. 1-bedroom, 2-bedroom, 3-bedroom) before integrating it into the text.
+- CONTENT FILTER: Ignore and exclude any agency-specific references found in the source text,
+  including but not limited to: agency names, contact invitations tied to a specific agency
+  (e.g. "Contact XYZ Imobiliária", "Call us at...", "Visit our website"),
+  promotional taglines, and agent names.
+  The closing CTA must be generic (e.g. "Schedule a viewing today", "Enquire now").
 
 OUTPUT RULES (JSON):
 Respond exclusively with valid JSON using the following keys — no markdown, no code blocks, no extra text.

@@ -99,10 +99,14 @@ class AIListingEnrichmentResponse(BaseModel):
 
 
 class EnrichmentPreview(BaseModel):
-    """Preview of AI enrichment for a single listing (description only)."""
+    """Preview of AI enrichment for a listing (all three SEO fields)."""
 
+    original_title: str | None = Field(None, description="Title before enrichment.")
+    enriched_title: str | None = Field(None, description="Title after enrichment.")
     original_description: str | None = Field(None, description="Description before enrichment.")
     enriched_description: str | None = Field(None, description="Description after enrichment.")
+    original_meta_description: str | None = Field(None, description="Meta description before enrichment.")
+    enriched_meta_description: str | None = Field(None, description="Meta description after enrichment.")
     model_used: str = Field(..., description="Identifier of the AI model used.")
 
 
@@ -114,12 +118,12 @@ class EnrichmentSourceStats(BaseModel):
     """Enrichment counts for a single source partner."""
 
     total: int = Field(..., ge=0, description="Total listings from this source.")
-    enriched: int = Field(..., ge=0, description="Listings with enriched descriptions.")
+    enriched_count: int = Field(..., ge=0, description="Listings with at least one AI-enriched field.")
 
     @model_validator(mode="after")
     def enriched_cannot_exceed_total(self) -> "EnrichmentSourceStats":
-        if self.enriched > self.total:
-            raise ValueError("enriched cannot exceed total.")
+        if self.enriched_count > self.total:
+            raise ValueError("enriched_count cannot exceed total.")
         return self
 
 
@@ -140,3 +144,57 @@ class EnrichmentStats(BaseModel):
         if self.enriched_count + self.not_enriched_count != self.total_listings:
             raise ValueError("enriched_count + not_enriched_count must equal total_listings.")
         return self
+
+
+# ---------------------------------------------------------------------------
+# Bulk enrichment
+# ---------------------------------------------------------------------------
+
+class BulkEnrichmentRequest(BaseModel):
+    """Request to enrich multiple listings in one call."""
+
+    listing_ids: list[UUID] = Field(
+        default_factory=list,
+        description="Explicit list of listing IDs to enrich. If empty, enrich all unenriched listings.",
+    )
+    fields: list[AIEnrichmentTargetField] = Field(
+        default_factory=list,
+        description="Fields to enrich. Defaults to all three.",
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Shared SEO keywords. If empty, keywords are inferred per listing.",
+    )
+    force: bool = Field(
+        False,
+        description="When True, regenerates output even if target fields already have values.",
+    )
+    source_partner: str | None = Field(
+        None,
+        description="When set (and listing_ids is empty), restricts bulk enrichment to this partner.",
+    )
+    limit: int = Field(
+        50,
+        ge=1,
+        le=200,
+        description="Maximum number of listings to process in this call.",
+    )
+
+
+class BulkEnrichmentItemResult(BaseModel):
+    """Per-listing result within a bulk enrichment response."""
+
+    listing_id: UUID
+    status: str = Field(..., description="'enriched', 'skipped', or 'error'")
+    fields_changed: list[AIEnrichmentTargetField] = Field(default_factory=list)
+    error: str | None = Field(None, description="Error message when status is 'error'.")
+
+
+class BulkEnrichmentResponse(BaseModel):
+    """Aggregated result of a bulk enrichment operation."""
+
+    total_requested: int = Field(..., ge=0)
+    enriched: int = Field(..., ge=0)
+    skipped: int = Field(..., ge=0)
+    failed: int = Field(..., ge=0)
+    results: list[BulkEnrichmentItemResult] = Field(default_factory=list)

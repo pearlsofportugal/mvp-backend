@@ -81,7 +81,9 @@ class Listing(Base):
     # Descriptions
     raw_description: Mapped[str | None] = mapped_column(Text, comment="Original unmodified description")
     description: Mapped[str | None] = mapped_column(Text, comment="Cleaned description")
+    enriched_title: Mapped[str | None] = mapped_column(String(500), comment="AI-enriched SEO title")
     enriched_description: Mapped[str | None] = mapped_column(Text, comment="AI-enriched description")
+    enriched_meta_description: Mapped[str | None] = mapped_column(Text, comment="AI-enriched meta description")
     description_quality_score: Mapped[int | None] = mapped_column(Integer, comment="0-100 quality score")
     meta_description: Mapped[str | None] = mapped_column(Text)
 

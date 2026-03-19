@@ -1,4 +1,5 @@
 ﻿"""AI enrichment service for SEO title/description/meta_description generation."""
+import asyncio
 import json
 import time
 from collections import deque
@@ -15,6 +16,9 @@ from app.schemas.ai_enrichment_schema import (
     AIListingEnrichmentRequest,
     AIListingEnrichmentResponse,
     AITextOptimizationResponse,
+    BulkEnrichmentItemResult,
+    BulkEnrichmentRequest,
+    BulkEnrichmentResponse,
 )
 
 logger = get_logger(__name__)
@@ -120,8 +124,6 @@ def _get_client():
             raise EnrichmentError("google-genai dependency is not available", detail=str(exc)) from exc
     return _client
 
-import asyncio
-
 
 def _check_ai_rate_limit(now: float | None = None) -> None:
     """Enforce a simple in-process sliding-window rate limit for AI calls."""
@@ -153,8 +155,8 @@ def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> dict[str, Any]:
         response = client.models.generate_content(
             model=settings.google_genai_model,
             config={
-                "system_instruction": _SYSTEM_INSTRUCTION_SEO, # Persona e Regras
-                "temperature": 0.7, # Equilíbrio entre criatividade e precisão
+                "system_instruction": _SYSTEM_INSTRUCTION_SEO,
+                "temperature": settings.google_genai_temperature,
                 "response_mime_type": "application/json",
             },
             contents=prompt, # Dados do imóvel
@@ -168,7 +170,7 @@ def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> dict[str, Any]:
         raise EnrichmentError("Failed to generate AI SEO output", detail=str(exc)) from exc
 
 async def _call_ai_for_seo_async(content: str, keywords: Sequence[str]) -> dict[str, Any]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _call_ai_for_seo, content, keywords)
 
 def _normalize_output(payload: dict[str, Any]) -> AIEnrichmentOutput:
@@ -206,23 +208,59 @@ def infer_listing_keywords(listing: Listing) -> list[str]:
 async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentRequest) -> AIListingEnrichmentResponse:
     """Apply AI SEO enrichment to selected listing fields (preview or apply)."""
     fields = payload.fields or ["title", "description", "meta_description"]
+
+    # original_values: what the user sees as "before" — always the scraped/clean source,
+    # never a previously-enriched value (prevents showing AI output as the baseline).
     original_values = {
         "title": listing.title,
-        "description": listing.enriched_description or listing.description or listing.raw_description,
+        "description": listing.description or listing.raw_description,
         "meta_description": listing.meta_description,
     }
+
+    # destination_current_values: the AI-specific fields that guard against
+    # overwriting on repeated calls without force=True.
     destination_current_values = {
-        "title": listing.title,
+        "title": listing.enriched_title,
         "description": listing.enriched_description,
-        "meta_description": listing.meta_description,
+        "meta_description": listing.enriched_meta_description,
     }
 
     keywords_used = _sanitize_keywords(payload.keywords) or infer_listing_keywords(listing)
 
+    # Determine which fields actually need enriching before spending API quota.
+    fields_needing_enrichment = [
+        field for field in fields
+        if payload.force or not bool(
+            destination_current_values.get(field) and
+            str(destination_current_values[field]).strip()
+        )
+    ]
+
+    if not fields_needing_enrichment:
+        # All requested fields already have AI values and force=False — skip the API call.
+        results = [
+            AIEnrichmentFieldResult(
+                field=field,
+                original=original_values.get(field),
+                enriched=None,
+                changed=False,
+            )
+            for field in fields
+        ]
+        return AIListingEnrichmentResponse(
+            listing_id=listing.id,
+            applied=payload.apply,
+            model_used=settings.google_genai_model,
+            keywords_used=keywords_used,
+            results=results,
+        )
+
+    # Always use the original scraped/cleaned content as AI input to avoid
+    # enrichment drift (AI re-enriching its own previous output on force=True).
     source_content = "\n\n".join(
         [
             f"Título atual: {listing.title or ''}",
-            f"Descrição atual: {(listing.enriched_description or listing.description or listing.raw_description or '')}",
+            f"Descrição atual: {(listing.description or listing.raw_description or '')}",
             f"Meta descrição atual: {listing.meta_description or ''}",
         ]
     ).strip()
@@ -245,22 +283,21 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
         already_has_value = bool(destination_current and destination_current.strip())
         skip = not payload.force and already_has_value
 
-        enriched_value = field_value_map.get(field)
-        changed = not skip and (enriched_value or "") != (original or "")
+        changed = not skip and (enriched or "") != (original or "")
         results.append(AIEnrichmentFieldResult(
             field=field,
             original=original,
-            enriched=enriched_value if not skip else None,
+            enriched=enriched if not skip else None,
             changed=changed,
         ))
 
         if payload.apply and changed:
             if field == "title":
-                listing.title = enriched
+                listing.enriched_title = enriched
             elif field == "description":
                 listing.enriched_description = enriched
             elif field == "meta_description":
-                listing.meta_description = enriched
+                listing.enriched_meta_description = enriched
 
     return AIListingEnrichmentResponse(
         listing_id=listing.id,
@@ -271,3 +308,62 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
     )
 
 
+async def bulk_enrich_listings(
+    listings: list[Listing],
+    request: BulkEnrichmentRequest,
+) -> BulkEnrichmentResponse:
+    """Enrich a batch of listings sequentially, respecting the rate limit.
+
+    Each listing is processed with apply=True so callers only need to commit
+    once after this function returns. Failed listings are recorded but do not
+    abort the rest of the batch.
+    """
+    item_results: list[BulkEnrichmentItemResult] = []
+    enriched_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for listing in listings:
+        per_listing_payload = AIListingEnrichmentRequest(
+            listing_id=listing.id,
+            fields=request.fields or [],
+            keywords=request.keywords,
+            apply=True,
+            force=request.force,
+        )
+        try:
+            response = await enrich_listing_with_ai(listing, per_listing_payload)
+            fields_changed = [r.field for r in response.results if r.changed]
+            if fields_changed:
+                item_results.append(BulkEnrichmentItemResult(
+                    listing_id=listing.id,
+                    status="enriched",
+                    fields_changed=fields_changed,
+                ))
+                enriched_count += 1
+            else:
+                item_results.append(BulkEnrichmentItemResult(
+                    listing_id=listing.id,
+                    status="skipped",
+                ))
+                skipped_count += 1
+        except EnrichmentError as exc:
+            logger.warning(
+                "Bulk enrichment failed for listing %s: %s",
+                listing.id,
+                exc,
+            )
+            item_results.append(BulkEnrichmentItemResult(
+                listing_id=listing.id,
+                status="error",
+                error=str(exc),
+            ))
+            failed_count += 1
+
+    return BulkEnrichmentResponse(
+        total_requested=len(listings),
+        enriched=enriched_count,
+        skipped=skipped_count,
+        failed=failed_count,
+        results=item_results,
+    )

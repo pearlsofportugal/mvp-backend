@@ -4,7 +4,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
@@ -17,12 +17,14 @@ from app.schemas.ai_enrichment_schema import (
     AIListingEnrichmentResponse,
     AITextOptimizationRequest,
     AITextOptimizationResponse,
+    BulkEnrichmentRequest,
+    BulkEnrichmentResponse,
     EnrichmentPreview,
     EnrichmentSourceStats,
     EnrichmentStats,
 )
 from app.schemas.base_schema import ApiResponse
-from app.services.ai_enrichment_service import enrich_listing_with_ai, optimize_text_with_ai
+from app.services.ai_enrichment_service import bulk_enrich_listings, enrich_listing_with_ai, optimize_text_with_ai
 import asyncio
 router = APIRouter()
 
@@ -62,30 +64,37 @@ async def preview_enrichment(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Preview AI-generated description for a listing without persisting changes."""
+    """Preview AI-generated SEO content for a listing without persisting changes."""
     listing = (
         await db.execute(select(Listing).where(Listing.id == listing_id))
     ).scalar_one_or_none()
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
 
-    # Reutiliza a lógica de /listing com apply=False e force=True
     preview_request = AIListingEnrichmentRequest(
         listing_id=listing_id,
-        fields=["description"],
+        fields=["title", "description", "meta_description"],
         apply=False,
         force=True,
     )
     response = await enrich_listing_with_ai(listing, preview_request)
 
-    desc_result = next(
-        (r for r in response.results if r.field == "description"), None
-    )
+    def _get(field: str) -> tuple[str | None, str | None]:
+        result = next((r for r in response.results if r.field == field), None)
+        return (result.original if result else None, result.enriched if result else None)
+
+    orig_title, enr_title = _get("title")
+    orig_desc, enr_desc = _get("description")
+    orig_meta, enr_meta = _get("meta_description")
 
     return ok(
         EnrichmentPreview(
-            original_description=desc_result.original if desc_result else None,
-            enriched_description=desc_result.enriched if desc_result else None,
+            original_title=orig_title,
+            enriched_title=enr_title,
+            original_description=orig_desc,
+            enriched_description=enr_desc,
+            original_meta_description=orig_meta,
+            enriched_meta_description=enr_meta,
             model_used=response.model_used,
         ),
         "Preview generated successfully",
@@ -100,10 +109,12 @@ async def enrichment_stats(
     source_partner: str | None = Query(None, description="Filter stats by source partner"),
 ):
     """Aggregated enrichment statistics across all listings."""
-    # Total de listings (com filtro opcional por source_partner)
+    # A listing is considered enriched when any of the three AI fields is populated.
     total_query = select(func.count(Listing.id))
     enriched_query = select(func.count(Listing.id)).where(
-        Listing.enriched_description.isnot(None)
+        (Listing.enriched_title.isnot(None))
+        | (Listing.enriched_description.isnot(None))
+        | (Listing.enriched_meta_description.isnot(None))
     )
 
     if source_partner:
@@ -114,10 +125,15 @@ async def enrichment_stats(
     enriched: int = (await db.execute(enriched_query)).scalar_one()
 
     # Breakdown por source_partner
+    _any_enriched = (
+        (Listing.enriched_title.isnot(None))
+        | (Listing.enriched_description.isnot(None))
+        | (Listing.enriched_meta_description.isnot(None))
+    )
     by_source_query = select(
         Listing.source_partner,
         func.count(Listing.id).label("total"),
-        func.count(Listing.enriched_description).label("enriched"),
+        func.count(case((_any_enriched, 1))).label("enriched_count"),
     ).group_by(Listing.source_partner)
 
     if source_partner:
@@ -128,7 +144,7 @@ async def enrichment_stats(
     by_source = {
         row.source_partner: EnrichmentSourceStats(
             total=row.total,
-            enriched=row.enriched,
+            enriched_count=row.enriched_count,
         )
         for row in by_source_rows
         if row.source_partner is not None
@@ -145,3 +161,35 @@ async def enrichment_stats(
         "Enrichment stats retrieved successfully",
         request,
     )
+
+
+@router.post("/bulk", response_model=ApiResponse[BulkEnrichmentResponse], responses=ERROR_RESPONSES, operation_id="bulk_enrich_listings")
+async def bulk_enrich(
+    payload: BulkEnrichmentRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Enrich multiple listings in one call.
+
+    When ``listing_ids`` is provided, only those listings are processed.
+    Otherwise, all unenriched listings (optionally filtered by ``source_partner``)
+    are queued up to ``limit``.
+    """
+    if payload.listing_ids:
+        stmt = select(Listing).where(Listing.id.in_(payload.listing_ids))
+    else:
+        unenriched_filter = (
+            Listing.enriched_title.is_(None)
+            & Listing.enriched_description.is_(None)
+            & Listing.enriched_meta_description.is_(None)
+        )
+        stmt = select(Listing).where(unenriched_filter)
+        if payload.source_partner:
+            stmt = stmt.where(Listing.source_partner == payload.source_partner)
+        stmt = stmt.order_by(Listing.created_at.asc()).limit(payload.limit)
+
+    listings = (await db.execute(stmt)).scalars().all()
+
+    response = await bulk_enrich_listings(list(listings), payload)
+    await db.commit()
+    return ok(response, f"{response.enriched} listing(s) enriched, {response.skipped} skipped, {response.failed} failed", request)

@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # AI / GenAI
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-2.5-flash"
-    google_genai_temperature: float = 0.2
+    google_genai_temperature: float = 0.7
     ai_rate_limit_requests: int = 20
     ai_rate_limit_window: int = 60
     

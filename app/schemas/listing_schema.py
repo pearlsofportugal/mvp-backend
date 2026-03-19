@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +107,11 @@ class ListingBase(BaseModel):
     # ── Content ───────────────────────────────────────────────────────────
     raw_description: str | None = Field(None, description="Raw description as scraped (unprocessed).")
     description: str | None = Field(None, description="Cleaned / normalised description.")
+    enriched_title: str | None = Field(None, description="AI-enriched SEO title.")
     enriched_description: str | None = Field(None, description="AI-enriched description.")
+    enriched_meta_description: str | None = Field(None, description="AI-enriched meta description.")
     description_quality_score: int | None = Field(None, ge=0, le=100, description="AI quality score (0–100).")
-    meta_description: str | None = Field(None, description="SEO meta description.")
+    meta_description: str | None = Field(None, description="SEO meta description (scraped).")
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +170,9 @@ class ListingUpdate(BaseModel):
     advertiser: str | None = None
     contacts: str | None = None
     description: str | None = None
+    enriched_title: str | None = None
     enriched_description: str | None = None
+    enriched_meta_description: str | None = None
     description_quality_score: int | None = Field(None, ge=0, le=100)
     meta_description: str | None = None
 
@@ -238,7 +242,9 @@ class ListingDetailRead(BaseModel):
     advertiser: str | None = None
     contacts: str | None = None
     description: str | None = None
-    enriched_description: str | None = None
+    enriched_title: str | None = Field(None, exclude=True)
+    enriched_description: str | None = Field(None, exclude=True)
+    enriched_meta_description: str | None = Field(None, exclude=True)
     description_quality_score: int | None = Field(None, ge=0, le=100)
     meta_description: str | None = None
 
@@ -246,6 +252,17 @@ class ListingDetailRead(BaseModel):
     updated_at: datetime
     media_assets: list[MediaAssetRead] = Field(default_factory=list)
     price_history: list[PriceHistoryRead] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _apply_enriched_values(self) -> "ListingDetailRead":
+        """Transparently substitute enriched AI values into the canonical fields."""
+        if self.enriched_title:
+            self.title = self.enriched_title
+        if self.enriched_description:
+            self.description = self.enriched_description
+        if self.enriched_meta_description:
+            self.meta_description = self.enriched_meta_description
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +275,14 @@ class ListingListRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    enriched_title: str | None = Field(None, exclude=True)
     title: str | None = None
+
+    @model_validator(mode="after")
+    def _apply_enriched_title(self) -> "ListingListRead":
+        if self.enriched_title:
+            self.title = self.enriched_title
+        return self
     source_partner: str
     listing_type: Literal["sale", "rent"] | None = None
     property_type: str | None = None

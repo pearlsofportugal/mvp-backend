@@ -242,7 +242,7 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
             AIEnrichmentFieldResult(
                 field=field,
                 original=original_values.get(field),
-                enriched=None,
+                enriched=destination_current_values.get(field),
                 changed=False,
             )
             for field in fields
@@ -287,7 +287,7 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
         results.append(AIEnrichmentFieldResult(
             field=field,
             original=original,
-            enriched=enriched if not skip else None,
+            enriched=enriched if not skip else destination_current,
             changed=changed,
         ))
 

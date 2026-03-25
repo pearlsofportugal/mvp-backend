@@ -996,6 +996,7 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
 
     image_selector = selectors.get("image_selector", "img")
     image_filter = selectors.get("image_filter")
+    image_exclude_filter = selectors.get("image_exclude_filter")
 
     for img in soup.select(image_selector):
         src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
@@ -1005,6 +1006,8 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
         absolute_url = urljoin(base_url, src)
 
         if image_filter and not re.search(image_filter, absolute_url):
+            continue
+        if image_exclude_filter and re.search(image_exclude_filter, absolute_url):
             continue
 
         data["images"].append(absolute_url)

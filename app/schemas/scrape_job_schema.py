@@ -4,7 +4,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Any
+
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Exhaustive literal — emitted as a union type in generated TypeScript clients.
 JobStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
@@ -60,8 +62,17 @@ class JobLogEntry(BaseModel):
 class JobUrlState(BaseModel):
     """URL discovery state for a scrape job."""
 
-    discovered: list[str] = Field(default_factory=list, description="All discovered listing URLs.")
-    visited: list[str] = Field(default_factory=list, description="URLs successfully fetched.")
+    # DB stores keys 'found' and 'scraped'; accept both spellings.
+    discovered: list[str] = Field(
+        default_factory=list,
+        description="All discovered listing URLs.",
+        validation_alias=AliasChoices("discovered", "found"),
+    )
+    visited: list[str] = Field(
+        default_factory=list,
+        description="URLs successfully fetched.",
+        validation_alias=AliasChoices("visited", "scraped"),
+    )
     failed: list[str] = Field(default_factory=list, description="URLs that failed to fetch.")
 
 
@@ -97,6 +108,20 @@ class JobRead(BaseModel):
     config: JobConfig | None = None
     logs: list[JobLogEntry] | None = Field(None, description="Structured log entries produced during scraping.")
     urls: JobUrlState | None = Field(None, description="Discovered and visited URL state.")
+
+    @field_validator("logs", mode="before")
+    @classmethod
+    def _flatten_logs(cls, v: Any) -> Any:
+        """DB stores logs as {errors:[...], warnings:[...], info:[...]}; flatten to a list."""
+        if not isinstance(v, dict):
+            return v
+        level_map = {"errors": "error", "warnings": "warning", "info": "info"}
+        flat: list[dict[str, Any]] = []
+        for key, entries in v.items():
+            level = level_map.get(key, key)
+            for entry in (entries or []):
+                flat.append({**entry, "level": level})
+        return flat
     error_message: str | None = Field(None, description="Terminal error message when status='failed'.")
     started_at: datetime | None = None
     last_heartbeat_at: datetime | None = None

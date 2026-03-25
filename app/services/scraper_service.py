@@ -131,6 +131,7 @@ async def run_scrape_job(job_id: str) -> None:
                 extraction_mode=site_config.extraction_mode,
                 link_pattern=site_config.link_pattern,
                 image_filter=site_config.image_filter,
+                image_exclude_filter=getattr(site_config, "image_exclude_filter", None),
                 config=job.config or {},
                 pagination_type=site_config.pagination_type,
                 pagination_param=site_config.pagination_param,
@@ -161,6 +162,7 @@ async def _run_scrape_async(
     extraction_mode: str,
     link_pattern: str | None,
     image_filter: str | None,
+    image_exclude_filter: str | None,
     config: dict[str, Any],
     pagination_type: str = "html_next",
     pagination_param: str | None = None,
@@ -192,6 +194,8 @@ async def _run_scrape_async(
             full_selectors["listing_link_pattern"] = link_pattern
         if image_filter:
             full_selectors["image_filter"] = image_filter
+        if image_exclude_filter:
+            full_selectors["image_exclude_filter"] = image_exclude_filter
 
         current_url = start_url
         pages_visited = 0

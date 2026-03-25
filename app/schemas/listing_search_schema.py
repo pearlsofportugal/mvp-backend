@@ -10,8 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class ListingSearchItem(BaseModel):
     """Lightweight listing representation for the selector UI.
 
-    Extends the base list fields with ``thumbnail_url`` (first media asset,
-    position=0) and ``is_enriched`` (derived from enriched_description presence).
+    Extends the base list fields with ``thumbnail_url`` (first media asset at
+    position=0) and ``is_enriched`` (True when any AI-enriched field is present).
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -43,7 +43,7 @@ class ListingSearchItem(BaseModel):
     )
     is_enriched: bool = Field(
         False,
-        description="True when enriched_description is present and non-empty.",
+        description="True when any of enriched_title, enriched_description, or enriched_meta_description is present.",
     )
 
 

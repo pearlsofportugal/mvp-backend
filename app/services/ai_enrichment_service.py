@@ -206,19 +206,22 @@ def infer_listing_keywords(listing: Listing) -> list[str]:
 
 
 async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentRequest) -> AIListingEnrichmentResponse:
-    """Apply AI SEO enrichment to selected listing fields (preview or apply)."""
+    """Apply AI SEO enrichment to selected listing fields.
+
+    Two fully separate paths:
+    - apply=False: call AI (respecting force / existing values), return preview. Nothing written to DB.
+    - apply=True:  persist the enriched_values supplied by the caller. AI is never called.
+    """
     fields = payload.fields or ["title", "description", "meta_description"]
 
-    # original_values: what the user sees as "before" — always the scraped/clean source,
-    # never a previously-enriched value (prevents showing AI output as the baseline).
+    # original_values: the scraped baseline shown as "before" in the response.
     original_values = {
         "title": listing.title,
         "description": listing.description or listing.raw_description,
         "meta_description": listing.meta_description,
     }
 
-    # destination_current_values: the AI-specific fields that guard against
-    # overwriting on repeated calls without force=True.
+    # Current AI-enriched values already stored in the DB.
     destination_current_values = {
         "title": listing.enriched_title,
         "description": listing.enriched_description,
@@ -226,6 +229,45 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
     }
 
     keywords_used = _sanitize_keywords(payload.keywords) or infer_listing_keywords(listing)
+
+    # ------------------------------------------------------------------
+    # PATH A — apply=True: persist caller-supplied values, no AI call.
+    # ------------------------------------------------------------------
+    if payload.apply:
+        incoming = payload.enriched_values or {}
+        results: list[AIEnrichmentFieldResult] = []
+        for field in fields:
+            original = original_values.get(field)
+            new_value = incoming.get(field)
+            if new_value:
+                if field == "title":
+                    listing.enriched_title = new_value
+                elif field == "description":
+                    listing.enriched_description = new_value
+                elif field == "meta_description":
+                    listing.enriched_meta_description = new_value
+                changed = new_value.strip() != (original or "").strip()
+            else:
+                # Field not provided — keep whatever is already stored.
+                new_value = destination_current_values.get(field)
+                changed = False
+            results.append(AIEnrichmentFieldResult(
+                field=field,
+                original=original,
+                enriched=new_value,
+                changed=changed,
+            ))
+        return AIListingEnrichmentResponse(
+            listing_id=listing.id,
+            applied=True,
+            model_used=settings.google_genai_model,
+            keywords_used=keywords_used,
+            results=results,
+        )
+
+    # ------------------------------------------------------------------
+    # PATH B — apply=False: call AI, return preview. Nothing written to DB.
+    # ------------------------------------------------------------------
 
     # Determine which fields actually need enriching before spending API quota.
     fields_needing_enrichment = [
@@ -237,7 +279,7 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
     ]
 
     if not fields_needing_enrichment:
-        # All requested fields already have AI values and force=False — skip the API call.
+        # All fields already have AI values and force=False — skip the API call.
         results = [
             AIEnrichmentFieldResult(
                 field=field,
@@ -249,14 +291,13 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
         ]
         return AIListingEnrichmentResponse(
             listing_id=listing.id,
-            applied=payload.apply,
+            applied=False,
             model_used=settings.google_genai_model,
             keywords_used=keywords_used,
             results=results,
         )
 
-    # Always use the original scraped/cleaned content as AI input to avoid
-    # enrichment drift (AI re-enriching its own previous output on force=True).
+    # Always use the original scraped content as AI input to prevent drift.
     source_content = "\n\n".join(
         [
             f"Título atual: {listing.title or ''}",
@@ -274,34 +315,30 @@ async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentR
         "meta_description": output.meta_description,
     }
 
-    results: list[AIEnrichmentFieldResult] = []
+    results = []
     for field in fields:
         original = original_values.get(field)
-        enriched = field_value_map.get(field)
         destination_current = destination_current_values.get(field)
-
         already_has_value = bool(destination_current and destination_current.strip())
         skip = not payload.force and already_has_value
 
-        changed = not skip and (enriched or "") != (original or "")
+        if skip:
+            enriched = destination_current
+            changed = False
+        else:
+            enriched = field_value_map.get(field)
+            changed = (enriched or "") != (original or "")
+
         results.append(AIEnrichmentFieldResult(
             field=field,
             original=original,
-            enriched=enriched if not skip else destination_current,
+            enriched=enriched,
             changed=changed,
         ))
 
-        if payload.apply and changed:
-            if field == "title":
-                listing.enriched_title = enriched
-            elif field == "description":
-                listing.enriched_description = enriched
-            elif field == "meta_description":
-                listing.enriched_meta_description = enriched
-
     return AIListingEnrichmentResponse(
         listing_id=listing.id,
-        applied=payload.apply,
+        applied=False,
         model_used=settings.google_genai_model,
         keywords_used=keywords_used,
         results=results,
@@ -324,16 +361,43 @@ async def bulk_enrich_listings(
     failed_count = 0
 
     for listing in listings:
-        per_listing_payload = AIListingEnrichmentRequest(
+        # Generate preview (no DB write) — skips already-enriched fields.
+        preview_payload = AIListingEnrichmentRequest(
             listing_id=listing.id,
             fields=request.fields or [],
             keywords=request.keywords,
-            apply=True,
-            force=request.force,
+            apply=False,
+            force=False,
         )
         try:
-            response = await enrich_listing_with_ai(listing, per_listing_payload)
-            fields_changed = [r.field for r in response.results if r.changed]
+            response = await enrich_listing_with_ai(listing, preview_payload)
+
+            # Collect only the fields that the AI actually changed.
+            enriched_values = {
+                r.field: r.enriched
+                for r in response.results
+                if r.changed and r.enriched
+            }
+
+            if not enriched_values:
+                skipped_count += 1
+                item_results.append(BulkEnrichmentItemResult(
+                    listing_id=listing.id,
+                    status="skipped",
+                    fields_changed=[],
+                ))
+                continue
+
+            # Persist the generated values without re-calling AI.
+            apply_payload = AIListingEnrichmentRequest(
+                listing_id=listing.id,
+                fields=request.fields or [],
+                keywords=request.keywords,
+                apply=True,
+                enriched_values=enriched_values,
+            )
+            apply_response = await enrich_listing_with_ai(listing, apply_payload)
+            fields_changed = [r.field for r in apply_response.results if r.changed]
             if fields_changed:
                 item_results.append(BulkEnrichmentItemResult(
                     listing_id=listing.id,

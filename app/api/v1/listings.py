@@ -23,82 +23,16 @@ from app.schemas.listing_schema import (
     ListingCreate,
     ListingDetailRead,
     ListingListRead,
-    ListingRead,
     ListingStats,
     ListingUpdate,
     MediaAssetCreate,
     PaginatedResponse,
 )
 from app.api.responses import ok, ERROR_RESPONSES
+from app.api.v1._filters import apply_listing_filters
 from app.schemas.listing_search_schema import ListingSearchItem, ListingSearchResponse
 
 router = APIRouter()
-
-
-def _apply_filters(query, **kwargs):
-    """Apply dynamic filters to a listing query."""
-    filters = []
-
-    if kwargs.get("district"):
-        filters.append(Listing.district.ilike(f"%{kwargs['district']}%"))
-    if kwargs.get("county"):
-        filters.append(Listing.county.ilike(f"%{kwargs['county']}%"))
-    if kwargs.get("parish"):
-        filters.append(Listing.parish.ilike(f"%{kwargs['parish']}%"))
-    if kwargs.get("property_type"):
-        filters.append(Listing.property_type.ilike(f"%{kwargs['property_type']}%"))
-    if kwargs.get("typology"):
-        filters.append(Listing.typology == kwargs["typology"])
-    if kwargs.get("listing_type"):
-        filters.append(Listing.listing_type == kwargs["listing_type"])
-    if kwargs.get("source_partner"):
-        filters.append(Listing.source_partner == kwargs["source_partner"])
-    if kwargs.get("scrape_job_id"):
-        filters.append(Listing.scrape_job_id == kwargs["scrape_job_id"])
-
-    # Range filters
-    if kwargs.get("price_min") is not None:
-        filters.append(Listing.price_amount >= kwargs["price_min"])
-    if kwargs.get("price_max") is not None:
-        filters.append(Listing.price_amount <= kwargs["price_max"])
-    if kwargs.get("area_min") is not None:
-        filters.append(Listing.area_useful_m2 >= kwargs["area_min"])
-    if kwargs.get("area_max") is not None:
-        filters.append(Listing.area_useful_m2 <= kwargs["area_max"])
-    if kwargs.get("bedrooms_min") is not None:
-        filters.append(Listing.bedrooms >= kwargs["bedrooms_min"])
-    if kwargs.get("bedrooms_max") is not None:
-        filters.append(Listing.bedrooms <= kwargs["bedrooms_max"])
-
-    # Boolean flags
-    if kwargs.get("has_garage") is not None:
-        filters.append(Listing.has_garage == kwargs["has_garage"])
-    if kwargs.get("has_pool") is not None:
-        filters.append(Listing.has_pool == kwargs["has_pool"])
-    if kwargs.get("has_elevator") is not None:
-        filters.append(Listing.has_elevator == kwargs["has_elevator"])
-
-    # Date filters
-    if kwargs.get("created_after"):
-        filters.append(Listing.created_at >= kwargs["created_after"])
-    if kwargs.get("created_before"):
-        filters.append(Listing.created_at <= kwargs["created_before"])
-
-    # Full-text search (simple LIKE for MVP, upgrade to tsvector later)
-    if kwargs.get("search"):
-        search_term = f"%{kwargs['search']}%"
-        filters.append(
-            or_(
-                Listing.title.ilike(search_term),
-                Listing.description.ilike(search_term),
-                Listing.enriched_description.ilike(search_term),
-            )
-        )
-
-    if filters:
-        query = query.where(and_(*filters))
-
-    return query
 
 
 SORT_FIELDS = {
@@ -156,10 +90,10 @@ async def list_listings(
         "search": search,
     }
 
-    count_query = _apply_filters(select(func.count(Listing.id)), **filter_kwargs)
+    count_query = apply_listing_filters(select(func.count(Listing.id)), **filter_kwargs)
     total = (await db.execute(count_query)).scalar_one()
 
-    query = _apply_filters(select(Listing), **filter_kwargs)
+    query = apply_listing_filters(select(Listing), **filter_kwargs)
     sort_column = SORT_FIELDS.get(sort_by, Listing.created_at)
     query = query.order_by(desc(sort_column) if sort_order == "desc" else asc(sort_column))
     query = query.offset((page - 1) * page_size).limit(page_size)
@@ -333,6 +267,15 @@ async def detect_duplicates(
     page_size: int = Query(20, ge=1, le=100),
 ):
     """Detect duplicate listings by source_url."""
+    count_sub = (
+        select(Listing.source_url)
+        .where(Listing.source_url.isnot(None))
+        .group_by(Listing.source_url)
+        .having(func.count(Listing.id) > 1)
+        .subquery()
+    )
+    total = (await db.execute(select(func.count()).select_from(count_sub))).scalar_one()
+
     query = (
         select(Listing.source_url, func.count(Listing.id).label("count"))
         .where(Listing.source_url.isnot(None))
@@ -342,7 +285,13 @@ async def detect_duplicates(
         .limit(page_size)
     )
     entries = [DuplicateEntry(source_url=r[0], count=r[1]) for r in (await db.execute(query)).all()]
-    return ok(DuplicatesResponse(duplicates=entries), "Duplicates detected successfully", request)
+    pages = math.ceil(total / page_size) if total > 0 else 0
+    return ok(
+        DuplicatesResponse(duplicates=entries, total=total),
+        "Duplicates detected successfully",
+        request,
+        meta=Meta(page=page, page_size=page_size, total=total, pages=pages),
+    )
 # ══════════════════════════════════════════════════════════════════
 #  DYNAMIC ROUTES — /{listing_id} must come LAST
 # ═════════════════════════════════════════════════════════════════
@@ -355,7 +304,7 @@ async def get_listing(listing_id: UUID, request: Request, db: AsyncSession = Dep
     return ok(ListingDetailRead.model_validate(listing), "Listing retrieved successfully", request)
 
 
-@router.post("", response_model=ApiResponse[ListingRead], status_code=201, responses=ERROR_RESPONSES, operation_id="create_listing")
+@router.post("", response_model=ApiResponse[ListingDetailRead], status_code=201, responses={**ERROR_RESPONSES, 409: {"model": ApiResponse, "description": "Listing with this source_url already exists."}}, operation_id="create_listing")
 async def create_listing(payload: ListingCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """Create a new listing manually."""
     if payload.source_url:
@@ -373,10 +322,10 @@ async def create_listing(payload: ListingCreate, request: Request, db: AsyncSess
     await db.commit()
     await db.refresh(listing)
     listing = (await db.execute(select(Listing).where(Listing.id == listing.id))).scalar_one()
-    return ok(ListingRead.model_validate(listing), "Listing created successfully", request)
+    return ok(ListingDetailRead.model_validate(listing), "Listing created successfully", request)
 
 
-@router.patch("/{listing_id}", response_model=ApiResponse[ListingRead], responses=ERROR_RESPONSES, operation_id="update_listing")
+@router.patch("/{listing_id}", response_model=ApiResponse[ListingDetailRead], responses=ERROR_RESPONSES, operation_id="update_listing")
 async def update_listing(
     listing_id: UUID,
     payload: ListingUpdate,
@@ -403,7 +352,7 @@ async def update_listing(
     await db.commit()
     await db.refresh(listing)
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id))).scalar_one()
-    return ok(ListingRead.model_validate(listing), "Listing updated successfully", request)
+    return ok(ListingDetailRead.model_validate(listing), "Listing updated successfully", request)
 
 
 

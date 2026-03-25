@@ -133,23 +133,6 @@ async def update_site(
     return ok(SiteConfigRead.model_validate(site), "Site updated successfully", request)
 
 
-@router.post("/{key}/reactivate", response_model=ApiResponse[SiteConfigRead], responses=ERROR_RESPONSES, operation_id="reactivate_site")
-async def reactivate_site(key: str, request: Request, db: AsyncSession = Depends(get_db)):
-    """Reactivate a deactivated site configuration."""
-    site = (
-        await db.execute(select(SiteConfig).where(SiteConfig.key == key))
-    ).scalar_one_or_none()
-    if not site:
-        raise NotFoundError(f"Site config '{key}' not found")
-    if site.is_active:
-        raise DuplicateError(f"Site config '{key}' is already active")
-
-    site.is_active = True
-    await db.commit()   # FIX: flush → commit
-    await db.refresh(site)
-    return ok(SiteConfigRead.model_validate(site), "Site reactivated successfully", request)
-
-
 @router.delete("/{key}", response_model=ApiResponse[None], status_code=200, responses=ERROR_RESPONSES, operation_id="delete_site")
 async def delete_site(
     key: str,

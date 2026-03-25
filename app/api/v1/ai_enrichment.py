@@ -19,7 +19,6 @@ from app.schemas.ai_enrichment_schema import (
     AITextOptimizationResponse,
     BulkEnrichmentRequest,
     BulkEnrichmentResponse,
-    EnrichmentPreview,
     EnrichmentSourceStats,
     EnrichmentStats,
 )
@@ -56,50 +55,6 @@ async def enrich_listing(
     if payload.apply:
         await db.commit()
     return ok(response, "Listing enriched successfully", request)
-
-
-@router.get("/preview/{listing_id}", response_model=ApiResponse[EnrichmentPreview], responses=ERROR_RESPONSES, operation_id="preview_enrichment")
-async def preview_enrichment(
-    listing_id: UUID,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    """Preview AI-generated SEO content for a listing without persisting changes."""
-    listing = (
-        await db.execute(select(Listing).where(Listing.id == listing_id))
-    ).scalar_one_or_none()
-    if not listing:
-        raise NotFoundError(f"Listing {listing_id} not found")
-
-    preview_request = AIListingEnrichmentRequest(
-        listing_id=listing_id,
-        fields=["title", "description", "meta_description"],
-        apply=False,
-        force=True,
-    )
-    response = await enrich_listing_with_ai(listing, preview_request)
-
-    def _get(field: str) -> tuple[str | None, str | None]:
-        result = next((r for r in response.results if r.field == field), None)
-        return (result.original if result else None, result.enriched if result else None)
-
-    orig_title, enr_title = _get("title")
-    orig_desc, enr_desc = _get("description")
-    orig_meta, enr_meta = _get("meta_description")
-
-    return ok(
-        EnrichmentPreview(
-            original_title=orig_title,
-            enriched_title=enr_title,
-            original_description=orig_desc,
-            enriched_description=enr_desc,
-            original_meta_description=orig_meta,
-            enriched_meta_description=enr_meta,
-            model_used=response.model_used,
-        ),
-        "Preview generated successfully",
-        request,
-    )
 
 
 @router.get("/stats", response_model=ApiResponse[EnrichmentStats], responses=ERROR_RESPONSES, operation_id="enrichment_stats")

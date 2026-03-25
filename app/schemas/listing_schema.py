@@ -181,8 +181,13 @@ class ListingUpdate(BaseModel):
 # Read (detail)
 # ---------------------------------------------------------------------------
 
-class ListingRead(ListingBase):
-    """Full listing detail response."""
+class ListingDetailRead(ListingBase):
+    """Full listing detail response (GET /listings/{id}, POST /listings, PATCH /listings/{id}).
+
+    Inherits all fields from ListingBase. Scraper-internal and AI enriched
+    fields are excluded from serialisation; enriched values are transparently
+    substituted into the canonical title/description/meta_description fields.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -195,63 +200,17 @@ class ListingRead(ListingBase):
     updated_at: datetime
     media_assets: list[MediaAssetRead] = Field(default_factory=list)
     price_history: list[PriceHistoryRead] = Field(default_factory=list)
+    is_enriched: bool = Field(
+        False,
+        description="True when any AI-enriched field (title, description, or meta_description) is present.",
+    )
 
-
-class ListingDetailRead(BaseModel):
-    """Public listing detail response without internal raw scraped text."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    partner_id: str | None = None
-    source_partner: str
-    source_url: str | None = None
-    scrape_job_id: UUID | None = None
-
-    listing_type: Literal["sale", "rent"] | None = None
-    property_type: str | None = None
-    typology: str | None = None
-    title: str | None = None
-    bedrooms: int | None = Field(None, ge=0)
-    bathrooms: int | None = Field(None, ge=0)
-    floor: str | None = None
-    construction_year: int | None = Field(None, ge=1800)
-    energy_certificate: str | None = None
-
-    price_amount: Decimal | None = Field(None, ge=0)
-    price_currency: str | None = Field("EUR", min_length=3, max_length=3)
-    price_per_m2: Decimal | None = Field(None, ge=0)
-
-    area_useful_m2: float | None = Field(None, ge=0)
-    area_gross_m2: float | None = Field(None, ge=0)
-    area_land_m2: float | None = Field(None, ge=0)
-
-    district: str | None = None
-    county: str | None = None
-    parish: str | None = None
-    full_address: str | None = None
-    latitude: float | None = Field(None, ge=-90, le=90)
-    longitude: float | None = Field(None, ge=-180, le=180)
-
-    has_garage: bool | None = None
-    has_elevator: bool | None = None
-    has_balcony: bool | None = None
-    has_air_conditioning: bool | None = None
-    has_pool: bool | None = None
-
-    advertiser: str | None = None
-    contacts: str | None = None
-    description: str | None = None
+    # Exclude scraper-internal fields from API responses
+    raw_description: str | None = Field(None, exclude=True)
+    # Exclude enriched fields — substituted into canonical fields by the validator below
     enriched_title: str | None = Field(None, exclude=True)
     enriched_description: str | None = Field(None, exclude=True)
     enriched_meta_description: str | None = Field(None, exclude=True)
-    description_quality_score: int | None = Field(None, ge=0, le=100)
-    meta_description: str | None = None
-
-    created_at: datetime
-    updated_at: datetime
-    media_assets: list[MediaAssetRead] = Field(default_factory=list)
-    price_history: list[PriceHistoryRead] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _apply_enriched_values(self) -> "ListingDetailRead":
@@ -262,7 +221,14 @@ class ListingDetailRead(BaseModel):
             self.description = self.enriched_description
         if self.enriched_meta_description:
             self.meta_description = self.enriched_meta_description
+        self.is_enriched = bool(
+            self.enriched_title or self.enriched_description or self.enriched_meta_description
+        )
         return self
+
+
+# Backwards-compatible alias — POST and PATCH use the same full detail schema.
+ListingRead = ListingDetailRead
 
 
 # ---------------------------------------------------------------------------
@@ -275,14 +241,9 @@ class ListingListRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    # enriched_title is excluded from output — applied to title by the validator below
     enriched_title: str | None = Field(None, exclude=True)
     title: str | None = None
-
-    @model_validator(mode="after")
-    def _apply_enriched_title(self) -> "ListingListRead":
-        if self.enriched_title:
-            self.title = self.enriched_title
-        return self
     source_partner: str
     listing_type: Literal["sale", "rent"] | None = None
     property_type: str | None = None
@@ -299,6 +260,12 @@ class ListingListRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @model_validator(mode="after")
+    def _apply_enriched_title(self) -> "ListingListRead":
+        if self.enriched_title:
+            self.title = self.enriched_title
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Stats & pagination
@@ -307,11 +274,11 @@ class ListingListRead(BaseModel):
 class ListingStats(BaseModel):
     """Aggregated listing statistics."""
 
-    total_listings: int = 0
-    avg_price: float | None = None
-    min_price: float | None = None
-    max_price: float | None = None
-    avg_area: float | None = None
+    total_listings: int = Field(0, ge=0)
+    avg_price: float | None = Field(None, ge=0)
+    min_price: float | None = Field(None, ge=0)
+    max_price: float | None = Field(None, ge=0)
+    avg_area: float | None = Field(None, ge=0)
     by_district: dict[str, int] = Field(default_factory=dict)
     by_property_type: dict[str, int] = Field(default_factory=dict)
     by_source_partner: dict[str, int] = Field(default_factory=dict)
@@ -344,3 +311,4 @@ class DuplicatesResponse(BaseModel):
     """Response body for GET /duplicates."""
 
     duplicates: list[DuplicateEntry] = Field(default_factory=list)
+    total: int = Field(0, ge=0, description="Total number of URL groups with duplicates.")

@@ -43,7 +43,8 @@ class SiteConfigBase(BaseModel):
         description="Query parameter name used when pagination_type='query_param' (for example 'page').",
     )
     link_pattern: str | None = Field(None, description="Regex pattern to filter listing URLs on listing pages.")
-    image_filter: str | None = Field(None, description="Regex pattern to filter image URLs (e.g. exclude thumbnails).")
+    image_filter: str | None = Field(None, description="Regex to require image URLs to match (include-only filter).")
+    image_exclude_filter: str | None = Field(None, description="Regex pattern — images whose URL matches are excluded (e.g. banners, logos).")
     is_active: bool = Field(True, description="Whether this site config is enabled for scraping.")
 
 
@@ -81,6 +82,7 @@ class SiteConfigUpdate(BaseModel):
     pagination_param: str | None = None
     link_pattern: str | None = None
     image_filter: str | None = None
+    image_exclude_filter: str | None = None
     is_active: bool | None = None
     confidence_scores: dict[str, float] | None = Field(None, description="Per-field confidence scores (0.0–1.0).")
 

@@ -8,6 +8,7 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 
 ExtractionMode = Literal["section", "direct"]
+PaginationType = Literal["html_next", "query_param", "incremental_path"]
 
 
 # ---------------------------------------------------------------------------
@@ -76,11 +77,12 @@ class SiteConfigUpdate(BaseModel):
     base_url: str | None = None
     selectors: dict[str, Any] | None = None
     extraction_mode: ExtractionMode | None = None
-    pagination_type: Literal["html_next", "query_param", "incremental_path"] | None = None
+    pagination_type: PaginationType | None = None
     pagination_param: str | None = None
     link_pattern: str | None = None
     image_filter: str | None = None
     is_active: bool | None = None
+    confidence_scores: dict[str, float] | None = Field(None, description="Per-field confidence scores (0.0–1.0).")
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ _SSE_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 # CRUD
 # ---------------------------------------------------------------------------
 
-@router.post("", response_model=ApiResponse[JobRead], status_code=201, responses=ERROR_RESPONSES, operation_id="create_job")
+@router.post("", response_model=ApiResponse[JobRead], status_code=201, responses={**ERROR_RESPONSES, 409: {"model": ApiResponse, "description": "A scrape job is already running for this site."}}, operation_id="create_job")
 async def create_job(
     request: Request,
     payload: JobCreate,

@@ -47,12 +47,35 @@ class AIListingEnrichmentRequest(BaseModel):
     )
     apply: bool = Field(
         False,
-        description="When True, persists AI results to the database; otherwise returns a preview.",
+        description=(
+            "When True, persists enriched_values to the database. "
+            "AI is never called in this mode — enriched_values must be supplied."
+        ),
     )
     force: bool = Field(
         False,
-        description="When True, regenerates output even if target fields already have values.",
+        description=(
+            "Only meaningful when apply=False. "
+            "When True, calls the AI even if target fields already have enriched values."
+        ),
     )
+    enriched_values: dict[str, str] | None = Field(
+        None,
+        description=(
+            "Pre-computed enriched values to persist. "
+            "Required when apply=True. Keys must be valid AIEnrichmentTargetField names."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_apply_has_values(self) -> "AIListingEnrichmentRequest":
+        if self.apply and not self.enriched_values:
+            raise ValueError(
+                "enriched_values must be provided when apply=True. "
+                "Call with apply=False first to obtain the AI-generated content, "
+                "then send it back with apply=True to persist."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -96,18 +119,6 @@ class AIListingEnrichmentResponse(BaseModel):
     model_used: str = Field(..., description="Identifier of the AI model used.")
     keywords_used: list[str] = Field(default_factory=list, description="Keywords that guided the enrichment.")
     results: list[AIEnrichmentFieldResult] = Field(default_factory=list, description="Per-field before/after results.")
-
-
-class EnrichmentPreview(BaseModel):
-    """Preview of AI enrichment for a listing (all three SEO fields)."""
-
-    original_title: str | None = Field(None, description="Title before enrichment.")
-    enriched_title: str | None = Field(None, description="Title after enrichment.")
-    original_description: str | None = Field(None, description="Description before enrichment.")
-    enriched_description: str | None = Field(None, description="Description after enrichment.")
-    original_meta_description: str | None = Field(None, description="Meta description before enrichment.")
-    enriched_meta_description: str | None = Field(None, description="Meta description after enrichment.")
-    model_used: str = Field(..., description="Identifier of the AI model used.")
 
 
 # ---------------------------------------------------------------------------

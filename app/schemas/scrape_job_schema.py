@@ -1,7 +1,7 @@
 ﻿"""Pydantic schemas for ScrapeJob API requests and responses."""
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -39,9 +39,30 @@ class JobCreate(BaseModel):
     """Schema for creating a new scrape job."""
 
     site_key: str = Field(..., min_length=1, description="Site configuration key (e.g. 'pearls').")
-    start_url: str = Field(..., description="URL to begin scraping from.")
+    start_url: str = Field(..., description="URL to begin scraping from.", json_schema_extra={"format": "uri"})
     max_pages: int = Field(10, ge=1, le=500, description="Maximum number of listing pages to scrape.")
     config: JobConfig | None = Field(None, description="Optional runtime configuration overrides.")
+
+
+# ---------------------------------------------------------------------------
+# Logs & URLs
+# ---------------------------------------------------------------------------
+
+class JobLogEntry(BaseModel):
+    """A single structured log entry emitted during a scrape job."""
+
+    level: Literal["info", "warning", "error"] = Field(..., description="Log severity level.")
+    message: str = Field(..., description="Human-readable log message.")
+    url: str | None = Field(None, description="URL associated with this log entry, if applicable.")
+    timestamp: str | None = Field(None, description="ISO-8601 timestamp of the log entry.")
+
+
+class JobUrlState(BaseModel):
+    """URL discovery state for a scrape job."""
+
+    discovered: list[str] = Field(default_factory=list, description="All discovered listing URLs.")
+    visited: list[str] = Field(default_factory=list, description="URLs successfully fetched.")
+    failed: list[str] = Field(default_factory=list, description="URLs that failed to fetch.")
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +95,8 @@ class JobRead(BaseModel):
     status: JobStatus
     progress: JobProgress | None = None
     config: JobConfig | None = None
-    logs: dict[str, Any] | None = Field(None, description="Structured log entries keyed by step or timestamp.")
-    urls: dict[str, Any] | None = Field(None, description="Discovered and visited URL sets.")
+    logs: list[JobLogEntry] | None = Field(None, description="Structured log entries produced during scraping.")
+    urls: JobUrlState | None = Field(None, description="Discovered and visited URL state.")
     error_message: str | None = Field(None, description="Terminal error message when status='failed'.")
     started_at: datetime | None = None
     last_heartbeat_at: datetime | None = None

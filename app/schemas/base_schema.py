@@ -41,9 +41,9 @@ class ApiResponse(BaseModel, Generic[T]):
     success: bool = Field(..., description="Whether the request succeeded.")
     data: T | None = Field(None, description="Response payload; present when success=True.")
     meta: Meta | None = Field(None, description="Pagination metadata for list responses.")
-    message: str = Field("", description="Optional human-readable message.")
-    errors: list[ErrorDetail] = Field(default_factory=list, description="Error details; present when success=False.")
-    trace_id: str = Field("", description="Correlation ID for distributed tracing.")
+    message: str | None = Field(None, description="Optional human-readable message.")
+    errors: list[ErrorDetail] | None = Field(None, description="Error details; present when success=False.")
+    trace_id: str | None = Field(None, description="Correlation ID for distributed tracing.")
 
 
 class SystemHealth(BaseModel):

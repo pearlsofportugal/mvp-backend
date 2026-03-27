@@ -131,9 +131,12 @@ _DEFAULT_FEATURE_MAP = {
 _SUMMARY_FIELD_MAP = {
     "objectivo": "business_type",
     "objetivo": "business_type",
+    "tipo de negócio": "business_type",
     "estado": "condition",
     "tipo": "property_type",
+    "tipo de imóvel": "property_type",
     "tipologia": "typology",
+    "tipologia do imóvel": "typology",
     "distrito": "district",
     "concelho": "county",
     "freguesia": "parish",
@@ -784,6 +787,11 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, A
         "useful_area": [
             "[id*='lbl_valor_area_util']",
             "[id*='lbl_valor_area_utile']",
+            "[id$='lbl_valor_area']",  # exact suffix — avoids matching _area_bruta / _area_terreno
+        ],
+        "garage": [
+            "[id*='lbl_valor_garagens']",
+            "[id*='lbl_valor_garagem']",
         ],
         "land_area": [
             "[id*='lbl_valor_area_terreno']",
@@ -791,6 +799,8 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, A
         "energy_certificate": [
             "[id*='div_certificacao'] img",
             "[id*='div_certificacao']",
+            "[id*='lbl_icon_certificacao'] img",  # habinédita naming variant
+            "[id*='lbl_icon_certificacao']",
         ],
     }
 
@@ -812,6 +822,19 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, A
             normalized_energy = _extract_energy_certificate_value(description_value)
             if normalized_energy:
                 extracted["energy_certificate"] = normalized_energy
+
+    # Second pass: scan full visible page text for features that the description
+    # div may have missed (e.g. nested elements, JS-rendered fragments, or the
+    # description text containing feature info in non-div children).
+    _FEATURE_KEYS = frozenset(_get_feature_map().values())
+    missing_features = {k for k in _FEATURE_KEYS if not extracted.get(k) and not current_data.get(k)}
+    if missing_features:
+        full_page_text = soup.get_text(separator=" ", strip=True)
+        partial: dict[str, Any] = {}
+        _assign_feature_matches(full_page_text, partial)
+        for key, value in partial.items():
+            if key in missing_features:
+                extracted[key] = value
 
     return extracted
 
@@ -982,6 +1005,17 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
     for field, value in _extract_habinedita_fallbacks(soup, data).items():
         if not data.get(field):
             data[field] = value
+
+    # Universal feature fallback — runs regardless of site, catches any feature
+    # keywords that direct selectors / habinedita fallback may have missed.
+    feature_map = _get_feature_map()
+    missing_feature_fields = {v for v in feature_map.values() if not data.get(v)}
+    if missing_feature_fields:
+        full_text = soup.get_text(separator=" ", strip=True).lower()
+        for keyword, field in feature_map.items():
+            if field in missing_feature_fields and keyword in full_text:
+                data[field] = "Yes"
+                missing_feature_fields.discard(field)
 
     return data
 

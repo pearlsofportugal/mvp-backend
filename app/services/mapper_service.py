@@ -486,13 +486,27 @@ def normalize_habinedita_payload(raw: dict[str, Any]) -> PropertySchema:
         if any(marker in normalized_condition for marker in ("novo", "new", "constru", "em planta")):
             is_new_construction = True
 
+    # Derive property_type from title when not set by selectors/summary.
+    # Habinedita titles always start with the type: "Apartamento T3", etc.
+    property_type = raw.get("property_type")
+    if not property_type and raw.get("title"):
+        _HABINEDITA_TYPES = (
+            "Moradia Geminada", "Moradia", "Apartamento", "Loja",
+            "Escritório", "Armazém", "Terreno", "Garagem", "Quintal",
+        )
+        title_lower = raw["title"].strip().lower()
+        for pt in _HABINEDITA_TYPES:
+            if title_lower.startswith(pt.lower()):
+                property_type = pt
+                break
+
     return PropertySchema(
         partner_id=raw.get("property_id"),
         source_partner="habinedita",
         source_url=raw.get("url"),
         title=raw.get("title"),
         listing_type=listing_type,
-        property_type=raw.get("property_type"),
+        property_type=property_type,
         typology=raw.get("typology"),
         bedrooms=bedrooms,
         bathrooms=parse_int(raw.get("bathrooms")),

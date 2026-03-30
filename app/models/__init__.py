@@ -5,6 +5,7 @@ from app.models.price_history_model import PriceHistory
 from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
 from app.models.field_mapping_model import FieldMapping, CharacterMapping
+from app.models.imodigi_export_model import ImodigiExport
 
 __all__ = [
     "Listing",
@@ -14,4 +15,5 @@ __all__ = [
     "SiteConfig",
     "FieldMapping",
     "CharacterMapping",
+    "ImodigiExport",
 ]

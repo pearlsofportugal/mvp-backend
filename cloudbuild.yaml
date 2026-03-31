@@ -3,21 +3,38 @@ steps:
     args:
       - '--dockerfile=Dockerfile'
       - '--context=.'
-      - '--destination=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
+      - '--destination=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
       - '--cache=true'
       - '--cache-ttl=24h'
-      - '--cache-repo=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend-cache'
-
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+      - '--cache-repo=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME-cache'
+    id: Build
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     args:
-      - 'run'
-      - 'deploy'
-      - 'mvp-backend'
-      - '--image'
-      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
-      - '--region'
-      - 'europe-west1'
-
+      - run
+      - services
+      - update
+      - $_SERVICE_NAME
+      - '--platform=managed'
+      - '--image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
+      - '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID'
+      - '--region=$_DEPLOY_REGION'
+      - '--quiet'
+    id: Deploy
+    entrypoint: gcloud
 images:
-  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
+  - '$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
+options:
+  substitutionOption: ALLOW_LOOSE
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _AR_REPOSITORY: cloud-run-source-deploy
+  _AR_PROJECT_ID: mvp-scraper-488408
+  _PLATFORM: managed
+  _SERVICE_NAME: mvp-backend
+  _DEPLOY_REGION: europe-west1
+  _TRIGGER_ID: 5c526d45-0c9c-499e-9917-4b7c7d2f80dc
+  _AR_HOSTNAME: europe-west1-docker.pkg.dev
+tags:
+  - gcp-cloud-build-deploy-cloud-run
+  - gcp-cloud-build-deploy-cloud-run-managed
+  - mvp-backend

@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser alembic.ini ./
-COPY --chown=appuser:appuser migrations ./migrations
+COPY --chown=appuser:appuser alembic ./alembic
 # COPY --chown=appuser:appuser entrypoint.sh ./
 
 USER appuser

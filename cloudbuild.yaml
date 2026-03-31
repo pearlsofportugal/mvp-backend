@@ -1,23 +1,12 @@
 steps:
-  - name: 'gcr.io/cloud-builders/docker'
+  - name: 'gcr.io/kaniko-project/executor:latest'
     args:
-      - 'pull'
-      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
-    allowFailure: true
-
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '--cache-from'
-      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
-      - '--tag'
-      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
-      - '.'
-
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
+      - '--dockerfile=Dockerfile'
+      - '--context=.'
+      - '--destination=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend:latest'
+      - '--cache=true'
+      - '--cache-ttl=24h'
+      - '--cache-repo=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/mvp-backend-cache'
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud

@@ -1,0 +1,292 @@
+"""Imodigi CRM service — push listings to the Imodigi API.
+
+Integration reference: API_IMODIGI_V1
+
+Authentication:  X-API-Token header.
+Base URL:        settings.imodigi_base_url  (default: https://imodigi.com/crm_api)
+Client ID:       settings.imodigi_client_id — required for all property operations.
+
+External API endpoints used:
+  GET  /crm-stores.php              → list stores
+  GET  /crm-property-values.php     → allowed catalog values
+  GET  /crm-locations.php           → location hierarchy search
+  POST /crm-properties.php          → create property (returns {property, reference})
+  PATCH /crm-properties.php         → update existing property
+"""
+from typing import Any
+
+import httpx
+
+from app.config import settings
+from app.core.exceptions import ImodigiError
+from app.core.logging import get_logger
+from app.models.listing_model import Listing
+
+logger = get_logger(__name__)
+
+# ─────────────────────────── Type mappings ──────────────────────────────
+
+_LISTING_TYPE_MAP: dict[str, str] = {
+    "sale": "To Buy",
+    "rent": "To Rent",
+}
+
+_PROPERTY_TYPE_MAP: dict[str, str] = {
+    "apartment": "Apartment",
+    "apartamento": "Apartment",
+    "house": "House",
+    "moradia": "House",
+    "moradia geminada": "House",
+    "land": "Land",
+    "terreno": "Land",
+    "commercial": "Commercial",
+    "loja": "Commercial",
+    "escritório": "Commercial",
+    "office": "Office",
+    "garage": "Garage",
+    "garagem": "Garage",
+}
+
+_CONDITION_MAP: dict[str, str] = {
+    "new": "New",
+    "novo": "New",
+    "used": "Used",
+    "usado": "Used",
+    "renovated": "Renovated",
+    "renovado": "Renovated",
+}
+
+
+def _imodigi_headers() -> dict[str, str]:
+    return {
+        "X-API-Token": settings.imodigi_api_token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _raise_if_error(response: httpx.Response) -> dict[str, Any]:
+    """Parse the JSON body; raise ImodigiError on non-success state."""
+    try:
+        body: dict[str, Any] = response.json()
+    except Exception as exc:
+        raise ImodigiError(f"Imodigi returned non-JSON response (HTTP {response.status_code})") from exc
+
+    if body.get("state") != "success":
+        kind = body.get("kind", "unknown")
+        message = body.get("message", str(body))
+        raise ImodigiError(f"Imodigi error [{kind}]: {message}")
+    return body
+
+
+def _map_property_type(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    return _PROPERTY_TYPE_MAP.get(raw.lower().strip(), raw)
+
+
+def _map_condition(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    return _CONDITION_MAP.get(raw.lower().strip())
+
+
+def build_property_payload(listing: Listing) -> dict[str, Any]:
+    """Convert a Listing ORM instance to the Imodigi property payload dict.
+
+    Only non-None fields are included so partial PATCH calls stay minimal.
+    """
+    business_type = _LISTING_TYPE_MAP.get(listing.listing_type or "", "To Buy")
+    property_type = _map_property_type(listing.property_type)
+
+    payload: dict[str, Any] = {
+        "businessType": business_type,
+        "availability": "Available",
+        "isActive": True,
+    }
+
+    if listing.partner_id:
+        payload["reference"] = listing.partner_id
+    if listing.title:
+        payload["title"] = listing.title
+    if listing.description:
+        payload["description"] = listing.description
+    if listing.meta_description:
+        payload["shortDescription"] = listing.meta_description
+    if property_type:
+        payload["propertyType"] = property_type
+
+    # Location
+    location: dict[str, Any] = {"country": "Portugal"}
+    if listing.district:
+        location["district"] = listing.district
+    if listing.county:
+        location["county"] = listing.county
+    if listing.parish:
+        location["parish"] = listing.parish
+    payload["location"] = location
+
+    # Pricing
+    if listing.price_amount is not None:
+        payload["pricing"] = {"price": float(listing.price_amount), "publishPrice": True}
+
+    # Coordinates
+    if listing.latitude is not None and listing.longitude is not None:
+        payload["coordinates"] = {
+            "lat": str(listing.latitude),
+            "lng": str(listing.longitude),
+            "publish": True,
+        }
+
+    # Areas
+    areas: dict[str, Any] = {}
+    if listing.area_useful_m2 is not None:
+        areas["useful"] = listing.area_useful_m2
+    if listing.area_gross_m2 is not None:
+        areas["gross"] = listing.area_gross_m2
+    if listing.area_land_m2 is not None:
+        areas["land"] = listing.area_land_m2
+    if areas:
+        payload["areas"] = areas
+
+    # Rooms
+    rooms: dict[str, Any] = {}
+    if listing.bedrooms is not None:
+        rooms["bedrooms"] = listing.bedrooms
+    if listing.bathrooms is not None:
+        rooms["bathrooms"] = listing.bathrooms
+    if rooms:
+        payload["rooms"] = rooms
+
+    # Energy
+    if listing.energy_certificate:
+        payload["energy"] = {"class": listing.energy_certificate}
+
+    # Images
+    # if listing.media_assets:
+        # payload["images"] = [a.url for a in listing.media_assets if a.url]
+
+    # Translations
+    translation_en: dict[str, str] = {}
+    if listing.title:
+        translation_en["title"] = listing.title
+    if listing.description:
+        translation_en["description"] = listing.description
+    if listing.meta_description:
+        translation_en["shortDescription"] = listing.meta_description
+    if translation_en:
+        payload["translations"] = {"en": translation_en}
+
+    return payload
+
+
+# ─────────────────────────── API client calls ───────────────────────────
+
+async def get_stores() -> list[dict[str, Any]]:
+    """GET /crm-stores.php — return list of active stores."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{settings.imodigi_base_url}/crm-stores.php",
+            headers=_imodigi_headers(),
+        )
+    body = _raise_if_error(resp)
+    return body.get("stores", [])
+
+
+async def get_catalog_values() -> dict[str, Any]:
+    """GET /crm-property-values.php — return allowed catalog values."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{settings.imodigi_base_url}/crm-property-values.php",
+            headers=_imodigi_headers(),
+        )
+    body = _raise_if_error(resp)
+    return body.get("values", {})
+
+
+async def search_locations(
+    level: str,
+    *,
+    country_id: int | None = None,
+    region_id: int | None = None,
+    district_id: int | None = None,
+    county_id: int | None = None,
+    q: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """GET /crm-locations.php — search locations by hierarchical level."""
+    params: dict[str, Any] = {"level": level, "limit": min(limit, 100)}
+    if country_id is not None:
+        params["countryId"] = country_id
+    if region_id is not None:
+        params["regionId"] = region_id
+    if district_id is not None:
+        params["districtId"] = district_id
+    if county_id is not None:
+        params["countyId"] = county_id
+    if q:
+        params["q"] = q
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{settings.imodigi_base_url}/crm-locations.php",
+            headers=_imodigi_headers(),
+            params=params,
+        )
+    body = _raise_if_error(resp)
+    return body.get("items", [])
+
+
+async def create_property(client_id: int, property_payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /crm-properties.php — create a new property. Returns full response body."""
+    request_body = {"client": client_id, "property": property_payload}
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{settings.imodigi_base_url}/crm-properties.php",
+            headers=_imodigi_headers(),
+            json=request_body,
+        )
+    return _raise_if_error(resp)
+
+
+async def update_property(
+    client_id: int,
+    imodigi_property_id: int,
+    property_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PATCH /crm-properties.php — update an existing property."""
+    request_body = {
+        "client": client_id,
+        "propertyId": imodigi_property_id,
+        "property": property_payload,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.patch(
+            f"{settings.imodigi_base_url}/crm-properties.php",
+            headers=_imodigi_headers(),
+            json=request_body,
+        )
+    return _raise_if_error(resp)
+
+
+async def export_listing(
+    listing: Listing,
+    *,
+    client_id: int,
+    existing_imodigi_id: int | None,
+) -> tuple[int | None, str | None, str]:
+    """Export a single listing to Imodigi.
+
+    Returns (imodigi_property_id, imodigi_reference, action)
+    where action is 'created' or 'updated'.
+    """
+    payload = build_property_payload(listing)
+
+    if existing_imodigi_id is None:
+        logger.info("Creating new imodigi property for listing %s", listing.id)
+        result = await create_property(client_id, payload)
+        return result.get("property"), result.get("reference"), "created"
+
+    logger.info("Updating imodigi property %d for listing %s", existing_imodigi_id, listing.id)
+    await update_property(client_id, existing_imodigi_id, payload)
+    return existing_imodigi_id, None, "updated"

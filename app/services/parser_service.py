@@ -1086,7 +1086,8 @@ def _extract_via_text_patterns(soup: BeautifulSoup, patterns: dict[str, str]) ->
             if not match:
                 match = re.search(pattern, full_html, re.IGNORECASE | re.DOTALL)
             if match:
-                value = match.group(1).strip()
+                raw = match.group(1)
+                value = raw.strip() if raw is not None else ""
                 if value:
                     data[field] = value
         except Exception as e:

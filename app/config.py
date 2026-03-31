@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     scrape_job_stale_after_seconds: int = 300
     export_max_rows: int = 5000
 
+    # Imodigi CRM integration
+    imodigi_api_token: str = ""
+    imodigi_client_id: int | None = None
+    imodigi_base_url: str = "https://www.imodigi.com/crm_api"
+
     # AI / GenAI
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-3-flash-preview"

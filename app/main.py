@@ -12,6 +12,7 @@ from app.api.deps import RequireApiKey
 from app.api.responses import ok
 from app.api.v1.ai_enrichment import router as ai_enrichment_router
 from app.api.v1.export import router as export_router
+from app.api.v1.imodigi import router as imodigi_router
 from app.api.v1.listings import router as listings_router
 from app.api.v1.scrape_jobs import router as jobs_router
 from app.api.v1.sites import router as sites_router
@@ -19,6 +20,7 @@ from app.config import settings
 from app.core.exceptions import (
     AppException,
     DuplicateError,
+    ImodigiError,
     JobAlreadyRunningError,
     NotFoundError,
 )
@@ -181,6 +183,19 @@ def create_app() -> FastAPI:
             ).model_dump(),
         )
 
+    @application.exception_handler(ImodigiError)
+    async def imodigi_error_handler(request: Request, exc: ImodigiError):
+        trace_id = getattr(request.state, "trace_id", "")
+        return JSONResponse(
+            status_code=502,
+            content=ApiResponse(
+                success=False,
+                message=str(exc),
+                errors=[ErrorDetail(code="IMODIGI_ERROR", message=str(exc))],
+                trace_id=trace_id,
+            ).model_dump(),
+        )
+
     # ── Routers ────────────────────────────────────────────────────────────
 
     auth_dependencies = [RequireApiKey]
@@ -213,6 +228,12 @@ def create_app() -> FastAPI:
         export_router,
         prefix="/api/v1/export",
         tags=["export"],
+        dependencies=auth_dependencies,
+    )
+    application.include_router(
+        imodigi_router,
+        prefix="/api/v1/imodigi",
+        tags=["imodigi"],
         dependencies=auth_dependencies,
     )
 

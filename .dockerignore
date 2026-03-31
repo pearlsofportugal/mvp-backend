@@ -21,6 +21,18 @@ __pycache__
 .vscode
 .idea
 
+# Testes
+htmlcov/
+.coverage
+
+# Ficheiros de ambiente (variantes)
+.env.*
+.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
 # Ignorar o próprio Dockerfile e env vars locais
 Dockerfile
 .dockerignore

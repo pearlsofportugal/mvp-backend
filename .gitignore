@@ -26,7 +26,7 @@ env/
 # Database
 *.db
 *.sqlite3
-
+test.db
 # Test
 .pytest_cache/
 htmlcov/

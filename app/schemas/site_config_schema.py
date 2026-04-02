@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 
 
 ExtractionMode = Literal["section", "direct"]
@@ -91,6 +91,14 @@ class SiteConfigUpdate(BaseModel):
 # Read
 # ---------------------------------------------------------------------------
 
+class ConfidenceMeta(BaseModel):
+    """Metadata about the last confidence score calculation."""
+
+    job_id: str
+    sample_count: int = Field(..., ge=0, description="Number of listings used to calculate scores.")
+    updated_at: str = Field(..., description="ISO 8601 timestamp of the last calculation.")
+
+
 class SiteConfigRead(SiteConfigBase):
     """Full site configuration response."""
 
@@ -99,8 +107,30 @@ class SiteConfigRead(SiteConfigBase):
     id: UUID
     key: str
     confidence_scores: dict[str, float] = Field(default_factory=dict)
+    confidence_meta: ConfidenceMeta | None = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _extract_confidence_meta(cls, data: Any) -> Any:
+        """Split _meta out of confidence_scores JSON into confidence_meta."""
+        # Works for both ORM objects (via __dict__) and plain dicts
+        if hasattr(data, "__dict__"):
+            raw: dict = dict(data.__dict__)
+        elif isinstance(data, dict):
+            raw = dict(data)
+        else:
+            return data
+
+        scores: dict = dict(raw.get("confidence_scores") or {})
+        meta = scores.pop("_meta", None)
+
+        raw["confidence_scores"] = scores
+        if meta:
+            raw["confidence_meta"] = ConfidenceMeta.model_validate(meta)
+
+        return raw
 
 
 class SelectorCandidate(BaseModel):
@@ -136,3 +166,90 @@ class SiteConfigPreviewResponse(BaseModel):
 
     matches: int = Field(..., ge=0)
     preview: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Selector validation
+# ---------------------------------------------------------------------------
+
+class SelectorValidationResult(BaseModel):
+    """Validation result for a single CSS selector."""
+
+    field: str
+    selector: str
+    valid_css: bool
+    matches: int = Field(..., ge=0)
+    sample: str | None = None
+
+
+class SelectorValidationReport(BaseModel):
+    """Validation report for a set of CSS selectors run against a live URL."""
+
+    url: str
+    success: bool = Field(..., description="False if the page fetch failed or any selector has invalid CSS.")
+    results: list[SelectorValidationResult]
+    warnings: list[str] = Field(default_factory=list, description="Valid CSS selectors that matched 0 elements.")
+    errors: list[str] = Field(default_factory=list, description="Selectors with invalid CSS syntax or a failed page fetch.")
+
+
+class SelectorValidateRequest(BaseModel):
+    """Request payload for selector validation."""
+
+    selectors: dict[str, str] = Field(
+        ...,
+        description="Mapping of field name → CSS selector to validate.",
+    )
+    url: AnyHttpUrl | None = Field(
+        None,
+        description="URL to validate against. Defaults to the site's base_url when called via /{key}/validate-selectors.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test-scrape
+# ---------------------------------------------------------------------------
+
+class TestScrapeRequest(BaseModel):
+    """Request payload for test-scrape."""
+
+    url: AnyHttpUrl = Field(..., description="URL of a single listing detail page to test against.")
+
+
+class TestScrapeNormalized(BaseModel):
+    """Normalized fields extracted from the listing page."""
+
+    title: str | None = None
+    listing_type: str | None = None
+    property_type: str | None = None
+    typology: str | None = None
+    bedrooms: int | None = None
+    bathrooms: int | None = None
+    price_amount: float | None = None
+    price_currency: str | None = None
+    price_per_m2: float | None = None
+    area_useful_m2: float | None = None
+    area_gross_m2: float | None = None
+    area_land_m2: float | None = None
+    district: str | None = None
+    county: str | None = None
+    parish: str | None = None
+    energy_certificate: str | None = None
+    construction_year: int | None = None
+    has_garage: bool | None = None
+    has_pool: bool | None = None
+    has_elevator: bool | None = None
+    image_count: int = 0
+
+
+class TestScrapeResponse(BaseModel):
+    """Result of a test-scrape run against a single listing URL."""
+
+    url: str
+    success: bool
+    raw: dict = Field(default_factory=dict, description="Raw values extracted by the parser before normalisation.")
+    normalized: TestScrapeNormalized | None = None
+    missing_critical: list[str] = Field(
+        default_factory=list,
+        description="Critical fields (title, price, property_type, district) absent in the raw output.",
+    )
+    error: str | None = Field(None, description="Set when the fetch or parse failed entirely.")

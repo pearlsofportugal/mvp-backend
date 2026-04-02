@@ -10,6 +10,8 @@ from app.api.responses import ERROR_RESPONSES, ok
 from app.crawler.selector_suggester import preview_selector, suggest_selectors
 from app.schemas.base_schema import ApiResponse
 from app.schemas.site_config_schema import (
+    SelectorValidateRequest,
+    SelectorValidationReport,
     SiteConfigCreate,
     SiteConfigPreviewRequest,
     SiteConfigPreviewResponse,
@@ -17,8 +19,12 @@ from app.schemas.site_config_schema import (
     SiteConfigSuggestRequest,
     SiteConfigSuggestResponse,
     SiteConfigUpdate,
+    TestScrapeRequest,
+    TestScrapeResponse,
 )
+from app.services.selector_validation_service import validate_selectors
 from app.services.site_config_service import SiteConfigService
+from app.services.test_scrape_service import run_test_scrape
 
 router = APIRouter()
 
@@ -114,6 +120,52 @@ async def update_site(
     """Update a site configuration."""
     site = await SiteConfigService.update(db, key, payload)
     return ok(SiteConfigRead.model_validate(site), "Site updated successfully", request)
+
+
+@router.post(
+    "/{key}/test-scrape",
+    response_model=ApiResponse[TestScrapeResponse],
+    responses=ERROR_RESPONSES,
+    operation_id="test_scrape_site",
+)
+async def test_scrape_site(
+    key: str,
+    payload: TestScrapeRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Dry-run scrape of a single listing URL using the site's current configuration.
+
+    Fetches the page, parses it with the configured selectors and extraction_mode,
+    normalizes the result via mapper, and returns the raw + normalized output.
+    Nothing is written to the database.
+    """
+    site = await SiteConfigService.get_by_key(db, key)
+    result = await run_test_scrape(site, str(payload.url))
+    return ok(result, "Test scrape completed", request)
+
+
+@router.post(
+    "/{key}/validate-selectors",
+    response_model=ApiResponse[SelectorValidationReport],
+    responses=ERROR_RESPONSES,
+    operation_id="validate_site_selectors",
+)
+async def validate_site_selectors(
+    key: str,
+    payload: SelectorValidateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Validate CSS selectors against a live page.
+
+    If ``url`` is omitted in the request body, the site's ``base_url`` is used.
+    Returns a report with per-field results, warnings (0 matches), and errors (bad CSS).
+    """
+    site = await SiteConfigService.get_by_key(db, key)
+    url = str(payload.url) if payload.url else site.base_url
+    report = await validate_selectors(payload.selectors, url)
+    return ok(report, "Selector validation completed", request)
 
 
 @router.delete(

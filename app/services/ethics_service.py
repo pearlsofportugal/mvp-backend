@@ -9,6 +9,7 @@ Rules preserved:
 6. URL deduplication within a job
 """
 import re
+import time
 
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser

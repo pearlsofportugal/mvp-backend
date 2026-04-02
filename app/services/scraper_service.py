@@ -22,6 +22,7 @@ from uuid import UUID
 from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
 from app.core.logging import get_logger, set_correlation_id
@@ -527,7 +528,19 @@ async def _update_site_confidence_scores(db: AsyncSession, site_key: str, job_uu
     if site is None:
         return
 
-    site.confidence_scores = scores
+    # Store field scores + metadata in the same JSON column.
+    # _meta is stripped out in SiteConfigRead and exposed as confidence_meta.
+    site.confidence_scores = {
+        **scores,
+        "_meta": {
+            "job_id": str(job_uuid),
+            "sample_count": len(listings),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    # flag_modified is required for SQLAlchemy to detect JSON column changes
+    # even on full reassignment (avoids silent no-op commits).
+    flag_modified(site, "confidence_scores")
     log_low_confidence_scores(site_key, scores)
 
 

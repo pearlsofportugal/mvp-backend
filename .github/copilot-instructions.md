@@ -8,6 +8,8 @@ Backend de scraping imobiliário em Portugal. Extrai anúncios de portais config
 
 - `HTTPException` diretamente nos serviços — usar exceções de domínio de `app/core/exceptions.py`
 - `os.environ` ou `os.getenv()` fora de `app/config.py` — usar sempre `settings.*`
+- Queries SQLAlchemy diretamente nos routers — usar sempre `services/` e `repositories/`
+- Constantes de mapeamento (ex: `SORT_FIELDS`) duplicadas entre router e service — centralizar no service e importar no router
 - `session.execute()` síncrono — sempre `await session.execute()`
 - Lazy loading de relacionamentos SQLAlchemy — usar `selectinload()` explicitamente
 - `List[str]`, `Dict[str, Any]`, `Optional[str]` do `typing` — usar `list[str]`, `dict[str, Any]`, `str | None` (Python 3.10+)
@@ -66,7 +68,9 @@ backend/
 │   │       └── export.py          # CSV / JSON / Excel
 │   ├── models/              # SQLAlchemy ORM (Mapped / mapped_column)
 │   ├── schemas/             # Pydantic v2 (Create / Update / Read separados)
-│   ├── services/            # Lógica de negócio
+│   ├── services/            # Lógica de negócio e orquestração
+│   ├── repositories/        # Acesso à DB — queries SQLAlchemy (sem lógica de negócio)
+│   ├── utils/               # Helpers partilhados: _filters.py, _pagination.py
 │   ├── crawler/             # Utilitários de scraping (cache, seletor, confiança)
 │   └── core/                # Exceções, logging estruturado
 ├── alembic/                 # Migrations
@@ -96,8 +100,10 @@ POST /api/v1/jobs
 GET /api/v1/listings
   → listings.py (router)
       → get_db() (deps.py) — AsyncSession por pedido
-      → query SQLAlchemy com selectinload()
-      → ok(data, meta=Meta(...)) — envelope ApiResponse[T]
+      → ListingService.get_all_listings()
+          → ListingRepository.get_all_listings()  — query SQLAlchemy pura
+          → ListingRepository.count_listings()    — COUNT para paginação
+      → ok(PaginatedResponse, meta=Meta(...)) — envelope ApiResponse[T]
 ```
 
 ---
@@ -389,9 +395,43 @@ pytest -v --tb=short            # Verbose com traceback curto
 |---|---|
 | `api/v1/*.py` | Receber request, validar query params, chamar service, devolver `ok()` |
 | `services/` | Lógica de negócio, orquestração, lançar exceções de domínio |
+| `repositories/` | Queries SQLAlchemy puras (select/insert/update/delete), sem lógica de negócio |
+| `utils/` | Helpers partilhados entre camadas (`apply_listing_filters`, etc.) |
 | `models/` | Definição ORM, sem lógica de negócio |
 | `schemas/` | Validação de entrada/saída, sem acesso à DB |
 | `crawler/` | Scraping, parsing, cache — sem dependência de FastAPI |
+
+**Regras de dependência entre camadas:**
+- `api/v1/` → `services/` (nunca `repositories/` diretamente)
+- `services/` → `repositories/`, `schemas/`, `models/`
+- `repositories/` → `models/`, `utils/`
+- Constantes partilhadas (ex: `SORT_FIELDS`) vivem no `service` e são importadas pelo router
+
+```python
+# Correto — router importa SORT_FIELDS do service
+from app.services.listing_service import ListingService, SORT_FIELDS
+
+# Errado — SORT_FIELDS duplicado no router
+SORT_FIELDS = {"price": Listing.price_amount, ...}  # não fazer isto
+```
+
+**Padrão de Repository:**
+```python
+# app/repositories/listings_repository.py
+class ListingRepository:
+    @staticmethod
+    async def get_all_listings(
+        db: AsyncSession,
+        filters: dict,
+        sort_column: InstrumentedAttribute,
+        sort_order: str,
+        page: int,
+        page_size: int,
+    ) -> list[Listing]:
+        query = apply_listing_filters(select(Listing), **filters)
+        query = query.order_by(desc(sort_column) if sort_order == "desc" else asc(sort_column))
+        return (await db.execute(query.offset((page-1)*page_size).limit(page_size))).scalars().all()
+```
 
 ### Padrões recorrentes
 

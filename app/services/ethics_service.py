@@ -8,17 +8,14 @@ Rules preserved:
 5. Per-domain robots.txt cache with 1-hour TTL
 6. URL deduplication within a job
 """
-import random
 import re
-import time
 
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from requests import Response
 
+from app.adapters.http_adapter import HttpAdapter
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -56,23 +53,14 @@ class EthicalScraper:
         # URL deduplication for current job
         self._visited_urls: set[str] = set()
 
-        # HTTP session with retry adapter
-        self._session = requests.Session()
-        retry_strategy = Retry(
-            total=max_retries,
+        # HTTP transport
+        self._http = HttpAdapter(
+            user_agent=user_agent,
+            timeout=timeout,
+            max_retries=max_retries,
             backoff_factor=backoff_factor,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET"],
+            extra_headers=extra_headers,
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
-        self._session.headers.update({"User-Agent": self.user_agent})
-        # Apply site-specific headers (e.g. Accept-Language, Referer) after User-Agent
-        if extra_headers:
-            # Prevent overriding User-Agent via extra_headers
-            safe_headers = {k: v for k, v in extra_headers.items() if k.lower() != "user-agent"}
-            self._session.headers.update(safe_headers)
 
         # Validate user agent
         if not USER_AGENT_PATTERN.match(self.user_agent):
@@ -136,9 +124,7 @@ class EthicalScraper:
 
     def _sleep(self) -> None:
         """Rate limiting: random delay BEFORE each request."""
-        delay = random.uniform(self.min_delay, self.max_delay)
-        logger.debug("Rate limiting: sleeping %.2f seconds", delay)
-        time.sleep(delay)
+        self._http.sleep_random(self.min_delay, self.max_delay)
 
     def is_visited(self, url: str) -> bool:
         """Check if URL has already been visited in this job."""
@@ -152,7 +138,7 @@ class EthicalScraper:
         """Reset visited URLs (for a new job)."""
         self._visited_urls.clear()
 
-    def get(self, url: str) -> requests.Response | None:
+    def get(self, url: str) -> Response | None:
         """
         Fetch a URL ethically.
 
@@ -177,27 +163,8 @@ class EthicalScraper:
         # Mark as visited
         self.mark_visited(url)
 
-        try:
-            response = self._session.get(url, timeout=self.timeout)
-
-            if response.status_code == 200:
-                return response
-            elif 400 <= response.status_code < 500 and response.status_code != 429:
-                # 4xx (except 429) — non-retriable
-                logger.warning("HTTP %d for %s — not retrying", response.status_code, url)
-                return None
-            else:
-                # 429/5xx handled by retry adapter
-                logger.warning("HTTP %d for %s", response.status_code, url)
-                return None
-
-        except requests.exceptions.Timeout:
-            logger.error("Timeout (%ds) fetching %s", self.timeout, url)
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.error("Request error for %s: %s", url, str(e))
-            return None
+        return self._http.get(url)
 
     def close(self) -> None:
         """Close the HTTP session."""
-        self._session.close()
+        self._http.close()

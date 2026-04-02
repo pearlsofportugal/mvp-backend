@@ -1,15 +1,20 @@
 ﻿"""AI enrichment service for SEO title/description/meta_description generation."""
 import asyncio
-import json
 import time
 from collections import deque
 from threading import Lock
 from typing import Any, Sequence
+from uuid import UUID
 
+from sqlalchemy import case, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.adapters.gemini_adapter import gemini_adapter
 from app.config import settings
-from app.core.exceptions import EnrichmentError
+from app.core.exceptions import EnrichmentError, NotFoundError
 from app.core.logging import get_logger
 from app.models.listing_model import Listing
+from app.repositories.listings_repository import ListingRepository
 from app.schemas.ai_enrichment_schema import (
     AIEnrichmentFieldResult,
     AIEnrichmentOutput,
@@ -19,6 +24,8 @@ from app.schemas.ai_enrichment_schema import (
     BulkEnrichmentItemResult,
     BulkEnrichmentRequest,
     BulkEnrichmentResponse,
+    EnrichmentSourceStats,
+    EnrichmentStats,
 )
 
 logger = get_logger(__name__)
@@ -81,21 +88,6 @@ def _sanitize_keywords(keywords: Sequence[str]) -> list[str]:
     return unique
 
 
-def _extract_json(text: str) -> dict[str, Any]:
-    candidate = text.strip()
-    if candidate.startswith("```"):
-        candidate = candidate.strip("`")
-        candidate = candidate.replace("json", "", 1).strip()
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(candidate[start : end + 1])
-        raise
-
-
 def _build_prompt(content: str, keywords: Sequence[str]) -> str:
     """Cria o prompt de dados (User Prompt) com o conteúdo e keywords."""
     sanitized = _sanitize_keywords(keywords)
@@ -109,20 +101,6 @@ PALAVRAS-CHAVE SECUNDÁRIAS: {secondary}
 CONTEÚDO DO IMÓVEL A PROCESSAR:
 {content}
 """.strip()
-_client: Any = None
-
-
-def _get_client():
-    global _client
-    if _client is None:
-        if not settings.google_genai_api_key:
-            raise EnrichmentError("google_genai_api_key is not configured")
-        try:
-            from google import genai
-            _client = genai.Client(api_key=settings.google_genai_api_key)
-        except Exception as exc:
-            raise EnrichmentError("google-genai dependency is not available", detail=str(exc)) from exc
-    return _client
 
 
 def _check_ai_rate_limit(now: float | None = None) -> None:
@@ -148,26 +126,11 @@ def _check_ai_rate_limit(now: float | None = None) -> None:
 
 def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> dict[str, Any]:
     _check_ai_rate_limit()
-    client = _get_client()
     prompt = _build_prompt(content, keywords)
-    
-    try:
-        response = client.models.generate_content(
-            model=settings.google_genai_model,
-            config={
-                "system_instruction": _SYSTEM_INSTRUCTION_SEO,
-                "temperature": settings.google_genai_temperature,
-                "response_mime_type": "application/json",
-            },
-            contents=prompt, # Dados do imóvel
-        )
-        
-        # Como usamos response_mime_type, o Gemini já deve retornar JSON puro
-        return _extract_json(str(response.text))
-        
-    except Exception as exc:
-        logger.exception("AI SEO generation failed")
-        raise EnrichmentError("Failed to generate AI SEO output", detail=str(exc)) from exc
+    return gemini_adapter.generate(
+        system_instruction=_SYSTEM_INSTRUCTION_SEO,
+        prompt=prompt,
+    )
 
 async def _call_ai_for_seo_async(content: str, keywords: Sequence[str]) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
@@ -431,3 +394,83 @@ async def bulk_enrich_listings(
         failed=failed_count,
         results=item_results,
     )
+
+
+async def get_enrichment_stats(db: AsyncSession, source_partner: str | None) -> EnrichmentStats:
+    """Aggregated enrichment statistics across all listings."""
+    _any_enriched = (
+        (Listing.enriched_title.isnot(None))
+        | (Listing.enriched_description.isnot(None))
+        | (Listing.enriched_meta_description.isnot(None))
+    )
+
+    total_query = select(func.count(Listing.id))
+    enriched_query = select(func.count(Listing.id)).where(_any_enriched)
+
+    if source_partner:
+        total_query = total_query.where(Listing.source_partner == source_partner)
+        enriched_query = enriched_query.where(Listing.source_partner == source_partner)
+
+    total: int = (await db.execute(total_query)).scalar_one()
+    enriched: int = (await db.execute(enriched_query)).scalar_one()
+
+    by_source_query = select(
+        Listing.source_partner,
+        func.count(Listing.id).label("total"),
+        func.count(case((_any_enriched, 1))).label("enriched_count"),
+    ).group_by(Listing.source_partner)
+
+    if source_partner:
+        by_source_query = by_source_query.where(Listing.source_partner == source_partner)
+
+    by_source_rows = (await db.execute(by_source_query)).all()
+    by_source = {
+        row.source_partner: EnrichmentSourceStats(total=row.total, enriched_count=row.enriched_count)
+        for row in by_source_rows
+        if row.source_partner is not None
+    }
+
+    return EnrichmentStats(
+        total_listings=total,
+        enriched_count=enriched,
+        not_enriched_count=total - enriched,
+        enrichment_percentage=round((enriched / total * 100), 2) if total > 0 else 0.0,
+        by_source=by_source,
+    )
+
+
+async def get_listings_for_bulk_enrich(db: AsyncSession, payload: BulkEnrichmentRequest) -> list[Listing]:
+    """Fetch listings to enrich based on the bulk enrichment request criteria."""
+    if payload.listing_ids:
+        stmt = select(Listing).where(Listing.id.in_(payload.listing_ids))
+    else:
+        unenriched_filter = (
+            Listing.enriched_title.is_(None)
+            & Listing.enriched_description.is_(None)
+            & Listing.enriched_meta_description.is_(None)
+        )
+        stmt = select(Listing).where(unenriched_filter)
+        if payload.source_partner:
+            stmt = stmt.where(Listing.source_partner == payload.source_partner)
+        stmt = stmt.order_by(Listing.created_at.asc()).limit(payload.limit)
+
+    return (await db.execute(stmt)).scalars().all()
+
+
+async def enrich_and_persist(
+    db: AsyncSession,
+    listing_id: UUID,
+    payload: AIListingEnrichmentRequest,
+) -> AIListingEnrichmentResponse:
+    """Fetch a listing by ID, enrich it, and optionally commit.
+
+    Raises NotFoundError if the listing does not exist.
+    """
+    listing = await ListingRepository.get_listing_by_id(db, listing_id)
+    if not listing:
+        raise NotFoundError(f"Listing {listing_id} not found")
+
+    response = await enrich_listing_with_ai(listing, payload)
+    if payload.apply:
+        await db.commit()
+    return response

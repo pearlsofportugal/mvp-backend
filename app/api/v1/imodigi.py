@@ -3,16 +3,12 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.api.responses import ERROR_RESPONSES, ok
 from app.config import settings
-from app.core.exceptions import ImodigiError, NotFoundError
-from app.models.listing_model import Listing
-from app.repositories import imodigi_repository
+from app.core.exceptions import ImodigiError
 from app.schemas.base_schema import ApiResponse, Meta
 from app.schemas.imodigi_schema import (
     ImodigiCatalogValues,
@@ -22,7 +18,14 @@ from app.schemas.imodigi_schema import (
     ImodigiLocationItem,
     ImodigiStoreRead,
 )
-from app.services import imodigi_service
+from app.services.imodigi_service import (
+    export_listing_to_crm,
+    get_catalog_values,
+    get_export_record,
+    get_stores,
+    list_export_records,
+    search_locations,
+)
 
 router = APIRouter()
 
@@ -37,7 +40,7 @@ router = APIRouter()
 )
 async def list_stores(request: Request):
     """Proxy GET /crm-stores.php — list active Imodigi stores."""
-    stores = await imodigi_service.get_stores()
+    stores = await get_stores()
     return ok([ImodigiStoreRead(**s) for s in stores], "Stores retrieved", request)
 
 
@@ -49,7 +52,7 @@ async def list_stores(request: Request):
 )
 async def catalog_values(request: Request):
     """Proxy GET /crm-property-values.php — allowed values for property fields."""
-    values = await imodigi_service.get_catalog_values()
+    values = await get_catalog_values()
     catalog = ImodigiCatalogValues(
         property_type=values.get("propertyType", []),
         business_type=values.get("businessType", []),
@@ -67,7 +70,7 @@ async def catalog_values(request: Request):
     responses=ERROR_RESPONSES,
     operation_id="imodigi_search_locations",
 )
-async def search_locations(
+async def search_imodigi_locations(
     request: Request,
     level: str = Query(..., description="country | region | district | county | parish"),
     country_id: int | None = Query(None),
@@ -78,7 +81,7 @@ async def search_locations(
     limit: int = Query(20, ge=1, le=100),
 ):
     """Proxy GET /crm-locations.php — search the Imodigi location hierarchy."""
-    items = await imodigi_service.search_locations(
+    items = await search_locations(
         level,
         country_id=country_id,
         region_id=region_id,
@@ -93,74 +96,29 @@ async def search_locations(
 # ── Export endpoints ──────────────────────────────────────────────────────
 
 @router.post(
-    "/export/{listing_id}",
+    "/publish/{listing_id}",
     response_model=ApiResponse[ImodigiExportResponse],
     responses=ERROR_RESPONSES,
-    operation_id="imodigi_export_listing",
+    operation_id="imodigi_publish_listing",
     status_code=200,
 )
-async def export_listing(
+async def publish_listing(
     listing_id: UUID,
     request: Request,
     payload: ImodigiExportRequest = ImodigiExportRequest(),
     db: AsyncSession = Depends(get_db),
 ):
-    """Export (create or update) a listing in the Imodigi CRM.
+    """Publish (create or update) a listing in the Imodigi CRM.
 
     Uses settings.imodigi_client_id by default; pass `client_id` in the body
     to override per-request.
     """
     client_id = payload.client_id or settings.imodigi_client_id
     if not client_id:
-        raise ImodigiError("IMODIGI_CLIENT_ID is not configured. Provide it in the request body or set the environment variable.")
-
-    # Load listing with media (needed for image URLs)
-    listing = (
-        await db.execute(
-            select(Listing)
-            .where(Listing.id == listing_id)
-            .options(selectinload(Listing.media_assets))
+        raise ImodigiError(
+            "IMODIGI_CLIENT_ID is not configured. Provide it in the request body or set the environment variable."
         )
-    ).scalar_one_or_none()
-    if not listing:
-        raise NotFoundError(f"Listing {listing_id} not found")
-
-    # Check existing export record
-    existing = await imodigi_repository.get_export_by_listing_id(db, listing_id)
-    existing_imodigi_id = existing.imodigi_property_id if existing else None
-
-    try:
-        imodigi_id, imodigi_ref, action = await imodigi_service.export_listing(
-            listing,
-            client_id=client_id,
-            existing_imodigi_id=existing_imodigi_id,
-        )
-        status = "published" if action == "created" else "updated"
-        export_record = await imodigi_repository.upsert_export(
-            db,
-            listing_id=listing_id,
-            imodigi_property_id=imodigi_id,
-            imodigi_reference=imodigi_ref or (existing.imodigi_reference if existing else None),
-            imodigi_client_id=client_id,
-            status=status,
-            last_error=None,
-        )
-        await db.commit()
-        await db.refresh(export_record)
-    except ImodigiError as exc:
-        # Persist the failure so the caller can introspect it via GET /exports
-        await imodigi_repository.upsert_export(
-            db,
-            listing_id=listing_id,
-            imodigi_property_id=existing_imodigi_id,
-            imodigi_reference=existing.imodigi_reference if existing else None,
-            imodigi_client_id=client_id,
-            status="failed",
-            last_error=str(exc),
-        )
-        await db.commit()
-        raise
-
+    export_record, action = await export_listing_to_crm(db, listing_id, client_id)
     return ok(
         ImodigiExportResponse(
             listing_id=listing_id,
@@ -175,20 +133,20 @@ async def export_listing(
 
 
 @router.get(
-    "/exports",
+    "/publications",
     response_model=ApiResponse[list[ImodigiExportRead]],
     responses=ERROR_RESPONSES,
-    operation_id="imodigi_list_exports",
+    operation_id="imodigi_list_publications",
 )
-async def list_exports(
+async def list_publications(
     request: Request,
     status: str | None = Query(None, description="Filter by status: pending | published | updated | failed"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all Imodigi export records with optional status filter."""
-    rows, total = await imodigi_repository.list_exports(db, status=status, page=page, page_size=page_size)
+    """List all Imodigi publication records with optional status filter."""
+    rows, total = await list_export_records(db, status=status, page=page, page_size=page_size)
     pages = (total + page_size - 1) // page_size if total else 0
     return ok(
         [ImodigiExportRead.model_validate(r) for r in rows],
@@ -199,18 +157,16 @@ async def list_exports(
 
 
 @router.get(
-    "/exports/{listing_id}",
+    "/publications/{listing_id}",
     response_model=ApiResponse[ImodigiExportRead],
     responses=ERROR_RESPONSES,
-    operation_id="imodigi_get_export",
+    operation_id="imodigi_get_publication",
 )
-async def get_export(
+async def get_publication(
     listing_id: UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get the Imodigi export record for a specific listing."""
-    record = await imodigi_repository.get_export_by_listing_id(db, listing_id)
-    if not record:
-        raise NotFoundError(f"No Imodigi export found for listing {listing_id}")
+    """Get the Imodigi publication record for a specific listing."""
+    record = await get_export_record(db, listing_id)
     return ok(ImodigiExportRead.model_validate(record), "Export retrieved", request)

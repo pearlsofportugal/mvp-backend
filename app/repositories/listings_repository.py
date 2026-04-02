@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import and_, asc, desc, func, or_, select
@@ -8,6 +10,19 @@ from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory
 from app.utils._filters import apply_listing_filters
+
+
+@dataclass
+class ListingStatsData:
+    total: int
+    avg_price: Decimal | None
+    min_price: Decimal | None
+    max_price: Decimal | None
+    avg_area: float | None
+    by_district: dict[str, int]
+    by_property_type: dict[str, int]
+    by_source_partner: dict[str, int]
+    by_typology: dict[str, int]
 
 class ListingRepository:
 
@@ -22,7 +37,7 @@ class ListingRepository:
         return (await db.execute(query)).scalar_one()
 
     @staticmethod
-    async def get_listing_by_id(listing_id: UUID, db: AsyncSession) -> Listing | None:
+    async def get_listing_by_id(db: AsyncSession, listing_id: UUID) -> Listing | None:
         result = await db.execute(select(Listing).where(Listing.id == listing_id))
         return result.scalar_one_or_none()
 
@@ -85,11 +100,11 @@ class ListingRepository:
         return (await db.execute(stmt)).scalars().all(), total
 
     @staticmethod
-    async def get_stats_raw(
+    async def get_stats(
         db: AsyncSession,
         source_partner: str | None,
         scrape_job_id: UUID | None,
-    ) -> dict:
+    ) -> ListingStatsData:
         base_filter = []
         if source_partner:
             base_filter.append(Listing.source_partner == source_partner)
@@ -97,7 +112,7 @@ class ListingRepository:
             base_filter.append(Listing.scrape_job_id == scrape_job_id)
         where_clause = and_(*base_filter) if base_filter else True
 
-        totals = (await db.execute(
+        total, avg_price, min_price, max_price, avg_area = (await db.execute(
             select(
                 func.count(Listing.id),
                 func.avg(Listing.price_amount),
@@ -113,30 +128,34 @@ class ListingRepository:
             .group_by(Listing.district)
         )).all()}
 
-        by_type = {r[0]: r[1] for r in (await db.execute(
+        by_property_type = {r[0]: r[1] for r in (await db.execute(
             select(Listing.property_type, func.count(Listing.id))
             .where(where_clause).where(Listing.property_type.isnot(None))
             .group_by(Listing.property_type)
         )).all()}
 
-        by_partner = {r[0]: r[1] for r in (await db.execute(
+        by_source_partner = {r[0]: r[1] for r in (await db.execute(
             select(Listing.source_partner, func.count(Listing.id))
             .where(where_clause).group_by(Listing.source_partner)
         )).all()}
 
-        by_typo = {r[0]: r[1] for r in (await db.execute(
+        by_typology = {r[0]: r[1] for r in (await db.execute(
             select(Listing.typology, func.count(Listing.id))
             .where(where_clause).where(Listing.typology.isnot(None))
             .group_by(Listing.typology)
         )).all()}
 
-        return {
-            "totals": totals,
-            "by_district": by_district,
-            "by_type": by_type,
-            "by_partner": by_partner,
-            "by_typo": by_typo,
-        }
+        return ListingStatsData(
+            total=total or 0,
+            avg_price=avg_price,
+            min_price=min_price,
+            max_price=max_price,
+            avg_area=avg_area,
+            by_district=by_district,
+            by_property_type=by_property_type,
+            by_source_partner=by_source_partner,
+            by_typology=by_typology,
+        )
 
     @staticmethod
     async def get_duplicate_groups(

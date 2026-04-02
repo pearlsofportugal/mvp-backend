@@ -7,7 +7,7 @@ from app.core.exceptions import DuplicateError, NotFoundError
 from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory
-from app.repositories.listings_repository import ListingRepository
+from app.repositories.listings_repository import ListingRepository, ListingStatsData
 from app.schemas.base_schema import Meta
 from app.schemas.listing_schema import (
     DuplicateEntry,
@@ -34,7 +34,7 @@ class ListingService:
 
     @staticmethod
     async def get_listing_by_id(db: AsyncSession, listing_id: UUID) -> Listing:
-        listing = await ListingRepository.get_listing_by_id(listing_id, db)
+        listing = await ListingRepository.get_listing_by_id(db, listing_id)
         if not listing:
             raise NotFoundError(f"Listing {listing_id} not found")
         return listing
@@ -106,18 +106,17 @@ class ListingService:
         source_partner: str | None,
         scrape_job_id: UUID | None,
     ) -> ListingStats:
-        raw = await ListingRepository.get_stats_raw(db, source_partner, scrape_job_id)
-        total, avg_price, min_price, max_price, avg_area = raw["totals"]
+        stats: ListingStatsData = await ListingRepository.get_stats(db, source_partner, scrape_job_id)
         return ListingStats(
-            total_listings=total or 0,
-            avg_price=float(avg_price) if avg_price else None,
-            min_price=float(min_price) if min_price else None,
-            max_price=float(max_price) if max_price else None,
-            avg_area=float(avg_area) if avg_area else None,
-            by_district=raw["by_district"],
-            by_property_type=raw["by_type"],
-            by_source_partner=raw["by_partner"],
-            by_typology=raw["by_typo"],
+            total_listings=stats.total,
+            avg_price=float(stats.avg_price) if stats.avg_price else None,
+            min_price=float(stats.min_price) if stats.min_price else None,
+            max_price=float(stats.max_price) if stats.max_price else None,
+            avg_area=float(stats.avg_area) if stats.avg_area else None,
+            by_district=stats.by_district,
+            by_property_type=stats.by_property_type,
+            by_source_partner=stats.by_source_partner,
+            by_typology=stats.by_typology,
         )
 
     @staticmethod
@@ -147,7 +146,7 @@ class ListingService:
 
     @staticmethod
     async def update_listing(db: AsyncSession, listing_id: UUID, payload: ListingUpdate) -> Listing:
-        listing = await ListingRepository.get_listing_by_id(listing_id, db)
+        listing = await ListingRepository.get_listing_by_id(db, listing_id)
         if not listing:
             raise NotFoundError(f"Listing {listing_id} not found")
         update_data = payload.model_dump(exclude_unset=True)
@@ -165,7 +164,7 @@ class ListingService:
 
     @staticmethod
     async def delete_listing(db: AsyncSession, listing_id: UUID) -> None:
-        listing = await ListingRepository.get_listing_by_id(listing_id, db)
+        listing = await ListingRepository.get_listing_by_id(db, listing_id)
         if not listing:
             raise NotFoundError(f"Listing {listing_id} not found")
         await ListingRepository.delete_listing(db, listing)

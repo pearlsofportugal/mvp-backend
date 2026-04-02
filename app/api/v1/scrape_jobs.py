@@ -4,23 +4,21 @@
 
 import asyncio
 import json
-import math
 from typing import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import desc, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.responses import ERROR_RESPONSES, ok
-from app.core.exceptions import AppException, JobAlreadyRunningError, NotFoundError
 from app.database import async_session_factory
 from app.models.scrape_job_model import ScrapeJob
-from app.models.site_config_model import SiteConfig
-from app.schemas.base_schema import ApiResponse, Meta
+from app.schemas.base_schema import ApiResponse
 from app.schemas.scrape_job_schema import JobCreate, JobListRead, JobRead
+from app.services.scrape_job_service import ScrapeJobService
 from app.services.scraper_service import recover_stale_jobs, run_scrape_job
 
 router = APIRouter()
@@ -43,37 +41,7 @@ async def create_job(
 ):
     """Launch a new scrape job. Runs in background (MVP: one job at a time per worker)."""
     await recover_stale_jobs(db)
-
-    running = (await db.execute(
-        select(ScrapeJob)
-        .where(ScrapeJob.status == "running")
-        .order_by(desc(ScrapeJob.started_at), desc(ScrapeJob.created_at))
-        .limit(1)
-    )).scalars().first()
-    if running:
-        raise JobAlreadyRunningError(
-            "A scrape job is already running. Wait for it to finish or cancel it."
-        )
-
-    site_config = (await db.execute(
-        select(SiteConfig).where(SiteConfig.key == payload.site_key, SiteConfig.is_active.is_(True))
-    )).scalar_one_or_none()
-    if not site_config:
-        raise NotFoundError(f"Site config '{payload.site_key}' not found or inactive")
-
-    job = ScrapeJob(
-        site_key=payload.site_key,
-        base_url=site_config.base_url,
-        start_url=payload.start_url,
-        max_pages=payload.max_pages,
-        status="pending",
-        config=payload.config.model_dump() if payload.config else None,
-        progress={"pages_visited": 0, "listings_found": 0, "listings_scraped": 0, "errors": 0},
-    )
-    db.add(job)
-    await db.commit()   # commit BEFORE background task to avoid race condition
-    await db.refresh(job)
-
+    job = await ScrapeJobService.create_job(db, payload)
     background_tasks.add_task(run_scrape_job, str(job.id))
     return ok(JobRead.model_validate(job), "Job created successfully", request)
 
@@ -87,77 +55,28 @@ async def list_jobs(
     page_size: int = Query(20, ge=1, le=100),
 ):
     """List scrape jobs with optional status filter."""
-    query = select(ScrapeJob).order_by(desc(ScrapeJob.created_at))
-    count_query = select(func.count()).select_from(ScrapeJob)
-
-    if status:
-        query = query.where(ScrapeJob.status == status)
-        count_query = count_query.where(ScrapeJob.status == status)
-
-    query = query.offset((page - 1) * page_size).limit(page_size)
-
-    # FIX: both queries must be awaited before consuming results
-    result = await db.execute(query)
-    total_result = await db.execute(count_query)
-
-    jobs = result.scalars().all()
-    total = total_result.scalar_one()
-    pages = math.ceil(total / page_size) if total > 0 else 0
-
-    return ok(
-        [JobListRead.model_validate(j) for j in jobs],
-        "Jobs listed successfully",
-        request,
-        meta=Meta(page=page, page_size=page_size, total=total, pages=pages),
-    )
+    jobs, meta = await ScrapeJobService.list_jobs(db, status=status, page=page, page_size=page_size)
+    return ok([JobListRead.model_validate(j) for j in jobs], "Jobs listed successfully", request, meta=meta)
 
 
 @router.get("/{job_id}", response_model=ApiResponse[JobRead], responses=ERROR_RESPONSES, operation_id="get_job")
 async def get_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get the status and progress of a scrape job."""
-    job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
-    if not job:
-        raise NotFoundError(f"Scrape job {job_id} not found")
+    job = await ScrapeJobService.get_job(db, job_id)
     return ok(JobRead.model_validate(job), "Job retrieved successfully", request)
 
 
 @router.post("/{job_id}/cancel", response_model=ApiResponse[JobRead], responses=ERROR_RESPONSES, operation_id="cancel_job")
 async def cancel_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Cancel a running or pending scrape job."""
-    job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
-    if not job:
-        raise NotFoundError(f"Scrape job {job_id} not found")
-
-    if job.status == "pending":
-        job.mark_cancelled()
-        await db.commit()
-        return ok(JobRead.model_validate(job), "Job cancelled successfully", request)
-
-    if job.status == "running":
-        if job.cancel_requested_at is None:
-            job.request_cancel()
-            await db.commit()
-            return ok(JobRead.model_validate(job), "Job cancellation requested successfully", request)
-
-        return ok(JobRead.model_validate(job), "Job cancellation was already requested", request)
-
-    if job.status not in ("pending", "running"):
-        raise AppException(f"Job {job_id} cannot be cancelled (status: {job.status})")
-
-    raise AppException(f"Job {job_id} cannot be cancelled (status: {job.status})")
+    job, message = await ScrapeJobService.cancel_job(db, job_id)
+    return ok(JobRead.model_validate(job), message, request)
 
 
 @router.delete("/{job_id}", response_model=ApiResponse[None], status_code=200, responses=ERROR_RESPONSES, operation_id="delete_job")
 async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Delete a scrape job record."""
-    job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
-    if not job:
-        raise NotFoundError(f"Scrape job {job_id} not found")
-    if job.status == "running":
-        raise AppException("Cannot delete a running job. Cancel it first.")
-
-    await db.delete(job)
-    await db.commit()   # FIX: flush → commit so deletion actually persists
+    await ScrapeJobService.delete_job(db, job_id)
     return ok(None, "Job deleted successfully", request)
 
 

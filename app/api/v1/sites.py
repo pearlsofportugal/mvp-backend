@@ -3,16 +3,15 @@
 """
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.responses import ERROR_RESPONSES, ok
 from app.crawler.selector_suggester import preview_selector, suggest_selectors
-from app.core.exceptions import DuplicateError, NotFoundError
-from app.models.site_config_model import SiteConfig
 from app.schemas.base_schema import ApiResponse
 from app.schemas.site_config_schema import (
+    SelectorValidateRequest,
+    SelectorValidationReport,
     SiteConfigCreate,
     SiteConfigPreviewRequest,
     SiteConfigPreviewResponse,
@@ -20,7 +19,15 @@ from app.schemas.site_config_schema import (
     SiteConfigSuggestRequest,
     SiteConfigSuggestResponse,
     SiteConfigUpdate,
+    TestListingPageRequest,
+    TestListingPageResponse,
+    TestScrapeRequest,
+    TestScrapeResponse,
 )
+from app.services.selector_validation_service import validate_selectors
+from app.services.site_config_service import SiteConfigService
+from app.services.test_listing_page_service import run_test_listing_page
+from app.services.test_scrape_service import run_test_scrape
 
 router = APIRouter()
 
@@ -53,22 +60,29 @@ async def preview_site_selector(payload: SiteConfigPreviewRequest, request: Requ
 # Site config CRUD
 # ---------------------------------------------------------------------------
 
-@router.get("", response_model=ApiResponse[list[SiteConfigRead]], responses=ERROR_RESPONSES, operation_id="list_sites")
+@router.get(
+    "",
+    response_model=ApiResponse[list[SiteConfigRead]],
+    responses=ERROR_RESPONSES,
+    operation_id="list_sites",
+)
 async def list_sites(
     request: Request,
     db: AsyncSession = Depends(get_db),
     include_inactive: bool = Query(False, description="Include deactivated sites"),
 ):
     """List all configured scraping sites."""
-    query = select(SiteConfig).order_by(SiteConfig.name)
-    if not include_inactive:
-        query = query.where(SiteConfig.is_active.is_(True))
-    result = await db.execute(query)
-    sites = result.scalars().all()
+    sites = await SiteConfigService.get_all(db, include_inactive=include_inactive)
     return ok([SiteConfigRead.model_validate(s) for s in sites], "Sites listed successfully", request)
 
 
-@router.post("", response_model=ApiResponse[SiteConfigRead], status_code=201, responses=ERROR_RESPONSES, operation_id="create_site")
+@router.post(
+    "",
+    response_model=ApiResponse[SiteConfigRead],
+    status_code=201,
+    responses=ERROR_RESPONSES,
+    operation_id="create_site",
+)
 async def create_site(
     payload: SiteConfigCreate,
     request: Request,
@@ -78,40 +92,28 @@ async def create_site(
 
     If a deactivated site with the same key exists, it will be reactivated and updated.
     """
-    existing_site = (
-        await db.execute(select(SiteConfig).where(SiteConfig.key == payload.key))
-    ).scalar_one_or_none()
-
-    if existing_site:
-        if existing_site.is_active:
-            raise DuplicateError(f"Site config with key '{payload.key}' already exists")
-
-        # Reactivate and update the deactivated site
-        for field, value in payload.model_dump().items():
-            setattr(existing_site, field, value)
-        existing_site.is_active = True
-        await db.commit()   # FIX: flush → commit
-        return ok(SiteConfigRead.model_validate(existing_site), "Site reactivated successfully", request)
-
-    site = SiteConfig(**payload.model_dump())
-    db.add(site)
-    await db.commit()   # FIX: flush → commit
-    await db.refresh(site)
-    return ok(SiteConfigRead.model_validate(site), "Site created successfully", request)
+    site, message = await SiteConfigService.create(db, payload)
+    return ok(SiteConfigRead.model_validate(site), message, request)
 
 
-@router.get("/{key}", response_model=ApiResponse[SiteConfigRead], responses=ERROR_RESPONSES, operation_id="get_site")
+@router.get(
+    "/{key}",
+    response_model=ApiResponse[SiteConfigRead],
+    responses=ERROR_RESPONSES,
+    operation_id="get_site",
+)
 async def get_site(key: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Get a site configuration by key."""
-    site = (
-        await db.execute(select(SiteConfig).where(SiteConfig.key == key))
-    ).scalar_one_or_none()
-    if not site:
-        raise NotFoundError(f"Site config '{key}' not found")
+    site = await SiteConfigService.get_by_key(db, key)
     return ok(SiteConfigRead.model_validate(site), "Site retrieved successfully", request)
 
 
-@router.patch("/{key}", response_model=ApiResponse[SiteConfigRead], responses=ERROR_RESPONSES, operation_id="update_site")
+@router.patch(
+    "/{key}",
+    response_model=ApiResponse[SiteConfigRead],
+    responses=ERROR_RESPONSES,
+    operation_id="update_site",
+)
 async def update_site(
     key: str,
     payload: SiteConfigUpdate,
@@ -119,21 +121,91 @@ async def update_site(
     db: AsyncSession = Depends(get_db),
 ):
     """Update a site configuration."""
-    site = (
-        await db.execute(select(SiteConfig).where(SiteConfig.key == key))
-    ).scalar_one_or_none()
-    if not site:
-        raise NotFoundError(f"Site config '{key}' not found")
-
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(site, field, value)
-
-    await db.commit()   # FIX: flush → commit
-    await db.refresh(site)
+    site = await SiteConfigService.update(db, key, payload)
     return ok(SiteConfigRead.model_validate(site), "Site updated successfully", request)
 
 
-@router.delete("/{key}", response_model=ApiResponse[None], status_code=200, responses=ERROR_RESPONSES, operation_id="delete_site")
+@router.post(
+    "/{key}/test-scrape",
+    response_model=ApiResponse[TestScrapeResponse],
+    responses=ERROR_RESPONSES,
+    operation_id="test_scrape_site",
+)
+async def test_scrape_site(
+    key: str,
+    payload: TestScrapeRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Dry-run scrape of a single listing URL using the site's current configuration.
+
+    Fetches the page, parses it with the configured selectors and extraction_mode,
+    normalizes the result via mapper, and returns the raw + normalized output.
+    Nothing is written to the database.
+    """
+    site = await SiteConfigService.get_by_key(db, key)
+    result = await run_test_scrape(site, str(payload.url))
+    return ok(result, "Test scrape completed", request)
+
+
+@router.post(
+    "/{key}/test-listing-page",
+    response_model=ApiResponse[TestListingPageResponse],
+    responses=ERROR_RESPONSES,
+    operation_id="test_listing_page_site",
+)
+async def test_listing_page_site(
+    key: str,
+    payload: TestListingPageRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Test a listing/search results page using the site's current configuration.
+
+    Fetches the page, extracts listing links via the site's ``listing_link_selector``,
+    separates them into matched/rejected based on ``link_pattern``, detects the
+    next page URL, and optionally samples thumbnail images.
+
+    ``link_pattern`` and ``thumbnail_selector`` in the request body override the
+    site's saved values when provided.
+
+    Nothing is written to the database.
+    """
+    site = await SiteConfigService.get_by_key(db, key)
+    result = await run_test_listing_page(site, payload)
+    return ok(result, "Listing page test completed", request)
+
+
+@router.post(
+    "/{key}/validate-selectors",
+    response_model=ApiResponse[SelectorValidationReport],
+    responses=ERROR_RESPONSES,
+    operation_id="validate_site_selectors",
+)
+async def validate_site_selectors(
+    key: str,
+    payload: SelectorValidateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Validate CSS selectors against a live page.
+
+    If ``url`` is omitted in the request body, the site's ``base_url`` is used.
+    Returns a report with per-field results, warnings (0 matches), and errors (bad CSS).
+    """
+    site = await SiteConfigService.get_by_key(db, key)
+    url = str(payload.url) if payload.url else site.base_url
+    report = await validate_selectors(payload.selectors, url)
+    return ok(report, "Selector validation completed", request)
+
+
+@router.delete(
+    "/{key}",
+    response_model=ApiResponse[None],
+    status_code=200,
+    responses=ERROR_RESPONSES,
+    operation_id="delete_site",
+)
 async def delete_site(
     key: str,
     request: Request,
@@ -145,21 +217,5 @@ async def delete_site(
     By default, performs a soft delete (deactivates the site).
     Use permanent=true to permanently delete the record.
     """
-    site = (
-        await db.execute(select(SiteConfig).where(SiteConfig.key == key))
-    ).scalar_one_or_none()
-    if not site:
-        raise NotFoundError(f"Site config '{key}' not found")
-
-    if permanent:
-        await db.delete(site)
-    else:
-        if not site.is_active:
-            raise NotFoundError(
-                f"Site config '{key}' is already deactivated. Use permanent=true to delete permanently."
-            )
-        site.is_active = False
-
-    await db.commit()   # FIX: flush → commit
-    message = "Site deleted successfully" if permanent else "Site deactivated successfully"
+    message = await SiteConfigService.delete(db, key, permanent=permanent)
     return ok(None, message, request)

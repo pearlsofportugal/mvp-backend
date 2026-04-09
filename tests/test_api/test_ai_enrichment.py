@@ -1,90 +1,86 @@
 """Tests for AI enrichment API endpoints."""
-import pytest
 from httpx import AsyncClient
 
 from app.schemas.ai_enrichment_schema import (
-    AIEnrichmentFieldResult,
-    AIEnrichmentOutput,
-    AIListingEnrichmentResponse,
-    AITextOptimizationResponse,
+    ListingTranslationResponse,
+    LocaleEnrichmentOutput,
 )
 
 
-async def test_ai_optimize_text(client: AsyncClient, monkeypatch):
-    """POST /api/v1/enrichment/ai/optimize returns AI output payload."""
+async def test_translations_preview(client: AsyncClient, monkeypatch):
+    """POST /api/v1/enrichment/ai/translations returns multi-locale preview."""
+    from tests.conftest import make_listing_payload
+    from uuid import UUID
 
-    def fake_optimize(content: str, keywords):
-        return AITextOptimizationResponse(
+    created = await client.post("/api/v1/listings", json=make_listing_payload())
+    listing_id = created.json()["data"]["id"]
+
+    async def fake_enrich(db, lid, payload):
+        return ListingTranslationResponse(
+            listing_id=lid,
+            applied=False,
             model_used="fake-model",
-            keywords_used=list(keywords),
-            output=AIEnrichmentOutput(
-                title="Título otimizado",
-                description="Descrição otimizada",
-                meta_description="Meta otimizada",
-            ),
+            keywords_used=["t2", "lisboa"],
+            locales_generated=["en", "pt"],
+            locales_cached=[],
+            results={
+                "en": LocaleEnrichmentOutput(title="EN title", description="EN desc", meta_description="EN meta"),
+                "pt": LocaleEnrichmentOutput(title="PT título", description="PT desc", meta_description="PT meta"),
+            },
         )
 
-    monkeypatch.setattr("app.api.v1.ai_enrichment.optimize_text_with_ai", fake_optimize)
+    monkeypatch.setattr("app.api.v1.ai_enrichment.enrich_translations_and_persist", fake_enrich)
 
     resp = await client.post(
-        "/api/v1/enrichment/ai/optimize",
-        json={
-            "content": "Apartamento T2 em Lisboa com ótima localização.",
-            "keywords": ["apartamento lisboa", "t2"],
-            "fields": ["title", "description"],
-        },
+        "/api/v1/enrichment/ai/translations",
+        json={"listing_id": listing_id, "locales": ["en", "pt"], "apply": False},
     )
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
     data = body["data"]
+    assert data["listing_id"] == listing_id
+    assert data["applied"] is False
     assert data["model_used"] == "fake-model"
-    assert data["output"]["title"] == "Título otimizado"
-    assert data["output"]["description"] == "Descrição otimizada"
-    assert data["output"]["meta_description"] is None
+    assert data["results"]["en"]["title"] == "EN title"
+    assert data["results"]["pt"]["title"] == "PT título"
+    assert "en" in data["locales_generated"]
 
 
-async def test_ai_listing_enrichment_apply(client: AsyncClient, monkeypatch):
-    """POST /api/v1/enrichment/ai/listing enriches selected listing fields."""
+async def test_translations_apply(client: AsyncClient, monkeypatch):
+    """POST /api/v1/enrichment/ai/translations with apply=true persists values."""
     from tests.conftest import make_listing_payload
 
     created = await client.post("/api/v1/listings", json=make_listing_payload())
     listing_id = created.json()["data"]["id"]
 
-    async def fake_enrich_listing(listing, payload):
-        return AIListingEnrichmentResponse(
-            listing_id=listing.id,
-            applied=payload.apply,
+    async def fake_enrich(db, lid, payload):
+        return ListingTranslationResponse(
+            listing_id=lid,
+            applied=True,
             model_used="fake-model",
-            keywords_used=["apartamento lisboa"],
-            results=[
-                AIEnrichmentFieldResult(
-                    field="title",
-                    original=listing.title,
-                    enriched="Novo título AI",
-                    changed=True,
-                )
-            ],
+            keywords_used=[],
+            locales_generated=["en"],
+            locales_cached=[],
+            results={"en": LocaleEnrichmentOutput(title="Saved EN", description="d", meta_description="m")},
         )
 
-    monkeypatch.setattr("app.api.v1.ai_enrichment.enrich_listing_with_ai", fake_enrich_listing)
+    monkeypatch.setattr("app.api.v1.ai_enrichment.enrich_translations_and_persist", fake_enrich)
 
     resp = await client.post(
-        "/api/v1/enrichment/ai/listing",
+        "/api/v1/enrichment/ai/translations",
         json={
             "listing_id": listing_id,
-            "fields": ["title"],
-            "keywords": ["apartamento lisboa"],
+            "locales": ["en"],
             "apply": True,
-            "force": True,
+            "translation_values": {
+                "en": {"title": "Saved EN", "description": "d", "meta_description": "m"}
+            },
         },
     )
 
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["listing_id"] == listing_id
     assert data["applied"] is True
-    assert data["model_used"] == "fake-model"
-    assert data["results"][0]["field"] == "title"
-    assert data["results"][0]["enriched"] == "Novo título AI"
+    assert data["results"]["en"]["title"] == "Saved EN"

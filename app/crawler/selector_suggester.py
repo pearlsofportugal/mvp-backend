@@ -223,6 +223,9 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='preco']",
         "[class*='valor']",
         "[itemprop='price']",
+
+        "[class*='propertyPrice'] .value",
+        "[data-toggle-key='price'] .value",
         ".price",
         "strong.price",
     ],
@@ -231,6 +234,9 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='title']",
         "[class*='titulo']",
         "[class*='nome']",
+        
+        "[class*='propertyTitle'] h1",
+        "[data-toggle-key='propertytitle'] h1",
     ],
     "area": [
         "[class*='area']",
@@ -238,6 +244,11 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='metros']",
         "[class*='util']",
         "[class*='bruta']",
+        
+        "li[class*='netarea'] .value",
+        
+        "[title*='útil']",
+        "[title*='area']",
     ],
     "land_area": [
         "[class*='terreno']",
@@ -245,11 +256,15 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='plot']",
         "[class*='lot']",
         "[id*='area_terreno']",
+        
+        "li[class*='land'] .value",
     ],
     "rooms": [
         "[class*='quarto']",
         "[class*='room']",
         "[class*='divisao']",
+        
+        "li[class*='rooms'] .value",
     ],
     "bathrooms": [
         "[class*='bath']",
@@ -257,6 +272,8 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='wc']",
         "[id*='wcs']",
         "[id*='wc']",
+        
+        "li[class*='baths'] .value",
     ],
     "property_type": [
         "[class*='tipo']",
@@ -286,6 +303,8 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='distrito']",
         "[class*='location']",
         "[class*='morada']",
+        
+        "[class*='propertyLocation']",
         "address",
     ],
     "county": [
@@ -293,6 +312,7 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='concelho']",
         "[class*='cidade']",
         "[class*='location']",
+        "[class*='propertyLocation']",
         "address",
     ],
     "parish": [
@@ -353,6 +373,15 @@ async def suggest_selectors(url: str) -> dict[str, Any]:
 
     soup = BeautifulSoup(html, "lxml")
     reference_values = _extract_json_ld_reference_values(soup)
+
+    # Merge Open Graph / meta reference values as secondary ground-truth.
+    
+    meta_values = _extract_meta_reference_values(soup)
+    for field in _FIELD_ORDER:
+        for value in meta_values.get(field, []):
+            if value not in reference_values[field]:
+                reference_values[field].append(value)
+
     candidates = {
         field: _collect_candidates(
             soup=soup,
@@ -400,6 +429,7 @@ def _collect_candidates(soup: BeautifulSoup, field: str, expected_values: list[s
 
     for heuristic_index, heuristic_selector in enumerate(_FIELD_HEURISTICS[field]):
         elements = _safe_select(soup, heuristic_selector)
+        element_count = len(elements)
         for element in elements[:5]:
             sample = _extract_sample_text(element, field)
             if not sample:
@@ -416,6 +446,12 @@ def _collect_candidates(soup: BeautifulSoup, field: str, expected_values: list[s
             )
             if score <= 0:
                 continue
+
+            # Multiplicity penalty: very broad selectors matching many elements
+            # (e.g. generic h1, span, div) are less likely to be the right one.
+            if element_count > 12 and field not in ("images",):
+                penalty = max(0.45, 1.0 - 0.04 * (element_count - 12))
+                score *= penalty
 
             existing = ranked.get(selector)
             candidate = {
@@ -472,6 +508,37 @@ def _safe_select(soup: BeautifulSoup | Tag, selector: str) -> list[Tag]:
         return list(soup.select(selector))
     except Exception:
         return []
+
+
+def _extract_meta_reference_values(soup: BeautifulSoup) -> dict[str, list[str]]:
+    """Extract field reference values from Open Graph and meta tags.
+
+    Used as secondary ground-truth when JSON-LD is absent or incomplete.
+    The OG title is the most reliable signal; price and description are
+    extracted opportunistically when the standard OG commerce properties
+    are present.
+    """
+    reference_values: dict[str, list[str]] = {field: [] for field in _FIELD_ORDER}
+
+    # Title — og:title and twitter:title are always present on modern sites
+    for meta in soup.select(
+        "meta[property='og:title'], meta[name='twitter:title']"
+    ):
+        value = _truncate_whitespace(meta.get("content") or "")
+        if value and value not in reference_values["title"]:
+            reference_values["title"].append(value)
+
+    # Price — standard OG commerce / Open Graph product extensions
+    for meta in soup.select(
+        "meta[property='product:price:amount'], "
+        "meta[property='og:price:amount'], "
+        "meta[property='og:price']"
+    ):
+        value = _truncate_whitespace(meta.get("content") or "")
+        if value and value not in reference_values["price"]:
+            reference_values["price"].append(value)
+
+    return reference_values
 
 
 def _extract_json_ld_reference_values(soup: BeautifulSoup) -> dict[str, list[str]]:
@@ -809,10 +876,18 @@ def _collect_structured_field_candidates(
 def _find_structured_label(node: Tag, field: str) -> str | None:
     """Return a recognized label from a structured summary container."""
     allowed_labels = _STRUCTURED_FIELD_LABELS[field]
-    for candidate in node.select("b, strong, th, .name, .label, dt, .icon_label"):
+    for candidate in node.select("b, strong, th, .name, .label, dt, .icon_label, .icon-label"):
         text = _normalize_text(candidate.get_text(" ", strip=True)).rstrip(":")
         if text in allowed_labels:
             return text
+
+    # Check the element's ``title`` attribute — catches patterns like
+    # <li title="Área útil">39 m²</li> used on some custom CMS platforms.
+    title_attr = _normalize_text(node.get("title") or "")
+    if title_attr:
+        for label in allowed_labels:
+            if label in title_attr:
+                return label
 
     text = _normalize_text(node.get_text(" ", strip=True))
     for label in allowed_labels:
@@ -985,7 +1060,7 @@ def _structured_context_label(element: Tag | None) -> str | None:
     """Extract a nearby structured label from the current node or its ancestors."""
     current = element
     while current is not None:
-        label = current.select_one("b, strong, th, .name, .label, dt, .icon_label")
+        label = current.select_one("b, strong, th, .name, .label, dt, .icon_label, .icon-label")
         if label is not None:
             text = _truncate_whitespace(label.get_text(" ", strip=True))
             if text:

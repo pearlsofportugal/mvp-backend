@@ -43,7 +43,7 @@ class ListingSearchItem(BaseModel):
     )
     is_enriched: bool = Field(
         False,
-        description="True when any of enriched_title, enriched_description, or enriched_meta_description is present.",
+        description="True when enriched_translations contains at least one locale.",
     )
 
 

@@ -13,14 +13,22 @@ External API endpoints used:
   POST /crm-properties.php          → create property (returns {property, reference})
   PATCH /crm-properties.php         → update existing property
 """
+from __future__ import annotations
+
 from typing import Any
+from uuid import UUID
 
-import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.adapters.imodigi_adapter import imodigi_adapter
 from app.config import settings
-from app.core.exceptions import ImodigiError
+from app.core.exceptions import ImodigiError, NotFoundError
 from app.core.logging import get_logger
+from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
+from app.repositories.imodigi_repository import get_export_by_listing_id, list_exports, upsert_export
 
 logger = get_logger(__name__)
 
@@ -55,28 +63,6 @@ _CONDITION_MAP: dict[str, str] = {
     "renovated": "Renovated",
     "renovado": "Renovated",
 }
-
-
-def _imodigi_headers() -> dict[str, str]:
-    return {
-        "X-API-Token": settings.imodigi_api_token,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-
-def _raise_if_error(response: httpx.Response) -> dict[str, Any]:
-    """Parse the JSON body; raise ImodigiError on non-success state."""
-    try:
-        body: dict[str, Any] = response.json()
-    except Exception as exc:
-        raise ImodigiError(f"Imodigi returned non-JSON response (HTTP {response.status_code})") from exc
-
-    if body.get("state") != "success":
-        kind = body.get("kind", "unknown")
-        message = body.get("message", str(body))
-        raise ImodigiError(f"Imodigi error [{kind}]: {message}")
-    return body
 
 
 def _map_property_type(raw: str | None) -> str | None:
@@ -163,19 +149,39 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
         payload["energy"] = {"class": listing.energy_certificate}
 
     # Images
-    # if listing.media_assets:
-        # payload["images"] = [a.url for a in listing.media_assets if a.url]
+    if listing.media_assets:
+        payload["images"] = [a.url for a in listing.media_assets if a.url]
 
-    # Translations
-    translation_en: dict[str, str] = {}
-    if listing.title:
-        translation_en["title"] = listing.title
-    if listing.description:
-        translation_en["description"] = listing.description
-    if listing.meta_description:
-        translation_en["shortDescription"] = listing.meta_description
-    if translation_en:
-        payload["translations"] = {"en": translation_en}
+    # Translations — built from enriched_translations (all locales), EN falls back to canonical fields
+    translations: dict[str, dict[str, str]] = {}
+    enriched: dict = listing.enriched_translations or {}
+
+    for locale, locale_data in enriched.items():
+        if not isinstance(locale_data, dict):
+            continue
+        entry: dict[str, str] = {}
+        if locale_data.get("title"):
+            entry["title"] = locale_data["title"]
+        if locale_data.get("description"):
+            entry["description"] = locale_data["description"]
+        if locale_data.get("meta_description"):
+            entry["shortDescription"] = locale_data["meta_description"]
+        if entry:
+            translations[locale] = entry
+
+    if "en" not in translations:
+        entry_en: dict[str, str] = {}
+        if listing.title:
+            entry_en["title"] = listing.title
+        if listing.description:
+            entry_en["description"] = listing.description
+        if listing.meta_description:
+            entry_en["shortDescription"] = listing.meta_description
+        if entry_en:
+            translations["en"] = entry_en
+
+    if translations:
+        payload["translations"] = translations
 
     return payload
 
@@ -184,24 +190,12 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
 
 async def get_stores() -> list[dict[str, Any]]:
     """GET /crm-stores.php — return list of active stores."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{settings.imodigi_base_url}/crm-stores.php",
-            headers=_imodigi_headers(),
-        )
-    body = _raise_if_error(resp)
-    return body.get("stores", [])
+    return await imodigi_adapter.get_stores()
 
 
 async def get_catalog_values() -> dict[str, Any]:
     """GET /crm-property-values.php — return allowed catalog values."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{settings.imodigi_base_url}/crm-property-values.php",
-            headers=_imodigi_headers(),
-        )
-    body = _raise_if_error(resp)
-    return body.get("values", {})
+    return await imodigi_adapter.get_catalog_values()
 
 
 async def search_locations(
@@ -215,58 +209,38 @@ async def search_locations(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """GET /crm-locations.php — search locations by hierarchical level."""
-    params: dict[str, Any] = {"level": level, "limit": min(limit, 100)}
-    if country_id is not None:
-        params["countryId"] = country_id
-    if region_id is not None:
-        params["regionId"] = region_id
-    if district_id is not None:
-        params["districtId"] = district_id
-    if county_id is not None:
-        params["countyId"] = county_id
-    if q:
-        params["q"] = q
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{settings.imodigi_base_url}/crm-locations.php",
-            headers=_imodigi_headers(),
-            params=params,
-        )
-    body = _raise_if_error(resp)
-    return body.get("items", [])
+    return await imodigi_adapter.search_locations(
+        level,
+        country_id=country_id,
+        region_id=region_id,
+        district_id=district_id,
+        county_id=county_id,
+        q=q,
+        limit=limit,
+    )
 
 
-async def create_property(client_id: int, property_payload: dict[str, Any]) -> dict[str, Any]:
+async def create_property(
+    client_id: int,
+    property_payload: dict[str, Any],
+    *,
+    images: list[str] | None = None,
+    translations: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """POST /crm-properties.php — create a new property. Returns full response body."""
-    request_body = {"client": client_id, "property": property_payload}
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{settings.imodigi_base_url}/crm-properties.php",
-            headers=_imodigi_headers(),
-            json=request_body,
-        )
-    return _raise_if_error(resp)
+    return await imodigi_adapter.create_property(client_id, property_payload, images=images, translations=translations)
 
 
 async def update_property(
     client_id: int,
     imodigi_property_id: int,
     property_payload: dict[str, Any],
+    *,
+    images: list[str] | None = None,
+    translations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """PATCH /crm-properties.php — update an existing property."""
-    request_body = {
-        "client": client_id,
-        "propertyId": imodigi_property_id,
-        "property": property_payload,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.patch(
-            f"{settings.imodigi_base_url}/crm-properties.php",
-            headers=_imodigi_headers(),
-            json=request_body,
-        )
-    return _raise_if_error(resp)
+    return await imodigi_adapter.update_property(client_id, imodigi_property_id, property_payload, images=images, translations=translations)
 
 
 async def export_listing(
@@ -281,12 +255,96 @@ async def export_listing(
     where action is 'created' or 'updated'.
     """
     payload = build_property_payload(listing)
+    # Extract top-level fields before sending property payload
+    images: list[str] | None = payload.pop("images", None)
+    translations: dict[str, Any] | None = payload.pop("translations", None)
 
     if existing_imodigi_id is None:
         logger.info("Creating new imodigi property for listing %s", listing.id)
-        result = await create_property(client_id, payload)
+        result = await create_property(client_id, payload, images=images, translations=translations)
         return result.get("property"), result.get("reference"), "created"
 
     logger.info("Updating imodigi property %d for listing %s", existing_imodigi_id, listing.id)
-    await update_property(client_id, existing_imodigi_id, payload)
+    await update_property(client_id, existing_imodigi_id, payload, images=images, translations=translations)
     return existing_imodigi_id, None, "updated"
+
+
+# ─────────────────────────── Higher-level orchestration ─────────────────────
+
+
+async def export_listing_to_crm(
+    db: AsyncSession,
+    listing_id: UUID,
+    client_id: int,
+) -> tuple[ImodigiExport, str]:
+    """Full export workflow: fetch listing, call Imodigi API, persist record.
+
+    Returns (export_record, action) where action is 'created' or 'updated'.
+    Raises NotFoundError if the listing does not exist.
+    On ImodigiError, persists the failure record before re-raising.
+    """
+    listing = (
+        await db.execute(
+            select(Listing)
+            .where(Listing.id == listing_id)
+            .options(selectinload(Listing.media_assets))
+        )
+    ).scalar_one_or_none()
+    if not listing:
+        raise NotFoundError(f"Listing {listing_id} not found")
+
+    existing = await get_export_by_listing_id(db, listing_id)
+    existing_imodigi_id = existing.imodigi_property_id if existing else None
+
+    try:
+        imodigi_id, imodigi_ref, action = await export_listing(
+            listing,
+            client_id=client_id,
+            existing_imodigi_id=existing_imodigi_id,
+        )
+        status = "published" if action == "created" else "updated"
+        export_record = await upsert_export(
+            db,
+            listing_id=listing_id,
+            imodigi_property_id=imodigi_id,
+            imodigi_reference=imodigi_ref or (existing.imodigi_reference if existing else None),
+            imodigi_client_id=client_id,
+            status=status,
+            last_error=None,
+        )
+        await db.commit()
+        await db.refresh(export_record)
+        return export_record, action
+    except ImodigiError as exc:
+        await upsert_export(
+            db,
+            listing_id=listing_id,
+            imodigi_property_id=existing_imodigi_id,
+            imodigi_reference=existing.imodigi_reference if existing else None,
+            imodigi_client_id=client_id,
+            status="failed",
+            last_error=str(exc),
+        )
+        await db.commit()
+        raise
+
+
+async def list_export_records(
+    db: AsyncSession,
+    status: str | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[ImodigiExport], int]:
+    """List Imodigi export records with optional status filter."""
+    return await list_exports(db, status=status, page=page, page_size=page_size)
+
+
+async def get_export_record(
+    db: AsyncSession,
+    listing_id: UUID,
+) -> ImodigiExport:
+    """Get the Imodigi export record for a listing. Raises NotFoundError if absent."""
+    record = await get_export_by_listing_id(db, listing_id)
+    if not record:
+        raise NotFoundError(f"No Imodigi export found for listing {listing_id}")
+    return record

@@ -1,4 +1,4 @@
-﻿"""AI enrichment service for SEO title/description/meta_description generation."""
+﻿"""AI enrichment service — multi-locale SEO content generation."""
 import asyncio
 import time
 from collections import deque
@@ -16,16 +16,16 @@ from app.core.logging import get_logger
 from app.models.listing_model import Listing
 from app.repositories.listings_repository import ListingRepository
 from app.schemas.ai_enrichment_schema import (
-    AIEnrichmentFieldResult,
-    AIEnrichmentOutput,
-    AIListingEnrichmentRequest,
-    AIListingEnrichmentResponse,
-    AITextOptimizationResponse,
     BulkEnrichmentItemResult,
     BulkEnrichmentRequest,
     BulkEnrichmentResponse,
     EnrichmentSourceStats,
     EnrichmentStats,
+    ListingTranslationRequest,
+    ListingTranslationResponse,
+    LocaleEnrichmentOutput,
+    SupportedLocale,
+    _ALL_LOCALES,
 )
 
 logger = get_logger(__name__)
@@ -33,47 +33,6 @@ logger = get_logger(__name__)
 _AI_REQUEST_TIMESTAMPS = deque()
 _AI_RATE_LIMIT_LOCK = Lock()
 
-_SYSTEM_INSTRUCTION_SEO = """
-You are an expert in Real Estate Copywriting and SEO.
-Your mission is to transform technical property descriptions into persuasive, sales-driven texts that are fully optimized for search engines.
-
-LANGUAGE RULE (MANDATORY):
-You must ALWAYS respond in English, regardless of the language of the input.
-If the technical description, keywords, or any other input is provided in Portuguese or any other language, translate and process everything internally and respond exclusively in English.
-
-INPUT PROVIDED:
-- Technical description: {raw_description}
-- SEO keywords: {keywords}
-- Property type: {property_type}
-- Location: {location}
-
-WRITING RULES:
-- FORMAT: Use exclusively continuous prose organized in paragraphs. The use of lists or bullet points is strictly PROHIBITED.
-- LENGTH: The description must be strictly between 250 and 400 words. If the source text is longer, summarize — do not translate verbatim.
-- REWRITING: Do NOT translate the source text verbatim. Use it only as a factual reference. Rewrite entirely with fresh, original copywriting in English.
-- NARRATIVE STRUCTURE:
-    1. Introduction: Strong emotional hook with a clear mention of the location.
-    2. Development: Focus on comfort, design, and interior details.
-    3. Sustainability: Dedicated section translating technical specs (e.g. solar panels, insulation, energy efficiency) into tangible benefits (savings, thermal comfort, lower bills).
-    4. Closing: Outdoor areas followed by a generic Call-to-Action (CTA).
-- TONE OF VOICE: Professional, inspiring, and modern.
-- SEO: Integrate the provided keywords naturally into the text. Include at least one keyword in the first paragraph and one in the closing. Maximum 3 repetitions per keyword.
-- KEYWORDS TRANSLATION: If any keyword is a Portuguese real estate term (e.g. T1, T2, T3), translate it to its English equivalent (e.g. 1-bedroom, 2-bedroom, 3-bedroom) before integrating it into the text.
-- CONTENT FILTER: Ignore and exclude any agency-specific references found in the source text,
-  including but not limited to: agency names, contact invitations tied to a specific agency
-  (e.g. "Contact XYZ Imobiliária", "Call us at...", "Visit our website"),
-  promotional taglines, and agent names.
-  The closing CTA must be generic (e.g. "Schedule a viewing today", "Enquire now").
-
-OUTPUT RULES (JSON):
-Respond exclusively with valid JSON using the following keys — no markdown, no code blocks, no extra text.
-All JSON values must be written in English, even if the input was in another language:
-{
-    "title": "SEO title in English (max 60 characters)",
-    "description": "Full persuasive prose text in English (strictly 250-400 words)",
-    "meta_description": "Google summary — EXACTLY 140-155 characters, no more, no less"
-}
-""".strip()
 
 def _sanitize_keywords(keywords: Sequence[str]) -> list[str]:
     clean = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
@@ -86,21 +45,6 @@ def _sanitize_keywords(keywords: Sequence[str]) -> list[str]:
         seen.add(keyword.lower())
         unique.append(keyword)
     return unique
-
-
-def _build_prompt(content: str, keywords: Sequence[str]) -> str:
-    """Cria o prompt de dados (User Prompt) com o conteúdo e keywords."""
-    sanitized = _sanitize_keywords(keywords)
-    primary = sanitized[0] if sanitized else "Imóvel"
-    secondary = ", ".join(sanitized[1:]) if len(sanitized) > 1 else "Nenhuma"
-    
-    return f"""
-PALAVRA-CHAVE PRINCIPAL: {primary}
-PALAVRAS-CHAVE SECUNDÁRIAS: {secondary}
-
-CONTEÚDO DO IMÓVEL A PROCESSAR:
-{content}
-""".strip()
 
 
 def _check_ai_rate_limit(now: float | None = None) -> None:
@@ -124,37 +68,6 @@ def _check_ai_rate_limit(now: float | None = None) -> None:
 
         _AI_REQUEST_TIMESTAMPS.append(current_time)
 
-def _call_ai_for_seo(content: str, keywords: Sequence[str]) -> dict[str, Any]:
-    _check_ai_rate_limit()
-    prompt = _build_prompt(content, keywords)
-    return gemini_adapter.generate(
-        system_instruction=_SYSTEM_INSTRUCTION_SEO,
-        prompt=prompt,
-    )
-
-async def _call_ai_for_seo_async(content: str, keywords: Sequence[str]) -> dict[str, Any]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _call_ai_for_seo, content, keywords)
-
-def _normalize_output(payload: dict[str, Any]) -> AIEnrichmentOutput:
-    return AIEnrichmentOutput(
-        title=(payload.get("title") or payload.get("meta_title") or None),
-        description=(payload.get("description") or payload.get("enriched_description") or None),
-        meta_description=payload.get("meta_description") or None,
-    )
-
-
-def optimize_text_with_ai(content: str, keywords: Sequence[str]) -> AITextOptimizationResponse:
-    """AI optimization equivalent to previous `otimizar_para_seo` function."""
-    sanitized_keywords = _sanitize_keywords(keywords)
-    raw = _call_ai_for_seo(content, sanitized_keywords)
-    output = _normalize_output(raw)
-    return AITextOptimizationResponse(
-        model_used=settings.google_genai_model,
-        keywords_used=sanitized_keywords,
-        output=output,
-    )
-
 
 def infer_listing_keywords(listing: Listing) -> list[str]:
     """Infer SEO keywords from listing attributes when user does not provide any."""
@@ -168,155 +81,14 @@ def infer_listing_keywords(listing: Listing) -> list[str]:
     return _sanitize_keywords([part for part in derived if part])
 
 
-async def enrich_listing_with_ai(listing: Listing, payload: AIListingEnrichmentRequest) -> AIListingEnrichmentResponse:
-    """Apply AI SEO enrichment to selected listing fields.
-
-    Two fully separate paths:
-    - apply=False: call AI (respecting force / existing values), return preview. Nothing written to DB.
-    - apply=True:  persist the enriched_values supplied by the caller. AI is never called.
-    """
-    fields = payload.fields or ["title", "description", "meta_description"]
-
-    # original_values: the scraped baseline shown as "before" in the response.
-    original_values = {
-        "title": listing.title,
-        "description": listing.description or listing.raw_description,
-        "meta_description": listing.meta_description,
-    }
-
-    # Current AI-enriched values already stored in the DB.
-    destination_current_values = {
-        "title": listing.enriched_title,
-        "description": listing.enriched_description,
-        "meta_description": listing.enriched_meta_description,
-    }
-
-    keywords_used = _sanitize_keywords(payload.keywords) or infer_listing_keywords(listing)
-
-    # ------------------------------------------------------------------
-    # PATH A — apply=True: persist caller-supplied values, no AI call.
-    # ------------------------------------------------------------------
-    if payload.apply:
-        incoming = payload.enriched_values or {}
-        results: list[AIEnrichmentFieldResult] = []
-        for field in fields:
-            original = original_values.get(field)
-            new_value = incoming.get(field)
-            if new_value:
-                if field == "title":
-                    listing.enriched_title = new_value
-                elif field == "description":
-                    listing.enriched_description = new_value
-                elif field == "meta_description":
-                    listing.enriched_meta_description = new_value
-                changed = new_value.strip() != (original or "").strip()
-            else:
-                # Field not provided — keep whatever is already stored.
-                new_value = destination_current_values.get(field)
-                changed = False
-            results.append(AIEnrichmentFieldResult(
-                field=field,
-                original=original,
-                enriched=new_value,
-                changed=changed,
-            ))
-        return AIListingEnrichmentResponse(
-            listing_id=listing.id,
-            applied=True,
-            model_used=settings.google_genai_model,
-            keywords_used=keywords_used,
-            results=results,
-        )
-
-    # ------------------------------------------------------------------
-    # PATH B — apply=False: call AI, return preview. Nothing written to DB.
-    # ------------------------------------------------------------------
-
-    # Determine which fields actually need enriching before spending API quota.
-    fields_needing_enrichment = [
-        field for field in fields
-        if payload.force or not bool(
-            destination_current_values.get(field) and
-            str(destination_current_values[field]).strip()
-        )
-    ]
-
-    if not fields_needing_enrichment:
-        # All fields already have AI values and force=False — skip the API call.
-        results = [
-            AIEnrichmentFieldResult(
-                field=field,
-                original=original_values.get(field),
-                enriched=destination_current_values.get(field),
-                changed=False,
-            )
-            for field in fields
-        ]
-        return AIListingEnrichmentResponse(
-            listing_id=listing.id,
-            applied=False,
-            model_used=settings.google_genai_model,
-            keywords_used=keywords_used,
-            results=results,
-        )
-
-    # Always use the original scraped content as AI input to prevent drift.
-    source_content = "\n\n".join(
-        [
-            f"Título atual: {listing.title or ''}",
-            f"Descrição atual: {(listing.description or listing.raw_description or '')}",
-            f"Meta descrição atual: {listing.meta_description or ''}",
-        ]
-    ).strip()
-
-    raw = await _call_ai_for_seo_async(source_content, keywords_used)
-    output = _normalize_output(raw)
-
-    field_value_map = {
-        "title": output.title,
-        "description": output.description,
-        "meta_description": output.meta_description,
-    }
-
-    results = []
-    for field in fields:
-        original = original_values.get(field)
-        destination_current = destination_current_values.get(field)
-        already_has_value = bool(destination_current and destination_current.strip())
-        skip = not payload.force and already_has_value
-
-        if skip:
-            enriched = destination_current
-            changed = False
-        else:
-            enriched = field_value_map.get(field)
-            changed = (enriched or "") != (original or "")
-
-        results.append(AIEnrichmentFieldResult(
-            field=field,
-            original=original,
-            enriched=enriched,
-            changed=changed,
-        ))
-
-    return AIListingEnrichmentResponse(
-        listing_id=listing.id,
-        applied=False,
-        model_used=settings.google_genai_model,
-        keywords_used=keywords_used,
-        results=results,
-    )
-
-
 async def bulk_enrich_listings(
     listings: list[Listing],
     request: BulkEnrichmentRequest,
 ) -> BulkEnrichmentResponse:
-    """Enrich a batch of listings sequentially, respecting the rate limit.
+    """Enrich a batch of listings sequentially via the multi-locale translations endpoint.
 
-    Each listing is processed with apply=True so callers only need to commit
-    once after this function returns. Failed listings are recorded but do not
-    abort the rest of the batch.
+    Each listing is enriched and the result merged into enriched_translations.
+    Callers must commit the session after this function returns.
     """
     item_results: list[BulkEnrichmentItemResult] = []
     enriched_count = 0
@@ -324,56 +96,39 @@ async def bulk_enrich_listings(
     failed_count = 0
 
     for listing in listings:
-        # Generate preview (no DB write) — skips already-enriched fields.
-        preview_payload = AIListingEnrichmentRequest(
+        translate_payload = ListingTranslationRequest(
             listing_id=listing.id,
-            fields=request.fields or [],
+            locales=request.locales,
             keywords=request.keywords,
             apply=False,
-            force=False,
+            force=request.force,
         )
         try:
-            response = await enrich_listing_with_ai(listing, preview_payload)
+            response = await enrich_listing_translations(listing, translate_payload)
 
-            # Collect only the fields that the AI actually changed.
-            enriched_values = {
-                r.field: r.enriched
-                for r in response.results
-                if r.changed and r.enriched
-            }
-
-            if not enriched_values:
+            if not response.locales_generated:
                 skipped_count += 1
                 item_results.append(BulkEnrichmentItemResult(
                     listing_id=listing.id,
                     status="skipped",
-                    fields_changed=[],
+                    locales_generated=[],
                 ))
                 continue
 
             # Persist the generated values without re-calling AI.
-            apply_payload = AIListingEnrichmentRequest(
+            apply_payload = ListingTranslationRequest(
                 listing_id=listing.id,
-                fields=request.fields or [],
-                keywords=request.keywords,
+                locales=request.locales,
                 apply=True,
-                enriched_values=enriched_values,
+                translation_values=response.results,
             )
-            apply_response = await enrich_listing_with_ai(listing, apply_payload)
-            fields_changed = [r.field for r in apply_response.results if r.changed]
-            if fields_changed:
-                item_results.append(BulkEnrichmentItemResult(
-                    listing_id=listing.id,
-                    status="enriched",
-                    fields_changed=fields_changed,
-                ))
-                enriched_count += 1
-            else:
-                item_results.append(BulkEnrichmentItemResult(
-                    listing_id=listing.id,
-                    status="skipped",
-                ))
-                skipped_count += 1
+            await enrich_listing_translations(listing, apply_payload)
+            item_results.append(BulkEnrichmentItemResult(
+                listing_id=listing.id,
+                status="enriched",
+                locales_generated=response.locales_generated,
+            ))
+            enriched_count += 1
         except EnrichmentError as exc:
             logger.warning(
                 "Bulk enrichment failed for listing %s: %s",
@@ -398,14 +153,10 @@ async def bulk_enrich_listings(
 
 async def get_enrichment_stats(db: AsyncSession, source_partner: str | None) -> EnrichmentStats:
     """Aggregated enrichment statistics across all listings."""
-    _any_enriched = (
-        (Listing.enriched_title.isnot(None))
-        | (Listing.enriched_description.isnot(None))
-        | (Listing.enriched_meta_description.isnot(None))
-    )
+    _is_enriched = Listing.enriched_translations.isnot(None)
 
     total_query = select(func.count(Listing.id))
-    enriched_query = select(func.count(Listing.id)).where(_any_enriched)
+    enriched_query = select(func.count(Listing.id)).where(_is_enriched)
 
     if source_partner:
         total_query = total_query.where(Listing.source_partner == source_partner)
@@ -417,7 +168,7 @@ async def get_enrichment_stats(db: AsyncSession, source_partner: str | None) -> 
     by_source_query = select(
         Listing.source_partner,
         func.count(Listing.id).label("total"),
-        func.count(case((_any_enriched, 1))).label("enriched_count"),
+        func.count(case((_is_enriched, 1))).label("enriched_count"),
     ).group_by(Listing.source_partner)
 
     if source_partner:
@@ -444,11 +195,7 @@ async def get_listings_for_bulk_enrich(db: AsyncSession, payload: BulkEnrichment
     if payload.listing_ids:
         stmt = select(Listing).where(Listing.id.in_(payload.listing_ids))
     else:
-        unenriched_filter = (
-            Listing.enriched_title.is_(None)
-            & Listing.enriched_description.is_(None)
-            & Listing.enriched_meta_description.is_(None)
-        )
+        unenriched_filter = Listing.enriched_translations.is_(None)
         stmt = select(Listing).where(unenriched_filter)
         if payload.source_partner:
             stmt = stmt.where(Listing.source_partner == payload.source_partner)
@@ -457,20 +204,205 @@ async def get_listings_for_bulk_enrich(db: AsyncSession, payload: BulkEnrichment
     return (await db.execute(stmt)).scalars().all()
 
 
-async def enrich_and_persist(
+_LOCALE_NAMES: dict[str, str] = {
+    "en": "English",
+    "pt": "European Portuguese",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+}
+
+_SYSTEM_INSTRUCTION_MULTILANG = """
+You are an expert in Real Estate Copywriting and multilingual SEO.
+Your mission is to generate persuasive, search-engine-optimised property descriptions
+independently in each requested language, working directly from the original property data.
+
+LANGUAGE RULE (MANDATORY):
+Generate each locale's content natively in that language, using the original scraped data
+as the factual source. Do NOT translate from English — write each language independently and naturally.
+
+INPUT PROVIDED:
+- Original data: {raw_data}
+- SEO keywords: {keywords}
+- Requested locales: {locales}
+
+WRITING RULES (apply identically to every locale):
+- FORMAT: Use exclusively continuous prose in paragraphs. Lists or bullet points are PROHIBITED.
+- LENGTH: The description must be strictly between 250 and 400 words.
+- REWRITING: Use the source data as a factual reference only. Rewrite with fresh, original copywriting.
+- NARRATIVE STRUCTURE:
+    1. Introduction: Emotional hook with the location.
+    2. Development: Comfort, design, and interior details.
+    3. Sustainability/Features: Translate technical specs into tangible benefits.
+    4. Closing: Outdoor areas + generic Call-to-Action appropriate for the target language.
+- TONE OF VOICE: Professional, inspiring, and modern.
+- SEO: Integrate provided keywords naturally. At least one in the first paragraph and one in the closing.
+- REAL ESTATE TERMS: Translate Portuguese terms (T1, T2, T3) to the target language equivalent
+  (e.g. "1-bedroom apartment" in English, "appartement 1 chambre" in French, "1-Zimmer-Wohnung" in German, "apartamento de 1 dormitorio" in Spanish).
+- CONTENT FILTER: Exclude all agency-specific references (names, contacts, taglines).
+  The CTA must be generic and culturally appropriate to the target language.
+
+OUTPUT RULES (JSON):
+Respond exclusively with valid JSON. Keys are the locale codes requested.
+Each locale object must have exactly these three keys: title, description, meta_description.
+No markdown, no code blocks, no extra text outside the JSON object.
+{
+    "pt": {
+        "title": "SEO title in European Portuguese (max 60 characters)",
+        "description": "Full persuasive prose in European Portuguese (strictly 250-400 words)",
+        "meta_description": "Google summary in European Portuguese — EXACTLY 140-155 characters"
+    },
+    "es": { ... },
+    "fr": { ... },
+    "de": { ... }
+}
+Only include locale keys that were requested.
+""".strip()
+
+
+def _build_multilang_prompt(listing: "Listing", keywords: list[str], locales: list[str]) -> str:
+    """Build the data prompt for multi-locale generation."""
+    locale_labels = ", ".join(f"{loc} ({_LOCALE_NAMES.get(loc, loc)})" for loc in locales)
+    sanitized = _sanitize_keywords(keywords)
+    kw_str = ", ".join(sanitized) if sanitized else "None provided"
+
+    raw_data_parts = [
+        f"Title: {listing.title or ''}",
+        f"Property type: {listing.property_type or ''}",
+        f"Typology: {listing.typology or ''}",
+        f"Bedrooms: {listing.bedrooms or ''}",
+        f"Bathrooms: {listing.bathrooms or ''}",
+        f"Price: {listing.price_amount or ''} {listing.price_currency or ''}",
+        f"Area (useful): {listing.area_useful_m2 or ''} m²",
+        f"District: {listing.district or ''}",
+        f"County: {listing.county or ''}",
+        f"Parish: {listing.parish or ''}",
+        f"Energy certificate: {listing.energy_certificate or ''}",
+        f"Features: garage={listing.has_garage}, pool={listing.has_pool}, "
+        f"elevator={listing.has_elevator}, balcony={listing.has_balcony}",
+        f"Description: {listing.description or listing.raw_description or ''}",
+    ]
+    raw_data = "\n".join(raw_data_parts)
+
+    system = _SYSTEM_INSTRUCTION_MULTILANG.replace("{raw_data}", raw_data).replace(
+        "{keywords}", kw_str
+    ).replace("{locales}", locale_labels)
+
+    return system
+
+
+def _call_ai_for_translations(listing: "Listing", keywords: list[str], locales: list[str]) -> dict[str, Any]:
+    _check_ai_rate_limit()
+    system = _build_multilang_prompt(listing, keywords, locales)
+    # The user prompt is minimal — all context is in the system instruction.
+    prompt = f"Generate SEO content for the following locales: {', '.join(locales)}"
+    return gemini_adapter.generate(system_instruction=system, prompt=prompt)
+
+
+async def _call_ai_for_translations_async(
+    listing: "Listing", keywords: list[str], locales: list[str]
+) -> dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _call_ai_for_translations, listing, keywords, locales)
+
+
+def _parse_locale_output(raw: dict[str, Any], locale: str) -> LocaleEnrichmentOutput:
+    data = raw.get(locale) or {}
+    return LocaleEnrichmentOutput(
+        title=data.get("title") or None,
+        description=data.get("description") or None,
+        meta_description=data.get("meta_description") or None,
+    )
+
+
+async def enrich_listing_translations(
+    listing: "Listing",
+    payload: ListingTranslationRequest,
+) -> ListingTranslationResponse:
+    """Generate (or persist) multi-locale SEO content for a listing.
+
+    Two paths:
+    - apply=False: call AI for requested locales (respecting force / existing values), return preview.
+    - apply=True:  persist caller-supplied translation_values without any AI call.
+    """
+    requested_locales: list[str] = list(payload.locales)
+    keywords_used = _sanitize_keywords(payload.keywords) or infer_listing_keywords(listing)
+
+    # Existing stored translations (may be None or partial dict).
+    stored: dict[str, Any] = listing.enriched_translations or {}
+
+    # ------------------------------------------------------------------
+    # PATH A — apply=True: persist caller-supplied values, no AI call.
+    # ------------------------------------------------------------------
+    if payload.apply:
+        incoming = payload.translation_values or {}
+        merged = dict(stored)
+        for locale, locale_output in incoming.items():
+            merged[locale] = locale_output.model_dump(exclude_none=True)
+        listing.enriched_translations = merged
+
+        results = {
+            locale: LocaleEnrichmentOutput.model_validate(merged.get(locale, {}))
+            for locale in requested_locales
+        }
+        return ListingTranslationResponse(
+            listing_id=listing.id,
+            applied=True,
+            model_used=settings.google_genai_model,
+            keywords_used=keywords_used,
+            locales_generated=list(incoming.keys()),
+            locales_cached=[loc for loc in requested_locales if loc not in incoming],
+            results=results,
+        )
+
+    # ------------------------------------------------------------------
+    # PATH B — apply=False: determine which locales need generation.
+    # ------------------------------------------------------------------
+    locales_to_generate: list[str] = []
+    locales_cached: list[str] = []
+
+    for locale in requested_locales:
+        existing = stored.get(locale)
+        has_content = bool(existing and any(existing.get(f) for f in ("title", "description", "meta_description")))
+        if payload.force or not has_content:
+            locales_to_generate.append(locale)
+        else:
+            locales_cached.append(locale)
+
+    results: dict[str, LocaleEnrichmentOutput] = {}
+
+    # Reuse cached locales immediately.
+    for locale in locales_cached:
+        results[locale] = LocaleEnrichmentOutput.model_validate(stored.get(locale, {}))
+
+    # Generate missing locales in one single AI call.
+    if locales_to_generate:
+        raw = await _call_ai_for_translations_async(listing, keywords_used, locales_to_generate)
+        for locale in locales_to_generate:
+            results[locale] = _parse_locale_output(raw, locale)
+
+    return ListingTranslationResponse(
+        listing_id=listing.id,
+        applied=False,
+        model_used=settings.google_genai_model,
+        keywords_used=keywords_used,
+        locales_generated=locales_to_generate,
+        locales_cached=locales_cached,
+        results=results,
+    )
+
+
+async def enrich_translations_and_persist(
     db: AsyncSession,
     listing_id: UUID,
-    payload: AIListingEnrichmentRequest,
-) -> AIListingEnrichmentResponse:
-    """Fetch a listing by ID, enrich it, and optionally commit.
-
-    Raises NotFoundError if the listing does not exist.
-    """
+    payload: ListingTranslationRequest,
+) -> ListingTranslationResponse:
+    """Fetch a listing by ID, run translation enrichment, and optionally commit."""
     listing = await ListingRepository.get_listing_by_id(db, listing_id)
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
 
-    response = await enrich_listing_with_ai(listing, payload)
+    response = await enrich_listing_translations(listing, payload)
     if payload.apply:
         await db.commit()
     return response

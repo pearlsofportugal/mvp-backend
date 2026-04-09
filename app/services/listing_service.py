@@ -79,7 +79,7 @@ class ListingService:
                 ListingSearchItem(
                     id=listing.id,
                     source_partner=listing.source_partner,
-                    title=listing.enriched_title or listing.title,
+                    title=((listing.enriched_translations or {}).get("en") or {}).get("title") or listing.title,
                     property_type=listing.property_type,
                     typology=listing.typology,
                     bedrooms=listing.bedrooms,
@@ -90,11 +90,7 @@ class ListingService:
                     price_currency=listing.price_currency,
                     listing_type=listing.listing_type,
                     thumbnail_url=thumbnail_url,
-                    is_enriched=bool(
-                        listing.enriched_title
-                        or listing.enriched_description
-                        or listing.enriched_meta_description
-                    ),
+                    is_enriched=bool(listing.enriched_translations),
                 )
             )
         pages = math.ceil(total / page_size) if total > 0 else 0

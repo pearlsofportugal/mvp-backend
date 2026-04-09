@@ -6,119 +6,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field, model_validator
 
 
-AIEnrichmentTargetField = Literal["title", "description", "meta_description"]
-
-
-# ---------------------------------------------------------------------------
-# Requests
-# ---------------------------------------------------------------------------
-
-class AITextOptimizationRequest(BaseModel):
-    """Optimize free text using AI with optional SEO keyword guidance."""
-
-    content: str = Field(..., min_length=5, description="Original text content to optimize.")
-    keywords: list[str] = Field(
-        default_factory=list,
-        description="SEO keywords; the first entry is treated as the primary keyword.",
-    )
-    fields: list[AIEnrichmentTargetField] = Field(
-        default_factory=lambda: ["title", "description", "meta_description"],
-        description="Output fields to generate. Defaults to all three.",
-    )
-
-    @model_validator(mode="after")
-    def fields_must_not_be_empty(self) -> "AITextOptimizationRequest":
-        if not self.fields:
-            raise ValueError("At least one target field must be specified.")
-        return self
-
-
-class AIListingEnrichmentRequest(BaseModel):
-    """AI enrichment request targeting an existing listing by ID."""
-
-    listing_id: UUID = Field(..., description="ID of the listing to enrich.")
-    fields: list[AIEnrichmentTargetField] = Field(
-        default_factory=list,
-        description="Listing fields to enrich. If empty, all fields are enriched.",
-    )
-    keywords: list[str] = Field(
-        default_factory=list,
-        description="Custom SEO keywords. If empty, keywords are inferred from the listing.",
-    )
-    apply: bool = Field(
-        False,
-        description=(
-            "When True, persists enriched_values to the database. "
-            "AI is never called in this mode — enriched_values must be supplied."
-        ),
-    )
-    force: bool = Field(
-        False,
-        description=(
-            "Only meaningful when apply=False. "
-            "When True, calls the AI even if target fields already have enriched values."
-        ),
-    )
-    enriched_values: dict[str, str] | None = Field(
-        None,
-        description=(
-            "Pre-computed enriched values to persist. "
-            "Required when apply=True. Keys must be valid AIEnrichmentTargetField names."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def validate_apply_has_values(self) -> "AIListingEnrichmentRequest":
-        if self.apply and not self.enriched_values:
-            raise ValueError(
-                "enriched_values must be provided when apply=True. "
-                "Call with apply=False first to obtain the AI-generated content, "
-                "then send it back with apply=True to persist."
-            )
-        return self
-
-
-# ---------------------------------------------------------------------------
-# Output / results
-# ---------------------------------------------------------------------------
-
-class AIEnrichmentOutput(BaseModel):
-    """AI-generated SEO content for a listing."""
-
-    title: str | None = Field(None, description="Optimised listing title.")
-    description: str | None = Field(None, description="Enriched listing description.")
-    meta_description: str | None = Field(None, description="SEO meta description (≤160 chars recommended).")
-
-
-class AIEnrichmentFieldResult(BaseModel):
-    """Before/after comparison for a single enriched field."""
-
-    field: AIEnrichmentTargetField = Field(..., description="The field that was enriched.")
-    original: str | None = Field(None, description="Value before enrichment.")
-    enriched: str | None = Field(None, description="Value after enrichment.")
-    changed: bool = Field(False, description="True when the enriched value differs from the original.")
-
-
-# ---------------------------------------------------------------------------
-# Responses
-# ---------------------------------------------------------------------------
-
-class AITextOptimizationResponse(BaseModel):
-    """Response for the free-text AI optimisation endpoint."""
-
-    model_used: str = Field(..., description="Identifier of the AI model used (e.g. 'gpt-4o').")
-    keywords_used: list[str] = Field(default_factory=list, description="Keywords that guided the optimisation.")
-    output: AIEnrichmentOutput
-
-
-class AIListingEnrichmentResponse(BaseModel):
-    """Response for the listing AI enrichment endpoint."""
-
-    listing_id: UUID
-    applied: bool = Field(False, description="True when results were persisted to the database.")
-    model_used: str = Field(..., description="Identifier of the AI model used.")
-    keywords_used: list[str] = Field(default_factory=list, description="Keywords that guided the enrichment.")
-    results: list[AIEnrichmentFieldResult] = Field(default_factory=list, description="Per-field before/after results.")
+SupportedLocale = Literal["en", "pt", "es", "fr", "de"]
+_ALL_LOCALES: list[SupportedLocale] = ["en", "pt", "es", "fr", "de"]
 
 
 # ---------------------------------------------------------------------------
@@ -162,15 +51,15 @@ class EnrichmentStats(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BulkEnrichmentRequest(BaseModel):
-    """Request to enrich multiple listings in one call."""
+    """Request to enrich multiple listings in one bulk call."""
 
     listing_ids: list[UUID] = Field(
         default_factory=list,
         description="Explicit list of listing IDs to enrich. If empty, enrich all unenriched listings.",
     )
-    fields: list[AIEnrichmentTargetField] = Field(
-        default_factory=list,
-        description="Fields to enrich. Defaults to all three.",
+    locales: list[SupportedLocale] = Field(
+        default_factory=lambda: list(_ALL_LOCALES),
+        description="Target locales to generate. Defaults to all supported locales.",
     )
     keywords: list[str] = Field(
         default_factory=list,
@@ -178,7 +67,7 @@ class BulkEnrichmentRequest(BaseModel):
     )
     force: bool = Field(
         False,
-        description="When True, regenerates output even if target fields already have values.",
+        description="When True, regenerates locales even if they already have stored translations.",
     )
     source_partner: str | None = Field(
         None,
@@ -197,7 +86,7 @@ class BulkEnrichmentItemResult(BaseModel):
 
     listing_id: UUID
     status: str = Field(..., description="'enriched', 'skipped', or 'error'")
-    fields_changed: list[AIEnrichmentTargetField] = Field(default_factory=list)
+    locales_generated: list[SupportedLocale] = Field(default_factory=list)
     error: str | None = Field(None, description="Error message when status is 'error'.")
 
 
@@ -209,3 +98,102 @@ class BulkEnrichmentResponse(BaseModel):
     skipped: int = Field(..., ge=0)
     failed: int = Field(..., ge=0)
     results: list[BulkEnrichmentItemResult] = Field(default_factory=list)
+
+
+class BulkEnrichmentResponse(BaseModel):
+    """Aggregated result of a bulk enrichment operation."""
+
+    total_requested: int = Field(..., ge=0)
+    enriched: int = Field(..., ge=0)
+    skipped: int = Field(..., ge=0)
+    failed: int = Field(..., ge=0)
+    results: list[BulkEnrichmentItemResult] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Multi-locale translation enrichment
+# ---------------------------------------------------------------------------
+
+class LocaleEnrichmentOutput(BaseModel):
+    """AI-generated SEO content for a single locale."""
+
+    title: str | None = Field(None, description="Optimised listing title.")
+    description: str | None = Field(None, description="Enriched listing description.")
+    meta_description: str | None = Field(None, description="SEO meta description (≤160 chars recommended).")
+
+
+class ListingTranslationRequest(BaseModel):
+    """Request to generate multi-locale SEO content from original scraped data."""
+
+    listing_id: UUID = Field(..., description="ID of the listing to translate/enrich.")
+    locales: list[SupportedLocale] = Field(
+        default_factory=lambda: list(_ALL_LOCALES),
+        description="Target locales. Defaults to all supported: pt, es, fr, de.",
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Custom SEO keywords. If empty, keywords are inferred from the listing.",
+    )
+    force: bool = Field(
+        False,
+        description="When True, regenerates locales that already have stored translations.",
+    )
+    apply: bool = Field(
+        False,
+        description=(
+            "When True, persists translation_values to the database. "
+            "AI is never called in this mode — translation_values must be supplied."
+        ),
+    )
+    translation_values: dict[str, LocaleEnrichmentOutput] | None = Field(
+        None,
+        description=(
+            "Pre-computed locale outputs to persist. Required when apply=True. "
+            "Keys must be valid SupportedLocale codes."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_locales_not_empty(self) -> "ListingTranslationRequest":
+        if not self.locales:
+            raise ValueError("At least one locale must be specified.")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_apply_has_values(self) -> "ListingTranslationRequest":
+        if self.apply and not self.translation_values:
+            raise ValueError(
+                "translation_values must be provided when apply=True. "
+                "Call with apply=False first to obtain AI-generated content, "
+                "then send it back with apply=True to persist."
+            )
+        return self
+
+
+class LocaleTranslationResult(BaseModel):
+    """Before/after result for a single locale."""
+
+    locale: SupportedLocale
+    output: LocaleEnrichmentOutput
+    already_existed: bool = Field(False, description="True when the locale was already stored and force=False was used.")
+
+
+class ListingTranslationResponse(BaseModel):
+    """Response for the multi-locale translation enrichment endpoint."""
+
+    listing_id: UUID
+    applied: bool = Field(False, description="True when results were persisted to the database.")
+    model_used: str = Field(..., description="Identifier of the AI model used.")
+    keywords_used: list[str] = Field(default_factory=list)
+    locales_generated: list[SupportedLocale] = Field(
+        default_factory=list,
+        description="Locales for which new content was generated (not reused from cache).",
+    )
+    locales_cached: list[SupportedLocale] = Field(
+        default_factory=list,
+        description="Locales reused from existing stored translations (force=False).",
+    )
+    results: dict[str, LocaleEnrichmentOutput] = Field(
+        default_factory=dict,
+        description="Full output keyed by locale code.",
+    )

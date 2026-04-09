@@ -1,8 +1,5 @@
-﻿"""AI enrichment API router — optimize text and selected listing fields with AI.
+﻿"""AI enrichment API router — multi-locale SEO content generation.
 /api/v1/enrichment/ai"""
-
-import asyncio
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,46 +7,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db
 from app.api.responses import ok, ERROR_RESPONSES
 from app.schemas.ai_enrichment_schema import (
-    AIEnrichmentOutput,
-    AIListingEnrichmentRequest,
-    AIListingEnrichmentResponse,
-    AITextOptimizationRequest,
-    AITextOptimizationResponse,
     BulkEnrichmentRequest,
     BulkEnrichmentResponse,
     EnrichmentStats,
+    ListingTranslationRequest,
+    ListingTranslationResponse,
 )
 from app.schemas.base_schema import ApiResponse
 from app.services.ai_enrichment_service import (
     bulk_enrich_listings,
-    enrich_and_persist,
+    enrich_translations_and_persist,
     get_enrichment_stats,
     get_listings_for_bulk_enrich,
-    optimize_text_with_ai,
 )
 
 router = APIRouter()
-
-
-@router.post("/optimize", response_model=ApiResponse[AITextOptimizationResponse], responses=ERROR_RESPONSES, operation_id="optimize_text")
-async def optimize_text(payload: AITextOptimizationRequest, request: Request):
-    """Optimize free text with AI SEO logic."""
-    result = await asyncio.to_thread(optimize_text_with_ai, payload.content, payload.keywords)
-    if payload.fields:
-        filtered = result.output.model_dump(include=set(payload.fields))
-        result.output = AIEnrichmentOutput.model_validate(filtered)
-    return ok(result, "Text optimized successfully", request)
-
-
-@router.post("/enhance", response_model=ApiResponse[AIListingEnrichmentResponse], responses=ERROR_RESPONSES, operation_id="enhance_listing")
-async def enhance_listing(
-    payload: AIListingEnrichmentRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    """Enrich selected listing fields (title/description/meta_description) using AI."""
-    response = await enrich_and_persist(db, payload.listing_id, payload)
-    return ok(response, "Listing enriched successfully", request)
 
 
 @router.get("/stats", response_model=ApiResponse[EnrichmentStats], responses=ERROR_RESPONSES, operation_id="enrichment_stats")
@@ -69,7 +41,7 @@ async def bulk_enrich(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Enrich multiple listings in one call.
+    """Enrich multiple listings in one call using the multi-locale translations endpoint.
 
     When ``listing_ids`` is provided, only those listings are processed.
     Otherwise, all unenriched listings (optionally filtered by ``source_partner``)
@@ -79,3 +51,33 @@ async def bulk_enrich(
     response = await bulk_enrich_listings(list(listings), payload)
     await db.commit()
     return ok(response, f"{response.enriched} listing(s) enriched, {response.skipped} skipped, {response.failed} failed", request)
+
+
+@router.post(
+    "/translations",
+    response_model=ApiResponse[ListingTranslationResponse],
+    responses=ERROR_RESPONSES,
+    operation_id="translate_listing",
+)
+async def translate_listing(
+    payload: ListingTranslationRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate multi-locale SEO content (EN, PT, ES, FR, DE) from original scraped data.
+
+    All locales are generated independently in a single AI call — no chaining between languages.
+
+    - **apply=False** (default): AI is called for locales that do not already have stored content.
+      Returns a preview without writing to the database.
+    - **apply=True**: Persists the ``translation_values`` provided by the caller.
+      AI is NOT called in this path — supply the output from a prior apply=False call.
+    - **force=True**: Regenerates locales even if they already have stored translations.
+    """
+    response = await enrich_translations_and_persist(db, payload.listing_id, payload)
+    message = (
+        f"Translations applied for locales: {', '.join(response.locales_generated)}"
+        if response.applied
+        else f"Translations generated for: {', '.join(response.locales_generated) or 'none (all cached)'}"
+    )
+    return ok(response, message, request)

@@ -107,11 +107,12 @@ class ListingBase(BaseModel):
     # ── Content ───────────────────────────────────────────────────────────
     raw_description: str | None = Field(None, description="Raw description as scraped (unprocessed).")
     description: str | None = Field(None, description="Cleaned / normalised description.")
-    enriched_title: str | None = Field(None, description="AI-enriched SEO title.")
-    enriched_description: str | None = Field(None, description="AI-enriched description.")
-    enriched_meta_description: str | None = Field(None, description="AI-enriched meta description.")
     description_quality_score: int | None = Field(None, ge=0, le=100, description="AI quality score (0–100).")
     meta_description: str | None = Field(None, description="SEO meta description (scraped).")
+    enriched_translations: dict | None = Field(
+        None,
+        description="AI-generated SEO content per locale: {\"en\": {title, description, meta_description}, \"pt\": {...}, ...}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +171,8 @@ class ListingUpdate(BaseModel):
     advertiser: str | None = None
     contacts: str | None = None
     description: str | None = None
-    enriched_title: str | None = None
-    enriched_description: str | None = None
-    enriched_meta_description: str | None = None
     description_quality_score: int | None = Field(None, ge=0, le=100)
     meta_description: str | None = None
-
 
 # ---------------------------------------------------------------------------
 # Read (detail)
@@ -202,28 +199,24 @@ class ListingDetailRead(ListingBase):
     price_history: list[PriceHistoryRead] = Field(default_factory=list)
     is_enriched: bool = Field(
         False,
-        description="True when any AI-enriched field (title, description, or meta_description) is present.",
+        description="True when enriched_translations contains at least one locale.",
     )
 
     # Exclude scraper-internal fields from API responses
     raw_description: str | None = Field(None, exclude=True)
-    # Exclude enriched fields — substituted into canonical fields by the validator below
-    enriched_title: str | None = Field(None, exclude=True)
-    enriched_description: str | None = Field(None, exclude=True)
-    enriched_meta_description: str | None = Field(None, exclude=True)
 
     @model_validator(mode="after")
     def _apply_enriched_values(self) -> "ListingDetailRead":
-        """Transparently substitute enriched AI values into the canonical fields."""
-        if self.enriched_title:
-            self.title = self.enriched_title
-        if self.enriched_description:
-            self.description = self.enriched_description
-        if self.enriched_meta_description:
-            self.meta_description = self.enriched_meta_description
-        self.is_enriched = bool(
-            self.enriched_title or self.enriched_description or self.enriched_meta_description
-        )
+        """Mark is_enriched and transparently apply EN translations to canonical fields."""
+        translations: dict = self.enriched_translations or {}
+        self.is_enriched = bool(translations)
+        en = translations.get("en") or {}
+        if en.get("title"):
+            self.title = en["title"]
+        if en.get("description"):
+            self.description = en["description"]
+        if en.get("meta_description"):
+            self.meta_description = en["meta_description"]
         return self
 
 
@@ -241,8 +234,8 @@ class ListingListRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    # enriched_title is excluded from output — applied to title by the validator below
-    enriched_title: str | None = Field(None, exclude=True)
+    # enriched_translations is excluded from compact output — EN title applied by validator
+    enriched_translations: dict | None = Field(None, exclude=True)
     title: str | None = None
     source_partner: str
     listing_type: Literal["sale", "rent"] | None = None
@@ -262,8 +255,9 @@ class ListingListRead(BaseModel):
 
     @model_validator(mode="after")
     def _apply_enriched_title(self) -> "ListingListRead":
-        if self.enriched_title:
-            self.title = self.enriched_title
+        en_title = ((self.enriched_translations or {}).get("en") or {}).get("title")
+        if en_title:
+            self.title = en_title
         return self
 
 

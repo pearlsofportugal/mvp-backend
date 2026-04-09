@@ -19,11 +19,14 @@ from app.schemas.site_config_schema import (
     SiteConfigSuggestRequest,
     SiteConfigSuggestResponse,
     SiteConfigUpdate,
+    TestListingPageRequest,
+    TestListingPageResponse,
     TestScrapeRequest,
     TestScrapeResponse,
 )
 from app.services.selector_validation_service import validate_selectors
 from app.services.site_config_service import SiteConfigService
+from app.services.test_listing_page_service import run_test_listing_page
 from app.services.test_scrape_service import run_test_scrape
 
 router = APIRouter()
@@ -143,6 +146,34 @@ async def test_scrape_site(
     site = await SiteConfigService.get_by_key(db, key)
     result = await run_test_scrape(site, str(payload.url))
     return ok(result, "Test scrape completed", request)
+
+
+@router.post(
+    "/{key}/test-listing-page",
+    response_model=ApiResponse[TestListingPageResponse],
+    responses=ERROR_RESPONSES,
+    operation_id="test_listing_page_site",
+)
+async def test_listing_page_site(
+    key: str,
+    payload: TestListingPageRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Test a listing/search results page using the site's current configuration.
+
+    Fetches the page, extracts listing links via the site's ``listing_link_selector``,
+    separates them into matched/rejected based on ``link_pattern``, detects the
+    next page URL, and optionally samples thumbnail images.
+
+    ``link_pattern`` and ``thumbnail_selector`` in the request body override the
+    site's saved values when provided.
+
+    Nothing is written to the database.
+    """
+    site = await SiteConfigService.get_by_key(db, key)
+    result = await run_test_listing_page(site, payload)
+    return ok(result, "Listing page test completed", request)
 
 
 @router.post(

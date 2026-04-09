@@ -85,9 +85,9 @@ class ListingRepository:
         if source_partner:
             stmt = stmt.where(Listing.source_partner == source_partner)
         if is_enriched is True:
-            stmt = stmt.where(Listing.enriched_description.isnot(None))
+            stmt = stmt.where(Listing.enriched_translations.isnot(None))
         elif is_enriched is False:
-            stmt = stmt.where(Listing.enriched_description.is_(None))
+            stmt = stmt.where(Listing.enriched_translations.is_(None))
 
         total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
         stmt = (

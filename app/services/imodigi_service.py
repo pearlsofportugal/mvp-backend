@@ -149,19 +149,39 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
         payload["energy"] = {"class": listing.energy_certificate}
 
     # Images
-    # if listing.media_assets:
-        # payload["images"] = [a.url for a in listing.media_assets if a.url]
+    if listing.media_assets:
+        payload["images"] = [a.url for a in listing.media_assets if a.url]
 
-    # Translations
-    translation_en: dict[str, str] = {}
-    if listing.title:
-        translation_en["title"] = listing.title
-    if listing.description:
-        translation_en["description"] = listing.description
-    if listing.meta_description:
-        translation_en["shortDescription"] = listing.meta_description
-    if translation_en:
-        payload["translations"] = {"en": translation_en}
+    # Translations — built from enriched_translations (all locales), EN falls back to canonical fields
+    translations: dict[str, dict[str, str]] = {}
+    enriched: dict = listing.enriched_translations or {}
+
+    for locale, locale_data in enriched.items():
+        if not isinstance(locale_data, dict):
+            continue
+        entry: dict[str, str] = {}
+        if locale_data.get("title"):
+            entry["title"] = locale_data["title"]
+        if locale_data.get("description"):
+            entry["description"] = locale_data["description"]
+        if locale_data.get("meta_description"):
+            entry["shortDescription"] = locale_data["meta_description"]
+        if entry:
+            translations[locale] = entry
+
+    if "en" not in translations:
+        entry_en: dict[str, str] = {}
+        if listing.title:
+            entry_en["title"] = listing.title
+        if listing.description:
+            entry_en["description"] = listing.description
+        if listing.meta_description:
+            entry_en["shortDescription"] = listing.meta_description
+        if entry_en:
+            translations["en"] = entry_en
+
+    if translations:
+        payload["translations"] = translations
 
     return payload
 
@@ -200,18 +220,27 @@ async def search_locations(
     )
 
 
-async def create_property(client_id: int, property_payload: dict[str, Any]) -> dict[str, Any]:
+async def create_property(
+    client_id: int,
+    property_payload: dict[str, Any],
+    *,
+    images: list[str] | None = None,
+    translations: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """POST /crm-properties.php — create a new property. Returns full response body."""
-    return await imodigi_adapter.create_property(client_id, property_payload)
+    return await imodigi_adapter.create_property(client_id, property_payload, images=images, translations=translations)
 
 
 async def update_property(
     client_id: int,
     imodigi_property_id: int,
     property_payload: dict[str, Any],
+    *,
+    images: list[str] | None = None,
+    translations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """PATCH /crm-properties.php — update an existing property."""
-    return await imodigi_adapter.update_property(client_id, imodigi_property_id, property_payload)
+    return await imodigi_adapter.update_property(client_id, imodigi_property_id, property_payload, images=images, translations=translations)
 
 
 async def export_listing(
@@ -226,14 +255,17 @@ async def export_listing(
     where action is 'created' or 'updated'.
     """
     payload = build_property_payload(listing)
+    # Extract top-level fields before sending property payload
+    images: list[str] | None = payload.pop("images", None)
+    translations: dict[str, Any] | None = payload.pop("translations", None)
 
     if existing_imodigi_id is None:
         logger.info("Creating new imodigi property for listing %s", listing.id)
-        result = await create_property(client_id, payload)
+        result = await create_property(client_id, payload, images=images, translations=translations)
         return result.get("property"), result.get("reference"), "created"
 
     logger.info("Updating imodigi property %d for listing %s", existing_imodigi_id, listing.id)
-    await update_property(client_id, existing_imodigi_id, payload)
+    await update_property(client_id, existing_imodigi_id, payload, images=images, translations=translations)
     return existing_imodigi_id, None, "updated"
 
 

@@ -253,3 +253,35 @@ class TestScrapeResponse(BaseModel):
         description="Critical fields (title, price, property_type, district) absent in the raw output.",
     )
     error: str | None = Field(None, description="Set when the fetch or parse failed entirely.")
+
+
+# ---------------------------------------------------------------------------
+# Test listing page
+# ---------------------------------------------------------------------------
+
+class TestListingPageRequest(BaseModel):
+    """Request payload for testing a listing/search results page."""
+
+    url: AnyHttpUrl = Field(..., description="URL of a listing/search results page.")
+    link_pattern: str | None = Field(
+        None,
+        description="Regex to test against found links. Overrides the site's saved link_pattern when provided.",
+    )
+    thumbnail_selector: str | None = Field(
+        None,
+        description="CSS selector to extract thumbnail images from listing cards. Optional.",
+    )
+
+
+class TestListingPageResponse(BaseModel):
+    """Result of a test run against a listing/search results page."""
+
+    url: str
+    success: bool
+    links_found: int = Field(..., ge=0, description="Total hrefs extracted before applying link_pattern.")
+    links_matched: int = Field(..., ge=0, description="Links that matched link_pattern (or all links if no pattern).")
+    sample_matched: list[str] = Field(default_factory=list, description="Up to 5 matched listing URLs.")
+    sample_rejected: list[str] = Field(default_factory=list, description="Up to 5 URLs rejected by link_pattern.")
+    thumbnail_preview: list[str] = Field(default_factory=list, description="Up to 5 thumbnail URLs from thumbnail_selector.")
+    next_page_url: str | None = Field(None, description="Next page URL extracted via next_page_selector, if configured.")
+    error: str | None = None

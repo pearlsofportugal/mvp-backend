@@ -3,6 +3,7 @@
 Services interact only with GeminiAdapter; no service imports google.genai directly.
 """
 import json
+from threading import Lock
 from typing import Any
 
 from app.config import settings
@@ -12,18 +13,21 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 _client: Any = None
+_client_lock = Lock()
 
 
 def _get_client() -> Any:
     global _client
     if _client is None:
-        if not settings.google_genai_api_key:
-            raise EnrichmentError("google_genai_api_key is not configured")
-        try:
-            from google import genai  # type: ignore[import]
-            _client = genai.Client(api_key=settings.google_genai_api_key)
-        except ImportError as exc:
-            raise EnrichmentError("google-genai dependency is not available", detail=str(exc)) from exc
+        with _client_lock:
+            if _client is None:  # double-checked locking
+                if not settings.google_genai_api_key:
+                    raise EnrichmentError("google_genai_api_key is not configured")
+                try:
+                    from google import genai  # type: ignore[import]
+                    _client = genai.Client(api_key=settings.google_genai_api_key)
+                except ImportError as exc:
+                    raise EnrichmentError("google-genai dependency is not available", detail=str(exc)) from exc
     return _client
 
 

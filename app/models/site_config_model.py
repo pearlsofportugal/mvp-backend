@@ -28,6 +28,8 @@ class SiteConfig(Base):
     link_pattern: Mapped[str | None] = mapped_column(String(500))
     image_filter: Mapped[str | None] = mapped_column(String(500))
     image_exclude_filter: Mapped[str | None] = mapped_column(String(500))
+    request_headers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    use_js_render: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

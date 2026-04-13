@@ -38,7 +38,14 @@ class ListingRepository:
 
     @staticmethod
     async def get_listing_by_id(db: AsyncSession, listing_id: UUID) -> Listing | None:
-        result = await db.execute(select(Listing).where(Listing.id == listing_id))
+        result = await db.execute(
+            select(Listing)
+            .where(Listing.id == listing_id)
+            .options(
+                selectinload(Listing.media_assets),
+                selectinload(Listing.price_history),
+            )
+        )
         return result.scalar_one_or_none()
 
     @staticmethod

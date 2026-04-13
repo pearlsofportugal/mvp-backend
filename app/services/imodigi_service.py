@@ -28,7 +28,7 @@ from app.core.exceptions import ImodigiError, NotFoundError
 from app.core.logging import get_logger
 from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
-from app.repositories.imodigi_repository import get_export_by_listing_id, list_exports, upsert_export
+from app.repositories.imodigi_repository import ImodigiRepository
 
 logger = get_logger(__name__)
 
@@ -293,7 +293,7 @@ async def export_listing_to_crm(
     if not listing:
         raise NotFoundError(f"Listing {listing_id} not found")
 
-    existing = await get_export_by_listing_id(db, listing_id)
+    existing = await ImodigiRepository.get_export_by_listing_id(db, listing_id)
     existing_imodigi_id = existing.imodigi_property_id if existing else None
 
     try:
@@ -303,7 +303,7 @@ async def export_listing_to_crm(
             existing_imodigi_id=existing_imodigi_id,
         )
         status = "published" if action == "created" else "updated"
-        export_record = await upsert_export(
+        export_record = await ImodigiRepository.upsert_export(
             db,
             listing_id=listing_id,
             imodigi_property_id=imodigi_id,
@@ -316,7 +316,7 @@ async def export_listing_to_crm(
         await db.refresh(export_record)
         return export_record, action
     except ImodigiError as exc:
-        await upsert_export(
+        await ImodigiRepository.upsert_export(
             db,
             listing_id=listing_id,
             imodigi_property_id=existing_imodigi_id,
@@ -336,7 +336,7 @@ async def list_export_records(
     page_size: int,
 ) -> tuple[list[ImodigiExport], int]:
     """List Imodigi export records with optional status filter."""
-    return await list_exports(db, status=status, page=page, page_size=page_size)
+    return await ImodigiRepository.list_exports(db, status=status, page=page, page_size=page_size)
 
 
 async def get_export_record(
@@ -344,7 +344,7 @@ async def get_export_record(
     listing_id: UUID,
 ) -> ImodigiExport:
     """Get the Imodigi export record for a listing. Raises NotFoundError if absent."""
-    record = await get_export_by_listing_id(db, listing_id)
+    record = await ImodigiRepository.get_export_by_listing_id(db, listing_id)
     if not record:
         raise NotFoundError(f"No Imodigi export found for listing {listing_id}")
     return record

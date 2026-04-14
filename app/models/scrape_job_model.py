@@ -9,6 +9,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
+_MAX_LOG_ENTRIES = 500
+_MAX_URL_ENTRIES = 2000
+
 
 class ScrapeJob(Base):
     __tablename__ = "scrape_jobs"
@@ -123,26 +126,30 @@ class ScrapeJob(Base):
         """Add a log entry. Level: 'error', 'warning', 'info'."""
         if self.logs is None:
             self.logs = {"errors": [], "warnings": [], "info": []}
-        
-        log_entry = {
+
+        bucket_key = f"{level}s" if not level.endswith("s") else level
+        bucket: list = self.logs.setdefault(bucket_key, [])
+        if len(bucket) >= _MAX_LOG_ENTRIES:
+            return
+
+        log_entry: dict = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "message": message,
         }
         if url:
             log_entry["url"] = url
-        
-        if level in self.logs:
-            self.logs[level].append(log_entry)
-        else:
-            self.logs[level] = [log_entry]
+
+        bucket.append(log_entry)
+        self.logs[bucket_key] = bucket
 
     def add_url(self, status: str, url: str) -> None:
         """Track URLs. Status: 'found', 'scraped', 'failed'."""
         if self.urls is None:
             self.urls = {"found": [], "scraped": [], "failed": []}
-        
-        if status in self.urls:
-            if url not in self.urls[status]:
-                self.urls[status].append(url)
-        else:
-            self.urls[status] = [url]
+
+        bucket: list = self.urls.setdefault(status, [])
+        if len(bucket) >= _MAX_URL_ENTRIES:
+            return
+        if url not in bucket:
+            bucket.append(url)
+        self.urls[status] = bucket

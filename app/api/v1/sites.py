@@ -38,7 +38,10 @@ router = APIRouter()
     responses=ERROR_RESPONSES,
     operation_id="suggest_site_selectors",
 )
-async def suggest_site_selectors(payload: SiteConfigSuggestRequest, request: Request):
+async def suggest_site_selectors(
+    payload: SiteConfigSuggestRequest,
+    request: Request,
+):
     """Suggest likely selectors for a listing detail page before saving a site config."""
     result = await suggest_selectors(str(payload.url))
     return ok(SiteConfigSuggestResponse.model_validate(result), "Selector suggestions generated", request)
@@ -50,7 +53,10 @@ async def suggest_site_selectors(payload: SiteConfigSuggestRequest, request: Req
     responses=ERROR_RESPONSES,
     operation_id="preview_site_selector",
 )
-async def preview_site_selector(payload: SiteConfigPreviewRequest, request: Request):
+async def preview_site_selector(
+    payload: SiteConfigPreviewRequest,
+    request: Request,
+):
     """Preview live matches for a single selector against a detail page."""
     result = await preview_selector(str(payload.url), payload.selector)
     return ok(SiteConfigPreviewResponse.model_validate(result), "Selector preview completed", request)

@@ -1,15 +1,23 @@
 ﻿"""Pydantic schemas for ScrapeJob API requests and responses."""
 
+import ipaddress
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import UUID
-
-from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# Exhaustive literal — emitted as a union type in generated TypeScript clients.
-JobStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
+from app.core.enums import JobStatus  # noqa: F401 — re-exported for API consumers
+
+
+_SSRF_BLOCKED_HOSTS = frozenset({
+    "localhost",
+    "metadata.google.internal",
+    "127.0.0.1",
+    "::1",
+    "169.254.169.254",  # GCP / AWS link-local metadata
+})
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +52,25 @@ class JobCreate(BaseModel):
     start_url: str = Field(..., description="URL to begin scraping from.", json_schema_extra={"format": "uri"})
     max_pages: int = Field(10, ge=1, le=500, description="Maximum number of listing pages to scrape.")
     config: JobConfig | None = Field(None, description="Optional runtime configuration overrides.")
+
+    @field_validator("start_url")
+    @classmethod
+    def validate_start_url(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("start_url must use http or https scheme")
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            raise ValueError("start_url must contain a valid hostname")
+        if hostname in _SSRF_BLOCKED_HOSTS or hostname.endswith((".internal", ".local")):
+            raise ValueError("start_url hostname is not permitted")
+        try:
+            addr = ipaddress.ip_address(hostname)
+        except ValueError:
+            return v  # Domain name (not an IP literal) — allowed
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
+            raise ValueError("start_url must not target private or reserved IP ranges")
+        return v
 
 
 # ---------------------------------------------------------------------------

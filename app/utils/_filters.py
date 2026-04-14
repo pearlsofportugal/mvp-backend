@@ -1,10 +1,11 @@
 """Shared listing filter helper — used by listings and export routers."""
 from sqlalchemy import and_, or_
+from sqlalchemy.sql import Select
 
 from app.models.listing_model import Listing
 
 
-def apply_listing_filters(query, **kwargs):
+def apply_listing_filters(query: Select, **kwargs) -> Select:
     """Apply dynamic filters to a listing SQLAlchemy query.
 
     All parameters are optional. Only non-None values produce WHERE clauses.
@@ -64,7 +65,6 @@ def apply_listing_filters(query, **kwargs):
             or_(
                 Listing.title.ilike(search_term),
                 Listing.description.ilike(search_term),
-                Listing.enriched_description.ilike(search_term),
             )
         )
 

@@ -2,6 +2,7 @@
 
 Services interact only with ImodigiAdapter; no service imports httpx directly.
 """
+import json
 from typing import Any
 
 import httpx
@@ -111,13 +112,13 @@ class ImodigiAdapter:
         translations: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """POST /crm-properties.php — create a new property."""
-        import json
         request_body: dict[str, Any] = {"client": client_id, "property": property_payload}
         if images:
             request_body["images"] = images
         if translations:
             request_body["translations"] = translations
-        logger.info("Imodigi CREATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
+        if settings.debug:
+            logger.debug("Imodigi CREATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(
                 f"{self._base_url}/crm-properties.php",
@@ -136,7 +137,6 @@ class ImodigiAdapter:
         translations: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """PATCH /crm-properties.php — update an existing property."""
-        import json
         request_body: dict[str, Any] = {
             "client": client_id,
             "propertyId": imodigi_property_id,
@@ -146,7 +146,8 @@ class ImodigiAdapter:
             request_body["images"] = images
         if translations:
             request_body["translations"] = translations
-        logger.info("Imodigi UPDATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
+        if settings.debug:
+            logger.debug("Imodigi UPDATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.patch(
                 f"{self._base_url}/crm-properties.php",

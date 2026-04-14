@@ -13,7 +13,9 @@ COPY pyproject.toml README.md ./
 
 # Gera wheels — camada cacheada enquanto pyproject.toml não mudar
 RUN pip install --upgrade pip && \
-    pip wheel --no-cache-dir --wheel-dir /wheels .
+    pip wheel --no-cache-dir --wheel-dir /wheels . && \
+    pip install --no-cache-dir playwright && \
+    playwright install chromium --with-deps
 
 # Código só depois — não invalida o cache de dependências
 COPY app ./app
@@ -35,6 +37,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /install /usr/local
+# Instalar binários do Playwright num caminho partilhado acessível pelo appuser
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN pip install playwright && \
+    playwright install chromium --with-deps && \
+    chmod -R a+rx /opt/ms-playwright
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser alembic ./alembic

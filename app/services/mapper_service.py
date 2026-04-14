@@ -563,9 +563,109 @@ def normalize_habinedita_payload(raw: dict[str, Any]) -> PropertySchema:
 
 # ───────── Dispatcher ─────────
 
+def normalize_habita_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a raw Habita payload into canonical PropertySchema."""
+    price_amount, price_currency = parse_price(raw.get("price"))
+    useful_area = parse_area(raw.get("useful_area"))
+    gross_area = parse_area(raw.get("gross_area"))
+    land_area = parse_area(raw.get("land_area"))
+
+    bedrooms = parse_int(raw.get("bedrooms"))
+    if bedrooms is None:
+        bedrooms = typology_to_bedrooms(raw.get("typology"))
+
+    business_type_raw = (raw.get("business_type") or "").lower().strip()
+    listing_type = "rent" if any(
+        w in business_type_raw for w in ("arrend", "arrendar", "rent", "aluguer")
+    ) else "sale"
+
+    # Location: ".wb-fld-location" typically returns "City" or "District, City"
+    location = _normalize_whitespace(raw.get("location") or "") or ""
+    region: str | None = None
+    city: str | None = None
+    if "," in location:
+        parts = [p.strip() for p in location.split(",")]
+        region = parts[0] or None
+        city = parts[-1] or None
+    else:
+        city = location or None
+
+    property_type = raw.get("property_type")
+    if not property_type and raw.get("title"):
+        _HABITA_TYPES = (
+            "Moradia Geminada", "Moradia", "Apartamento", "Loja",
+            "Escritório", "Armazém", "Terreno", "Garagem",
+        )
+        title_lower = raw["title"].strip().lower()
+        for pt in _HABITA_TYPES:
+            if pt.lower() in title_lower:
+                property_type = pt
+                break
+
+    price_per_m2_amount = calculate_price_per_m2(price_amount, gross_area or useful_area)
+    raw_description = raw.get("raw_description")
+    normalized_description = _normalize_description_text(raw_description)
+
+    return PropertySchema(
+        partner_id=raw.get("property_id"),
+        source_partner="habita",
+        source_url=raw.get("url"),
+        title=raw.get("title"),
+        listing_type=listing_type,
+        property_type=property_type,
+        typology=raw.get("typology"),
+        bedrooms=bedrooms,
+        bathrooms=parse_int(raw.get("bathrooms")),
+        floor=None,
+        price=Money(
+            amount=float(price_amount) if price_amount else None,
+            currency=price_currency,
+        ),
+        price_per_m2=Money(
+            amount=float(price_per_m2_amount) if price_per_m2_amount else None,
+            currency=price_currency,
+        ) if price_per_m2_amount else None,
+        area_useful_m2=useful_area,
+        area_gross_m2=gross_area,
+        area_land_m2=land_area,
+        address=Address(
+            country="Portugal",
+            region=region,
+            city=city,
+            full_address=_truncate_text(location, 500) or None,
+        ),
+        media=[
+            MediaAsset(url=url, alt_text=alt, type="photo")
+            for url, alt in zip(
+                raw.get("images", []),
+                raw.get("alt_texts", []),
+            )
+        ],
+        features=ListingFlags(
+            has_garage=parse_bool(raw.get("garage")),
+            has_elevator=parse_bool(raw.get("elevator")),
+            has_balcony=parse_bool(raw.get("balcony")),
+            has_air_conditioning=parse_bool(raw.get("air_conditioning")),
+            has_pool=parse_bool(raw.get("swimming_pool")),
+        ),
+        descriptions={
+            key: value
+            for key, value in {
+                "raw": raw_description,
+                "pt": normalized_description,
+            }.items()
+            if value
+        },
+        seo=None,
+        energy_certificate=raw.get("energy_certificate"),
+        raw_partner_payload=raw,
+    )
+
+
 _PARTNER_NORMALIZERS = {
     "pearls": normalize_pearls_payload,
     "habinedita": normalize_habinedita_payload,
+    "habita": normalize_habita_payload,
 }
 
 

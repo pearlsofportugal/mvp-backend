@@ -55,7 +55,7 @@ class ListingService:
         total = await ListingRepository.count_listings(db, filters)
         pages = math.ceil(total / page_size) if total else 0
         meta = Meta(page=page, page_size=page_size, total=total, pages=pages)
-        return PaginatedResponse(items=[ListingListRead.model_validate(l) for l in listings]), meta
+        return PaginatedResponse(items=[ListingListRead.model_validate(listing) for listing in listings]), meta
 
     @staticmethod
     async def search_listings(

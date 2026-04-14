@@ -48,7 +48,6 @@ def _listing_to_dict(listing: Listing) -> dict:
         "advertiser": listing.advertiser,
         "contacts": listing.contacts,
         "description": listing.description,
-        "enriched_description": listing.enriched_description,
         "description_quality_score": listing.description_quality_score,
         "meta_description": listing.meta_description,
         "created_at": listing.created_at.isoformat() if listing.created_at else None,

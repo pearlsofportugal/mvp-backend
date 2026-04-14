@@ -1033,7 +1033,19 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
     image_exclude_filter = selectors.get("image_exclude_filter")
 
     for img in soup.select(image_selector):
-        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
+        # Skip data: URIs (lazy-load placeholders) to find the real CDN URL
+        src = next(
+            (
+                v for v in (
+                    img.get("src"),
+                    img.get("data-src"),
+                    img.get("data-lazy-src"),
+                    img.get("data-imgthumb"),
+                )
+                if v and not v.startswith("data:")
+            ),
+            None,
+        )
         if not src:
             continue
 

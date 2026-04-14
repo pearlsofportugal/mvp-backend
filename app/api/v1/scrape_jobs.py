@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import time
 from typing import AsyncIterator
 from uuid import UUID
 
@@ -19,12 +20,13 @@ from app.models.scrape_job_model import ScrapeJob
 from app.schemas.base_schema import ApiResponse
 from app.schemas.scrape_job_schema import JobCreate, JobListRead, JobRead
 from app.services.scrape_job_service import ScrapeJobService
-from app.services.scraper_service import recover_stale_jobs, run_scrape_job
+from app.services.scraper_service import run_scrape_job
 
 router = APIRouter()
 
 _SSE_POLL_INTERVAL = 1.0    # seconds between DB reads while streaming
 _SSE_HEARTBEAT_EVERY = 15   # emit heartbeat every N ticks
+_SSE_MAX_DURATION = 3600    # max stream open duration in seconds (1 hour)
 _SSE_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
@@ -40,7 +42,6 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Launch a new scrape job. Runs in background (MVP: one job at a time per worker)."""
-    await recover_stale_jobs(db)
     job = await ScrapeJobService.create_job(db, payload)
     background_tasks.add_task(run_scrape_job, str(job.id))
     return ok(JobRead.model_validate(job), "Job created successfully", request)
@@ -103,6 +104,7 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
     tick = 0
     last_progress: dict | None = None
     last_status: str | None = None
+    stream_started = time.monotonic()
 
     try:
         async with async_session_factory() as db:
@@ -113,6 +115,10 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
 
         while True:
             if await request.is_disconnected():
+                break
+
+            if time.monotonic() - stream_started > _SSE_MAX_DURATION:
+                yield _sse_event("done", {"job_id": str(job_id), "message": "Stream max duration reached"})
                 break
 
             async with async_session_factory() as db:

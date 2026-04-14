@@ -34,8 +34,10 @@ from app.models.price_history_model import PriceHistory
 from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
 from app.services.ethics_service import EthicalScraper
+from app.services.playwright_scraper import PlaywrightScraper
 from app.services.mapper_service import normalize_partner_payload, schema_to_listing_dict
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
+from app.services.sitemap_service import fetch_sitemap_urls
 
 logger = get_logger(__name__)
 
@@ -132,11 +134,12 @@ async def run_scrape_job(job_id: str) -> None:
                 extraction_mode=site_config.extraction_mode,
                 link_pattern=site_config.link_pattern,
                 image_filter=site_config.image_filter,
-                image_exclude_filter=getattr(site_config, "image_exclude_filter", None),
+                image_exclude_filter=site_config.image_exclude_filter,
                 config=job.config or {},
                 pagination_type=site_config.pagination_type,
                 pagination_param=site_config.pagination_param,
-                request_headers=getattr(site_config, "request_headers", None) or {},
+                request_headers=site_config.request_headers or {},
+                use_js_render=site_config.use_js_render,
             )
 
         except Exception as e:
@@ -149,7 +152,19 @@ async def run_scrape_job(job_id: str) -> None:
                     job.mark_failed(str(e))
                     await db.commit()
             except Exception:
-                pass
+                logger.exception("Failed to mark job %s as failed during recovery", job_id)
+
+
+async def _fetch_html(scraper: "EthicalScraper | PlaywrightScraper", url: str) -> str | None:
+    """Unified fetch that works for both EthicalScraper and PlaywrightScraper.
+
+    Returns the HTML string, or None on failure/block.
+    EthicalScraper is synchronous so it runs in a thread; PlaywrightScraper is async.
+    """
+    if isinstance(scraper, PlaywrightScraper):
+        return await scraper.get_html(url)
+    response = await asyncio.to_thread(scraper.get, url)
+    return response.text if response else None
 
 
 async def _run_scrape_async(
@@ -168,19 +183,29 @@ async def _run_scrape_async(
     pagination_type: str = "html_next",
     pagination_param: str | None = None,
     request_headers: dict[str, str] | None = None,
+    use_js_render: bool = False,
 ) -> None:
     """Async scraping loop — recebe a sessão DB existente em vez de abrir novas."""
     if extraction_mode not in ("direct", "section"):
         logger.warning("Unknown extraction_mode '%s' for job %s — defaulting to 'direct'", extraction_mode, job_id)
         extraction_mode = "direct"
 
-    scraper = EthicalScraper(
-        min_delay=config.get("min_delay") or settings.default_min_delay,
-        max_delay=config.get("max_delay") or settings.default_max_delay,
-        user_agent=config.get("user_agent") or settings.default_user_agent,
-        timeout=settings.request_timeout,
-        extra_headers=request_headers or {},
-    )
+    if use_js_render:
+        scraper: EthicalScraper | PlaywrightScraper = PlaywrightScraper(
+            min_delay=config.get("min_delay") or settings.default_min_delay,
+            max_delay=config.get("max_delay") or settings.default_max_delay,
+            timeout=settings.request_timeout,
+            extra_headers=request_headers or {},
+        )
+        logger.info("Job %s using PlaywrightScraper (JS rendering enabled)", job_id)
+    else:
+        scraper = EthicalScraper(
+            min_delay=config.get("min_delay") or settings.default_min_delay,
+            max_delay=config.get("max_delay") or settings.default_max_delay,
+            user_agent=config.get("user_agent") or settings.default_user_agent,
+            timeout=settings.request_timeout,
+            extra_headers=request_headers or {},
+        )
 
     # Load the job object ONCE and reuse it throughout — eliminates N+1 SELECT queries.
     job_result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
@@ -207,6 +232,22 @@ async def _run_scrape_async(
         job.touch_heartbeat()
         await db.commit()
 
+        # ── Sitemap mode ────────────────────────────────────────────────────
+        if pagination_type == "sitemap":
+            await _run_sitemap_scrape(
+                db=db,
+                job=job,
+                job_id=job_id,
+                site_key=site_key,
+                sitemap_url=start_url,
+                full_selectors=full_selectors,
+                extraction_mode=extraction_mode,
+                link_pattern=link_pattern,
+                scraper=scraper,
+            )
+            return
+        # ────────────────────────────────────────────────────────────────────
+
         for page_num in range(max_pages):
             # Re-read only status/cancel fields — lightweight scalar query
             if await _check_job_cancelled(db, job_id):
@@ -218,8 +259,8 @@ async def _run_scrape_async(
 
             logger.info("Scraping page %d: %s", page_num + 1, current_url)
 
-            response = await asyncio.to_thread(scraper.get, current_url)
-            if not response:
+            html = await _fetch_html(scraper, current_url)
+            if not html:
                 logger.warning("Failed to fetch page: %s", current_url)
                 job.add_log("error", f"Failed to fetch page: {current_url}", current_url)
                 errors += 1
@@ -235,7 +276,6 @@ async def _run_scrape_async(
                 return
 
             pages_visited += 1
-            html = response.text
 
             links = parse_listing_links(html, base_url, full_selectors)
             listings_found += len(links)
@@ -251,8 +291,8 @@ async def _run_scrape_async(
                     break
 
                 try:
-                    detail_response = await asyncio.to_thread(scraper.get, link)
-                    if not detail_response:
+                    detail_html = await _fetch_html(scraper, link)
+                    if not detail_html:
                         job.add_url("failed", link)
                         job.add_log("warning", "Failed to fetch listing page", link)
                         job.touch_heartbeat()
@@ -260,7 +300,7 @@ async def _run_scrape_async(
                         continue
 
                     raw_data = parse_listing_page(
-                        detail_response.text,
+                        detail_html,
                         link,
                         full_selectors,
                         extraction_mode,
@@ -291,6 +331,7 @@ async def _run_scrape_async(
                 except Exception as e:
                     logger.error("Error processing listing %s: %s", link, str(e))
                     await db.rollback()
+                    await db.refresh(job)
                     job.add_url("failed", link)
                     job.add_log("error", f"Error processing listing: {str(e)}", link)
                     errors += 1
@@ -321,12 +362,119 @@ async def _run_scrape_async(
         await db.rollback()
         await _fail_job(db, job, str(e))
     finally:
-        scraper.close()
+        if isinstance(scraper, PlaywrightScraper):
+            await scraper.close()
+        else:
+            scraper.close()
 
 
 # ---------------------------------------------------------------------------
 # Funções auxiliares — recebem db: AsyncSession, sem abrir sessões próprias
 # ---------------------------------------------------------------------------
+
+async def _run_sitemap_scrape(
+    db: AsyncSession,
+    job: ScrapeJob,
+    job_id: str,
+    site_key: str,
+    sitemap_url: str,
+    full_selectors: dict[str, Any],
+    extraction_mode: str,
+    link_pattern: str | None,
+    scraper: "EthicalScraper | PlaywrightScraper",
+) -> None:
+    """Fetch all property URLs from a sitemap XML and scrape each detail page."""
+    logger.info("Sitemap mode — fetching: %s", sitemap_url)
+
+    # Sitemap XML is always static — use EthicalScraper regardless of JS mode
+    sitemap_scraper = scraper if isinstance(scraper, EthicalScraper) else EthicalScraper()
+    try:
+        urls = await asyncio.to_thread(
+            fetch_sitemap_urls, sitemap_url, link_pattern, sitemap_scraper
+        )
+    except Exception as e:
+        logger.error("Failed to fetch sitemap %s: %s", sitemap_url, str(e))
+        await _fail_job(db, job, f"Sitemap fetch failed: {e}")
+        return
+
+    if not urls:
+        logger.warning("Sitemap returned 0 matching URLs for job %s", job_id)
+        await _complete_job(db, job)
+        return
+
+    logger.info("Sitemap: %d property URLs to scrape for job %s", len(urls), job_id)
+
+    listings_found = len(urls)
+    listings_scraped = 0
+    errors = 0
+
+    for url in urls:
+        job.add_url("found", url)
+    job.update_progress(
+        pages_visited=1,
+        listings_found=listings_found,
+        listings_scraped=0,
+        errors=0,
+    )
+    job.touch_heartbeat()
+    await db.commit()
+
+    for link in urls:
+        if await _check_job_cancelled(db, job_id):
+            logger.info("Job %s was cancelled", job_id)
+            break
+
+        try:
+            detail_html = await _fetch_html(scraper, link)
+            if not detail_html:
+                job.add_url("failed", link)
+                job.add_log("warning", "Failed to fetch listing page", link)
+                errors += 1
+                job.touch_heartbeat()
+                await db.commit()
+                continue
+
+            raw_data = parse_listing_page(
+                detail_html,
+                link,
+                full_selectors,
+                extraction_mode,
+            )
+
+            missing_fields = _missing_critical_parser_fields(raw_data)
+            if missing_fields:
+                job.add_log(
+                    "warning",
+                    f"Critical parser fields missing: {', '.join(missing_fields)}",
+                    link,
+                )
+
+            property_schema = normalize_partner_payload(raw_data, site_key)
+            await _persist_listing(db, job_id, property_schema, site_key)
+            job.add_url("scraped", link)
+            listings_scraped += 1
+
+            job.update_progress(
+                pages_visited=1,
+                listings_found=listings_found,
+                listings_scraped=listings_scraped,
+                errors=errors,
+            )
+            job.touch_heartbeat()
+            await db.commit()
+
+        except Exception as e:
+            logger.error("Error processing listing %s: %s", link, str(e))
+            await db.rollback()
+            await db.refresh(job)
+            job.add_url("failed", link)
+            job.add_log("error", f"Error processing listing: {str(e)}", link)
+            errors += 1
+            job.touch_heartbeat()
+            await db.commit()
+
+    await _complete_job(db, job)
+
 
 async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:
     """Lightweight check: only fetches status + cancel fields."""

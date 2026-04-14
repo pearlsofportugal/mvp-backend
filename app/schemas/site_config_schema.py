@@ -1,14 +1,42 @@
 ﻿"""Pydantic schemas for SiteConfig API requests and responses."""
 
+import ipaddress
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_SSRF_BLOCKED_HOSTS = frozenset({
+    "localhost",
+    "metadata.google.internal",
+    "127.0.0.1",
+    "::1",
+    "169.254.169.254",
+})
+
+
+def _validate_no_ssrf(raw: str) -> str:
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("url must use http or https scheme")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise ValueError("url must contain a valid hostname")
+    if hostname in _SSRF_BLOCKED_HOSTS or hostname.endswith((".internal", ".local")):
+        raise ValueError("url hostname is not permitted")
+    try:
+        addr = ipaddress.ip_address(hostname)
+    except ValueError:
+        return raw  # domain name — allowed
+    if addr.is_private or addr.is_loopback or addr.is_link_local:
+        raise ValueError("url must not target private or reserved IP ranges")
+    return raw
 
 
 ExtractionMode = Literal["section", "direct"]
-PaginationType = Literal["html_next", "query_param", "incremental_path"]
+PaginationType = Literal["html_next", "query_param", "incremental_path", "sitemap"]
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +62,7 @@ class SiteConfigBase(BaseModel):
             "'section' parses name/value pairs from structured sections."
         ),
     )
-    pagination_type: Literal["html_next", "query_param", "incremental_path"] = Field(
+    pagination_type: Literal["html_next", "query_param", "incremental_path", "sitemap"] = Field(
         "html_next",
         description="Pagination strategy used to move across result pages.",
     )
@@ -45,6 +73,7 @@ class SiteConfigBase(BaseModel):
     link_pattern: str | None = Field(None, description="Regex pattern to filter listing URLs on listing pages.")
     image_filter: str | None = Field(None, description="Regex to require image URLs to match (include-only filter).")
     image_exclude_filter: str | None = Field(None, description="Regex pattern — images whose URL matches are excluded (e.g. banners, logos).")
+    use_js_render: bool = Field(False, description="Use a headless browser (Playwright) to render JavaScript before parsing.")
     is_active: bool = Field(True, description="Whether this site config is enabled for scraping.")
 
 
@@ -83,6 +112,7 @@ class SiteConfigUpdate(BaseModel):
     link_pattern: str | None = None
     image_filter: str | None = None
     image_exclude_filter: str | None = None
+    use_js_render: bool | None = None
     is_active: bool | None = None
     confidence_scores: dict[str, float] | None = Field(None, description="Per-field confidence scores (0.0–1.0).")
 
@@ -146,6 +176,12 @@ class SiteConfigSuggestRequest(BaseModel):
 
     url: AnyHttpUrl
 
+    @field_validator("url", mode="before")
+    @classmethod
+    def _no_ssrf(cls, v: Any) -> Any:
+        _validate_no_ssrf(str(v))
+        return v
+
 
 class SiteConfigSuggestResponse(BaseModel):
     """Suggested selectors grouped by target field."""
@@ -159,6 +195,12 @@ class SiteConfigPreviewRequest(BaseModel):
 
     url: AnyHttpUrl
     selector: str
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _no_ssrf(cls, v: Any) -> Any:
+        _validate_no_ssrf(str(v))
+        return v
 
 
 class SiteConfigPreviewResponse(BaseModel):

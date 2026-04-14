@@ -85,62 +85,64 @@ async def bulk_enrich_listings(
     listings: list[Listing],
     request: BulkEnrichmentRequest,
 ) -> BulkEnrichmentResponse:
-    """Enrich a batch of listings sequentially via the multi-locale translations endpoint.
+    """Enrich a batch of listings concurrently via the multi-locale translations endpoint.
 
     Each listing is enriched and the result merged into enriched_translations.
+    A semaphore limits concurrent AI calls to avoid bursting the Gemini rate limit.
     Callers must commit the session after this function returns.
     """
-    item_results: list[BulkEnrichmentItemResult] = []
-    enriched_count = 0
-    skipped_count = 0
-    failed_count = 0
+    _concurrency_limit = asyncio.Semaphore(3)
 
-    for listing in listings:
-        translate_payload = ListingTranslationRequest(
-            listing_id=listing.id,
-            locales=request.locales,
-            keywords=request.keywords,
-            apply=False,
-            force=request.force,
-        )
-        try:
-            response = await enrich_listing_translations(listing, translate_payload)
-
-            if not response.locales_generated:
-                skipped_count += 1
-                item_results.append(BulkEnrichmentItemResult(
-                    listing_id=listing.id,
-                    status="skipped",
-                    locales_generated=[],
-                ))
-                continue
-
-            # Persist the generated values without re-calling AI.
-            apply_payload = ListingTranslationRequest(
+    async def _enrich_one(listing: Listing) -> BulkEnrichmentItemResult:
+        async with _concurrency_limit:
+            translate_payload = ListingTranslationRequest(
                 listing_id=listing.id,
                 locales=request.locales,
-                apply=True,
-                translation_values=response.results,
+                keywords=request.keywords,
+                apply=False,
+                force=request.force,
             )
-            await enrich_listing_translations(listing, apply_payload)
-            item_results.append(BulkEnrichmentItemResult(
-                listing_id=listing.id,
-                status="enriched",
-                locales_generated=response.locales_generated,
-            ))
-            enriched_count += 1
-        except EnrichmentError as exc:
-            logger.warning(
-                "Bulk enrichment failed for listing %s: %s",
-                listing.id,
-                exc,
-            )
-            item_results.append(BulkEnrichmentItemResult(
-                listing_id=listing.id,
-                status="error",
-                error=str(exc),
-            ))
-            failed_count += 1
+            try:
+                response = await enrich_listing_translations(listing, translate_payload)
+
+                if not response.locales_generated:
+                    return BulkEnrichmentItemResult(
+                        listing_id=listing.id,
+                        status="skipped",
+                        locales_generated=[],
+                    )
+
+                # Persist the generated values without re-calling AI.
+                apply_payload = ListingTranslationRequest(
+                    listing_id=listing.id,
+                    locales=request.locales,
+                    apply=True,
+                    translation_values=response.results,
+                )
+                await enrich_listing_translations(listing, apply_payload)
+                return BulkEnrichmentItemResult(
+                    listing_id=listing.id,
+                    status="enriched",
+                    locales_generated=response.locales_generated,
+                )
+            except EnrichmentError as exc:
+                logger.warning(
+                    "Bulk enrichment failed for listing %s: %s",
+                    listing.id,
+                    exc,
+                )
+                return BulkEnrichmentItemResult(
+                    listing_id=listing.id,
+                    status="error",
+                    error=str(exc),
+                )
+
+    item_results: list[BulkEnrichmentItemResult] = list(
+        await asyncio.gather(*[_enrich_one(listing) for listing in listings])
+    )
+    enriched_count = sum(1 for r in item_results if r.status == "enriched")
+    skipped_count = sum(1 for r in item_results if r.status == "skipped")
+    failed_count = sum(1 for r in item_results if r.status == "error")
 
     return BulkEnrichmentResponse(
         total_requested=len(listings),

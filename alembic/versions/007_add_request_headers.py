@@ -19,9 +19,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # No-op: this migration was already applied to the database.
-    # The original file was not committed to version control.
-    pass
+    # Use ADD COLUMN IF NOT EXISTS so this is safe whether the column already
+    # exists (original DB) or doesn't yet (fresh Cloud Run deployment).
+    op.execute(
+        "ALTER TABLE site_configs ADD COLUMN IF NOT EXISTS request_headers JSONB"
+    )
 
 
 def downgrade() -> None:

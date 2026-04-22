@@ -72,7 +72,7 @@ _LISTING_STRING_LIMITS = {
     "county": 100,
     "parish": 100,
     "full_address": 500,
-    "energy_certificate": 10,
+    "energy_certificate": 20,
     "advertiser": 255,
     "contacts": 500,
     "page_title": 500,

@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -76,6 +77,23 @@ class SiteConfigBase(BaseModel):
     use_js_render: bool = Field(False, description="Use a headless browser (Playwright) to render JavaScript before parsing.")
     is_active: bool = Field(True, description="Whether this site config is enabled for scraping.")
 
+    # Schedule fields
+    schedule_enabled: bool = Field(False, description="Whether scheduled scraping is active for this site.")
+    schedule_interval_minutes: int | None = Field(None, ge=1, description="Interval in minutes between scheduled runs.")
+    schedule_start_at: datetime | None = Field(None, description="When the first run should occur (None = start immediately).")
+    schedule_timezone: str = Field("Europe/Lisbon", description="IANA timezone string for the schedule (e.g. 'Europe/Lisbon', 'UTC').")
+    schedule_start_url: str | None = Field(None, description="URL to begin scraping on scheduled runs (None = falls back to base_url).")
+    schedule_max_pages: int | None = Field(None, ge=1, le=500, description="Max pages per scheduled run (None = uses server default).")
+
+    @field_validator("schedule_timezone")
+    @classmethod
+    def _validate_timezone(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError:
+            raise ValueError(f"Invalid IANA timezone: '{v}'")
+        return v
+
 
 # ---------------------------------------------------------------------------
 # Create
@@ -115,6 +133,23 @@ class SiteConfigUpdate(BaseModel):
     use_js_render: bool | None = None
     is_active: bool | None = None
     confidence_scores: dict[str, float] | None = Field(None, description="Per-field confidence scores (0.0–1.0).")
+    schedule_enabled: bool | None = None
+    schedule_interval_minutes: int | None = Field(None, ge=1)
+    schedule_start_at: datetime | None = None
+    schedule_timezone: str | None = None
+    schedule_start_url: str | None = None
+    schedule_max_pages: int | None = Field(None, ge=1, le=500)
+
+    @field_validator("schedule_timezone")
+    @classmethod
+    def _validate_timezone(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError:
+            raise ValueError(f"Invalid IANA timezone: '{v}'")
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +196,21 @@ class SiteConfigRead(SiteConfigBase):
             raw["confidence_meta"] = ConfidenceMeta.model_validate(meta)
 
         return raw
+
+
+class SiteConfigScheduleInfo(BaseModel):
+    """Schedule status for a site — DB fields + live next_run_at from the in-memory scheduler."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    site_key: str
+    schedule_enabled: bool
+    schedule_interval_minutes: int | None
+    schedule_start_at: datetime | None
+    schedule_timezone: str
+    schedule_start_url: str | None
+    schedule_max_pages: int | None
+    next_run_at: datetime | None = Field(None, description="Next scheduled run (None if scheduling is disabled or not yet registered).")
 
 
 class SelectorCandidate(BaseModel):

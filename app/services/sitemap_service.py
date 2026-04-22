@@ -1,6 +1,7 @@
 """Sitemap fetching utility — parses XML sitemaps and returns property URLs."""
 import re
-from xml.etree import ElementTree
+
+import defusedxml.ElementTree as ElementTree
 
 from app.core.logging import get_logger
 from app.services.ethics_service import EthicalScraper

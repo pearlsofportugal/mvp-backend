@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.api.deps import RequireApiKey
 from app.api.responses import ok
 from app.api.v1.ai_enrichment import router as ai_enrichment_router
+from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.export import router as export_router
 from app.api.v1.imodigi import router as imodigi_router
 from app.api.v1.listings import router as listings_router
@@ -26,6 +27,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger, setup_logging
 from app.schemas.base_schema import ApiResponse, ErrorDetail, SystemHealth
+from app.services.scheduler_service import scheduler_service
 from app.services.scraper_service import recover_stale_jobs
 
 logger = get_logger(__name__)
@@ -52,6 +54,11 @@ async def lifespan(app: FastAPI):
         if recovered_jobs:
             logger.warning("Recovered %d stale scrape job(s) during startup", recovered_jobs)
 
+        from app.repositories.site_config_repository import SiteConfigRepository
+        scheduled_sites = await SiteConfigRepository.get_all_scheduled(session)
+
+    scheduler_service.start(scheduled_sites)
+
     # Pre-warm parser field mapping cache so the first scrape request uses DB values
     try:
         from app.services.parser_service import _load_field_mappings
@@ -60,9 +67,21 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Could not warm parser field mapping cache: %s", exc)
 
+    # Pre-warm Gemini client so the first enrichment request does not pay cold-start latency
+    if settings.google_genai_api_key:
+        try:
+            from app.adapters.gemini_adapter import _get_client
+            _get_client()
+            logger.info("Gemini client pre-warmed on startup")
+        except Exception as exc:
+            logger.warning("Could not pre-warm Gemini client: %s", exc)
+
     yield
 
     logger.info("Shutting down %s", settings.app_name)
+    scheduler_service.shutdown()
+    from app.adapters.imodigi_adapter import imodigi_adapter
+    await imodigi_adapter.aclose()
 
 
 def create_app() -> FastAPI:
@@ -234,6 +253,12 @@ def create_app() -> FastAPI:
         imodigi_router,
         prefix="/api/v1/imodigi",
         tags=["imodigi"],
+        dependencies=auth_dependencies,
+    )
+    application.include_router(
+        dashboard_router,
+        prefix="/api/v1/dashboard",
+        tags=["dashboard"],
         dependencies=auth_dependencies,
     )
 

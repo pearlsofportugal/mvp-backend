@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     Boolean,
@@ -71,7 +71,7 @@ class Listing(Base):
     has_pool: Mapped[bool | None] = mapped_column(Boolean)
 
     # Building info
-    energy_certificate: Mapped[str | None] = mapped_column(String(10), comment="A+, A, B, B-, C, D, E, F")
+    energy_certificate: Mapped[str | None] = mapped_column(String(20), comment="A+, A, B, B-, C, D, E, F, Isento")
     construction_year: Mapped[int | None] = mapped_column(Integer)
 
     # Contact
@@ -81,7 +81,7 @@ class Listing(Base):
     # Descriptions
     raw_description: Mapped[str | None] = mapped_column(Text, comment="Original unmodified description")
     description: Mapped[str | None] = mapped_column(Text, comment="Cleaned description")
-    enriched_translations: Mapped[dict | None] = mapped_column(
+    enriched_translations: Mapped[dict[str, Any] | None] = mapped_column(
         JSON,
         nullable=True,
         comment="AI-generated SEO content per locale: {pt: {title, description, meta_description}, en: {...}, ...}",
@@ -91,10 +91,10 @@ class Listing(Base):
 
     # SEO
     page_title: Mapped[str | None] = mapped_column(String(500))
-    headers: Mapped[dict | None] = mapped_column(JSON, comment="Structured headers as JSON array")
+    headers: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="Structured headers as JSON array")
 
     # Raw payload
-    raw_payload: Mapped[dict | None] = mapped_column(JSON, comment="Complete original payload")
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="Complete original payload")
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -116,8 +116,8 @@ class Listing(Base):
     )
 
     # Relationships
-    media_assets: Mapped[list["MediaAsset"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="selectin")
-    price_history: Mapped[list["PriceHistory"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="selectin")
+    media_assets: Mapped[list["MediaAsset"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="raise")
+    price_history: Mapped[list["PriceHistory"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="raise")
 
     # Indexes
     __table_args__ = (

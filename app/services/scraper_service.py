@@ -210,11 +210,12 @@ async def _run_scrape_async(
     # Load the job object ONCE and reuse it throughout — eliminates N+1 SELECT queries.
     job_result = await db.execute(select(ScrapeJob).where(ScrapeJob.id == UUID(job_id)))
     job = job_result.scalar_one_or_none()
-    if not job:
-        logger.error("Job %s not found at scrape start", job_id)
-        return
 
     try:
+        if not job:
+            logger.error("Job %s not found at scrape start", job_id)
+            return
+
         full_selectors = {**selectors}
         if link_pattern:
             full_selectors["listing_link_pattern"] = link_pattern
@@ -290,53 +291,20 @@ async def _run_scrape_async(
                 if await _check_job_cancelled(db, job_id):
                     break
 
-                try:
-                    detail_html = await _fetch_html(scraper, link)
-                    if not detail_html:
-                        job.add_url("failed", link)
-                        job.add_log("warning", "Failed to fetch listing page", link)
-                        job.touch_heartbeat()
-                        await db.commit()
-                        continue
-
-                    raw_data = parse_listing_page(
-                        detail_html,
-                        link,
-                        full_selectors,
-                        extraction_mode,
-                    )
-
-                    missing_fields = _missing_critical_parser_fields(raw_data)
-                    if missing_fields:
-                        job.add_log(
-                            "warning",
-                            f"Critical parser fields missing: {', '.join(missing_fields)}",
-                            link,
-                        )
-
-                    property_schema = normalize_partner_payload(raw_data, site_key)
-                    await _persist_listing(db, job_id, property_schema, site_key)
-                    job.add_url("scraped", link)
+                scraped, errored = await _process_listing_url(
+                    db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
+                )
+                if scraped:
                     listings_scraped += 1
-
+                if errored:
+                    errors += 1
+                if scraped or errored:
                     job.update_progress(
                         pages_visited=pages_visited,
                         listings_found=listings_found,
                         listings_scraped=listings_scraped,
                         errors=errors,
                     )
-                    job.touch_heartbeat()
-                    await db.commit()
-
-                except Exception as e:
-                    logger.error("Error processing listing %s: %s", link, str(e))
-                    await db.rollback()
-                    await db.refresh(job)
-                    job.add_url("failed", link)
-                    job.add_log("error", f"Error processing listing: {str(e)}", link)
-                    errors += 1
-                    job.touch_heartbeat()
-                    await db.commit()
 
             # ---------- PAGINATION UNIVERSAL ----------
             if pagination_type == "incremental_path":
@@ -360,7 +328,8 @@ async def _run_scrape_async(
     except Exception as e:
         logger.error("Scraping error: %s\n%s", str(e), traceback.format_exc())
         await db.rollback()
-        await _fail_job(db, job, str(e))
+        if job:
+            await _fail_job(db, job, str(e))
     finally:
         if isinstance(scraper, PlaywrightScraper):
             await scraper.close()
@@ -386,94 +355,127 @@ async def _run_sitemap_scrape(
     """Fetch all property URLs from a sitemap XML and scrape each detail page."""
     logger.info("Sitemap mode — fetching: %s", sitemap_url)
 
-    # Sitemap XML is always static — use EthicalScraper regardless of JS mode
-    sitemap_scraper = scraper if isinstance(scraper, EthicalScraper) else EthicalScraper()
-    try:
-        urls = await asyncio.to_thread(
-            fetch_sitemap_urls, sitemap_url, link_pattern, sitemap_scraper
-        )
-    except Exception as e:
-        logger.error("Failed to fetch sitemap %s: %s", sitemap_url, str(e))
-        await _fail_job(db, job, f"Sitemap fetch failed: {e}")
-        return
-
-    if not urls:
-        logger.warning("Sitemap returned 0 matching URLs for job %s", job_id)
-        await _complete_job(db, job)
-        return
-
-    logger.info("Sitemap: %d property URLs to scrape for job %s", len(urls), job_id)
-
-    listings_found = len(urls)
-    listings_scraped = 0
-    errors = 0
-
-    for url in urls:
-        job.add_url("found", url)
-    job.update_progress(
-        pages_visited=1,
-        listings_found=listings_found,
-        listings_scraped=0,
-        errors=0,
+    # Sitemap XML is always static — use EthicalScraper regardless of JS mode.
+    # If scraper is a PlaywrightScraper, create a dedicated EthicalScraper for the
+    # sitemap fetch and close it when done (owned_sitemap_scraper=True).
+    owned_sitemap_scraper = not isinstance(scraper, EthicalScraper)
+    sitemap_scraper: EthicalScraper = (
+        scraper  # type: ignore[assignment]
+        if isinstance(scraper, EthicalScraper)
+        else EthicalScraper(user_agent=settings.default_user_agent)
     )
-    job.touch_heartbeat()
-    await db.commit()
-
-    for link in urls:
-        if await _check_job_cancelled(db, job_id):
-            logger.info("Job %s was cancelled", job_id)
-            break
-
+    try:
         try:
-            detail_html = await _fetch_html(scraper, link)
-            if not detail_html:
-                job.add_url("failed", link)
-                job.add_log("warning", "Failed to fetch listing page", link)
-                errors += 1
-                job.touch_heartbeat()
-                await db.commit()
-                continue
-
-            raw_data = parse_listing_page(
-                detail_html,
-                link,
-                full_selectors,
-                extraction_mode,
+            urls = await asyncio.to_thread(
+                fetch_sitemap_urls, sitemap_url, link_pattern, sitemap_scraper
             )
+        except Exception as e:
+            logger.error("Failed to fetch sitemap %s: %s", sitemap_url, str(e))
+            await _fail_job(db, job, f"Sitemap fetch failed: {e}")
+            return
 
-            missing_fields = _missing_critical_parser_fields(raw_data)
-            if missing_fields:
-                job.add_log(
-                    "warning",
-                    f"Critical parser fields missing: {', '.join(missing_fields)}",
-                    link,
+        if not urls:
+            logger.warning("Sitemap returned 0 matching URLs for job %s", job_id)
+            await _complete_job(db, job)
+            return
+
+        logger.info("Sitemap: %d property URLs to scrape for job %s", len(urls), job_id)
+
+        listings_found = len(urls)
+        listings_scraped = 0
+        errors = 0
+
+        for url in urls:
+            job.add_url("found", url)
+        job.update_progress(
+            pages_visited=1,
+            listings_found=listings_found,
+            listings_scraped=0,
+            errors=0,
+        )
+        job.touch_heartbeat()
+        await db.commit()
+
+        for link in urls:
+            if await _check_job_cancelled(db, job_id):
+                logger.info("Job %s was cancelled", job_id)
+                break
+
+            scraped, errored = await _process_listing_url(
+                db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
+            )
+            if scraped:
+                listings_scraped += 1
+            if errored:
+                errors += 1
+            if scraped or errored:
+                job.update_progress(
+                    pages_visited=1,
+                    listings_found=listings_found,
+                    listings_scraped=listings_scraped,
+                    errors=errors,
                 )
 
-            property_schema = normalize_partner_payload(raw_data, site_key)
-            await _persist_listing(db, job_id, property_schema, site_key)
-            job.add_url("scraped", link)
-            listings_scraped += 1
+        await _complete_job(db, job)
+    finally:
+        if owned_sitemap_scraper:
+            sitemap_scraper.close()
 
-            job.update_progress(
-                pages_visited=1,
-                listings_found=listings_found,
-                listings_scraped=listings_scraped,
-                errors=errors,
-            )
-            job.touch_heartbeat()
-            await db.commit()
 
-        except Exception as e:
-            logger.error("Error processing listing %s: %s", link, str(e))
-            await db.rollback()
-            await db.refresh(job)
+async def _process_listing_url(
+    db: AsyncSession,
+    job: ScrapeJob,
+    job_id: str,
+    site_key: str,
+    scraper: "EthicalScraper | PlaywrightScraper",
+    link: str,
+    full_selectors: dict[str, Any],
+    extraction_mode: str,
+) -> tuple[bool, bool]:
+    """Fetch, parse e persist um único URL de listing.
+
+    Returns (scraped, errored):
+    - scraped=True  → listing persistido com sucesso.
+    - errored=True  → excepção durante o processamento.
+    - (False, True) → HTML não disponível (fetch devolveu None).
+
+    O caller é responsável por chamar job.update_progress() com os contadores actualizados.
+    """
+    try:
+        detail_html = await _fetch_html(scraper, link)
+        if not detail_html:
             job.add_url("failed", link)
-            job.add_log("error", f"Error processing listing: {str(e)}", link)
-            errors += 1
+            job.add_log("warning", "Failed to fetch listing page", link)
             job.touch_heartbeat()
             await db.commit()
+            return False, True
 
-    await _complete_job(db, job)
+        raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
+
+        missing_fields = _missing_critical_parser_fields(raw_data)
+        if missing_fields:
+            job.add_log(
+                "warning",
+                f"Critical parser fields missing: {', '.join(missing_fields)}",
+                link,
+            )
+
+        property_schema = normalize_partner_payload(raw_data, site_key)
+        await _persist_listing(db, job_id, property_schema, site_key)
+        job.add_url("scraped", link)
+        job.touch_heartbeat()
+        await db.commit()
+        return True, False
+
+    except Exception as e:
+        logger.error("Error processing listing %s: %s", link, str(e))
+        await db.rollback()
+        await db.refresh(job)
+        job.add_url("failed", link)
+        job.add_log("error", f"Error processing listing: {str(e)}", link)
+        job.touch_heartbeat()
+        await db.commit()
+        return False, True
 
 
 async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:

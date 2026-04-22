@@ -669,3 +669,10 @@ Router (api/v1/)
        └─ preview_service / selector_suggester
             └─ ethics_service (fetch) + BeautifulSoup4
 ```
+
+### Consola
+- Quanto abre a consola tem que executar os seguintes comandos 
+- ```cd..
+    .\.venv\Scripts\Activate.ps1
+    cd .\backend\
+    ```

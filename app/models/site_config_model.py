@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 
-from sqlalchemy import Boolean, DateTime, JSON, String
+from sqlalchemy import Boolean, DateTime, Integer, JSON, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,14 @@ class SiteConfig(Base):
     request_headers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     use_js_render: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Schedule fields
+    schedule_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    schedule_interval_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    schedule_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="Europe/Lisbon")
+    schedule_start_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    schedule_max_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(

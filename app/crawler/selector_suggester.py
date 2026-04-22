@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -16,6 +18,28 @@ from app.core.logging import get_logger
 from app.crawler.html_cache import get_cached_html
 
 logger = get_logger(__name__)
+
+_BLOCKED_HOSTS = {"localhost", "0.0.0.0", "::1"}
+
+
+def _validate_url(url: str) -> None:
+    """Raise ValueError if url resolves to a private/loopback address (SSRF guard)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Only http/https URLs are allowed, got: {parsed.scheme!r}")
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError("URL has no hostname")
+    if host.lower() in _BLOCKED_HOSTS:
+        raise ValueError(f"SSRF blocked: hostname {host!r} is not allowed")
+    try:
+        addr = ipaddress.ip_address(host)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            raise ValueError(f"SSRF blocked: IP address {host} is not routable")
+    except ValueError as exc:
+        if "SSRF blocked" in str(exc):
+            raise
+        # hostname is not a raw IP — DNS resolution happens later, which is acceptable
 
 _FIELD_ORDER = (
     "price",
@@ -361,6 +385,12 @@ async def suggest_selectors(url: str) -> dict[str, Any]:
     empty_result = {"source": "heuristic", "candidates": {field: [] for field in _FIELD_ORDER}}
 
     try:
+        _validate_url(url)
+    except ValueError as exc:
+        logger.warning("suggest_selectors blocked: %s", exc)
+        return empty_result
+
+    try:
         html = await get_cached_html(url, fetch_html)
     except Exception as exc:
         logger.error(
@@ -400,6 +430,12 @@ async def suggest_selectors(url: str) -> dict[str, Any]:
 
 async def preview_selector(url: str, selector: str) -> dict[str, Any]:
     """Preview the first extracted values for a CSS selector on a page."""
+    try:
+        _validate_url(url)
+    except ValueError as exc:
+        logger.warning("preview_selector blocked: %s", exc)
+        return {"matches": 0, "preview": []}
+
     try:
         html = await get_cached_html(url, fetch_html)
     except Exception as exc:

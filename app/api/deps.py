@@ -63,10 +63,13 @@ async def verify_api_key(
 ) -> str:
     """Validate the X-API-Key header."""
     if not settings.api_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication is not configured on the server.",
-        )
+        if settings.app_env == "production":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication is not configured on the server.",
+            )
+        # Non-production: allow unauthenticated access with a dev placeholder
+        return "dev-bypass"
 
     if not api_key or not secrets.compare_digest(api_key, settings.api_key):
         raise HTTPException(

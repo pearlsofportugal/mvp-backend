@@ -2,7 +2,6 @@
 import asyncio
 import time
 from collections import deque
-from threading import Lock
 from typing import Any, Sequence
 from uuid import UUID
 
@@ -30,8 +29,13 @@ from app.schemas.ai_enrichment_schema import (
 
 logger = get_logger(__name__)
 
-_AI_REQUEST_TIMESTAMPS = deque()
-_AI_RATE_LIMIT_LOCK = Lock()
+_AI_REQUEST_TIMESTAMPS: deque[float] = deque()
+_AI_RATE_LIMIT_LOCK = asyncio.Lock()
+
+
+def _reset_rate_limit_for_tests() -> None:
+    """Clear the rate-limit window — for use in test teardown only."""
+    _AI_REQUEST_TIMESTAMPS.clear()
 
 
 def _sanitize_keywords(keywords: Sequence[str]) -> list[str]:
@@ -47,7 +51,7 @@ def _sanitize_keywords(keywords: Sequence[str]) -> list[str]:
     return unique
 
 
-def _check_ai_rate_limit(now: float | None = None) -> None:
+async def _check_ai_rate_limit(now: float | None = None) -> None:
     """Enforce a simple in-process sliding-window rate limit for AI calls."""
     max_requests = settings.ai_rate_limit_requests
     window_seconds = settings.ai_rate_limit_window
@@ -57,7 +61,7 @@ def _check_ai_rate_limit(now: float | None = None) -> None:
     current_time = time.monotonic() if now is None else now
     cutoff = current_time - window_seconds
 
-    with _AI_RATE_LIMIT_LOCK:
+    async with _AI_RATE_LIMIT_LOCK:
         while _AI_REQUEST_TIMESTAMPS and _AI_REQUEST_TIMESTAMPS[0] <= cutoff:
             _AI_REQUEST_TIMESTAMPS.popleft()
 
@@ -220,8 +224,18 @@ Your mission is to generate persuasive, search-engine-optimised property descrip
 independently in each requested language, working directly from the original property data.
 
 LANGUAGE RULE (MANDATORY):
-Generate each locale's content natively in that language, using the original scraped data
-as the factual source. Do NOT translate from English — write each language independently and naturally.
+For EACH locale, treat it as a completely independent copywriting task.
+Do NOT generate a master version and translate it. Do NOT reuse sentence structures,
+metaphors, or phrasing across locales — if two descriptions feel similar, they are wrong.
+
+Each language has its own rhetorical culture. Apply it:
+- PT (European Portuguese): Direct, grounded, with subtle emotional warmth. Avoid Brazilianisms.
+- EN (British/International English): Understated elegance, precise adjectives, confident tone.
+- ES (Castilian Spanish): Expressive and vivid, with sensory richness. Avoid Latin American idioms.
+- FR (French): Refined and evocative, with a focus on lifestyle and savoir-vivre.
+- DE (German): Concrete, structured, trust-building — lead with quality and practicality.
+
+The test: a reader fluent in each language should feel the text was written by a local professional, not translated.
 
 INPUT PROVIDED:
 - Original data: {raw_data}
@@ -229,36 +243,48 @@ INPUT PROVIDED:
 - Requested locales: {locales}
 
 WRITING RULES (apply identically to every locale):
-- FORMAT: Use exclusively continuous prose in paragraphs. Lists or bullet points are PROHIBITED.
-- LENGTH: The description must be strictly between 250 and 400 words.
+- FORMAT: Use exclusively continuous prose in paragraphs. Lists or bullet points are STRICTLY PROHIBITED.
+- LENGTH (CRITICAL — hard requirement):
+    - The description field must contain BETWEEN 250 AND 400 WORDS. No exceptions.
+    - Before writing, plan your paragraphs to fit within this range.
+    - After writing, mentally count the words. If below 250, expand. If above 400, cut.
+    - A description outside this range is considered invalid output.
 - REWRITING: Use the source data as a factual reference only. Rewrite with fresh, original copywriting.
-- NARRATIVE STRUCTURE:
-    1. Introduction: Emotional hook with the location.
-    2. Development: Comfort, design, and interior details.
-    3. Sustainability/Features: Translate technical specs into tangible benefits.
-    4. Closing: Outdoor areas + generic Call-to-Action appropriate for the target language.
+- NARRATIVE STRUCTURE (four paragraphs):
+    1. Introduction: Emotional hook with the location. (~60-80 words)
+    2. Development: Comfort, design, and interior details. (~80-100 words)
+    3. Sustainability/Features: Translate technical specs into tangible benefits. (~60-80 words)
+    4. Closing: Outdoor areas + generic Call-to-Action appropriate for the target language. (~60-80 words)
 - TONE OF VOICE: Professional, inspiring, and modern.
 - SEO: Integrate provided keywords naturally. At least one in the first paragraph and one in the closing.
-- REAL ESTATE TERMS: Translate Portuguese terms (T1, T2, T3) to the target language equivalent
-  (e.g. "1-bedroom apartment" in English, "appartement 1 chambre" in French, "1-Zimmer-Wohnung" in German, "apartamento de 1 dormitorio" in Spanish).
+- REAL ESTATE TERMS: Translate Portuguese typology codes to the target language equivalent:
+    - PT: T0 = estúdio, T1 = apartamento T1, T2 = apartamento T2, T3 = apartamento T3
+    - EN: T0 = studio, T1 = 1-bedroom apartment, T2 = 2-bedroom apartment, T3 = 3-bedroom apartment
+    - ES: T0 = estudio, T1 = apartamento de 1 dormitorio, T2 = apartamento de 2 dormitorios, T3 = apartamento de 3 dormitorios
+    - FR: T0 = studio, T1 = appartement 1 chambre, T2 = appartement 2 chambres, T3 = appartement 3 chambres
+    - DE: T0 = Studio-Apartment, T1 = 1-Zimmer-Wohnung, T2 = 2-Zimmer-Wohnung, T3 = 3-Zimmer-Wohnung
 - CONTENT FILTER: Exclude all agency-specific references (names, contacts, taglines).
   The CTA must be generic and culturally appropriate to the target language.
+- KEYWORDS: The provided keywords may be in a different language than the target locale.
+  Adapt their meaning naturally — do NOT insert foreign-language keywords into the text.
 
 OUTPUT RULES (JSON):
-Respond exclusively with valid JSON. Keys are the locale codes requested.
-Each locale object must have exactly these three keys: title, description, meta_description.
-No markdown, no code blocks, no extra text outside the JSON object.
+Respond exclusively with valid JSON. No markdown, no code blocks, no extra text outside the JSON.
+Keys are the locale codes requested. Each locale object must have exactly these three keys:
+
 {
     "pt": {
         "title": "SEO title in European Portuguese (max 60 characters)",
-        "description": "Full persuasive prose in European Portuguese (strictly 250-400 words)",
-        "meta_description": "Google summary in European Portuguese — EXACTLY 140-155 characters"
+        "description": "Full persuasive prose in European Portuguese — MUST be 250 to 400 words",
+        "meta_description": "Google snippet in European Portuguese — MUST be between 140 and 155 characters"
     },
+    "en": { ... },
     "es": { ... },
     "fr": { ... },
     "de": { ... }
 }
-Only include locale keys that were requested.
+
+Only include locale keys that were requested in {locales}.
 """.strip()
 
 
@@ -294,7 +320,6 @@ def _build_multilang_prompt(listing: "Listing", keywords: list[str], locales: li
 
 
 def _call_ai_for_translations(listing: "Listing", keywords: list[str], locales: list[str]) -> dict[str, Any]:
-    _check_ai_rate_limit()
     system = _build_multilang_prompt(listing, keywords, locales)
     # The user prompt is minimal — all context is in the system instruction.
     prompt = f"Generate SEO content for the following locales: {', '.join(locales)}"
@@ -379,6 +404,7 @@ async def enrich_listing_translations(
 
     # Generate missing locales in one single AI call.
     if locales_to_generate:
+        await _check_ai_rate_limit()
         raw = await _call_ai_for_translations_async(listing, keywords_used, locales_to_generate)
         for locale in locales_to_generate:
             results[locale] = _parse_locale_output(raw, locale)
@@ -408,3 +434,118 @@ async def enrich_translations_and_persist(
     if payload.apply:
         await db.commit()
     return response
+
+
+# ---------------------------------------------------------------------------
+# Background runners — called via FastAPI BackgroundTasks
+# ---------------------------------------------------------------------------
+
+async def run_bulk_enrich_job(job_id: UUID, listing_ids: list[UUID], payload: BulkEnrichmentRequest) -> None:
+    """Background task: enrich a list of listings and update job progress in-store."""
+    from app.database import async_session_factory
+    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job
+
+    job = get_job(job_id)
+    if job is None:
+        logger.error("run_bulk_enrich_job: job %s not found in store", job_id)
+        return
+
+    enriched = 0
+    skipped = 0
+    failed = 0
+    results = []
+
+    for lid in listing_ids:
+        try:
+            async with async_session_factory() as db:
+                listing = await ListingRepository.get_listing_by_id(db, lid)
+                if listing is None:
+                    job.skipped += 1
+                    skipped += 1
+                    results.append({"listing_id": str(lid), "status": "skipped", "error": "not found"})
+                    continue
+
+                translate_payload = ListingTranslationRequest(
+                    listing_id=lid,
+                    locales=payload.locales,
+                    keywords=payload.keywords,
+                    apply=False,
+                    force=payload.force,
+                )
+                preview = await enrich_listing_translations(listing, translate_payload)
+
+                if not preview.locales_generated:
+                    job.skipped += 1
+                    skipped += 1
+                    results.append({"listing_id": str(lid), "status": "skipped"})
+                    continue
+
+                apply_payload = ListingTranslationRequest(
+                    listing_id=lid,
+                    locales=payload.locales,
+                    apply=True,
+                    translation_values=preview.results,
+                )
+                await enrich_listing_translations(listing, apply_payload)
+                await db.commit()
+
+                job.done += 1
+                enriched += 1
+                results.append({
+                    "listing_id": str(lid),
+                    "status": "enriched",
+                    "locales_generated": preview.locales_generated,
+                })
+
+        except Exception as exc:
+            logger.warning("Bulk enrichment failed for listing %s: %s", lid, exc)
+            job.failed += 1
+            failed += 1
+            job.errors.append(f"{lid}: {exc}")
+            results.append({"listing_id": str(lid), "status": "error", "error": str(exc)})
+
+    from datetime import datetime, timezone
+
+    job.result = {
+        "total_requested": len(listing_ids),
+        "enriched": enriched,
+        "skipped": skipped,
+        "failed": failed,
+        "results": results,
+    }
+    job.status = STATUS_FAILED if failed == len(listing_ids) and enriched == 0 else STATUS_COMPLETED
+    job.finished_at = datetime.now(timezone.utc)
+    logger.info(
+        "Bulk enrichment job %s finished: enriched=%s skipped=%s failed=%s",
+        job_id,
+        enriched,
+        skipped,
+        failed,
+    )
+
+
+async def run_single_enrich_job(job_id: UUID, listing_id: UUID, payload: ListingTranslationRequest) -> None:
+    """Background task: enrich a single listing and store the response in the job."""
+    from app.database import async_session_factory
+    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job
+
+    job = get_job(job_id)
+    if job is None:
+        logger.error("run_single_enrich_job: job %s not found in store", job_id)
+        return
+
+    from datetime import datetime, timezone
+
+    try:
+        async with async_session_factory() as db:
+            response = await enrich_translations_and_persist(db, listing_id, payload)
+        job.done = 1
+        job.result = response.model_dump(mode="json")
+        job.status = STATUS_COMPLETED
+    except Exception as exc:
+        logger.warning("Single enrichment job %s failed: %s", job_id, exc)
+        job.failed = 1
+        job.errors.append(str(exc))
+        job.status = STATUS_FAILED
+    finally:
+        job.finished_at = datetime.now(timezone.utc)

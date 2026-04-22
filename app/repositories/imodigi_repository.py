@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,3 +79,31 @@ class ImodigiRepository:
         await db.execute(stmt)
         await db.flush()
         return await db.scalar(select(ImodigiExport).where(ImodigiExport.listing_id == listing_id))
+
+    @staticmethod
+    async def delete_export_by_listing_id(
+        db: AsyncSession,
+        listing_id: uuid.UUID,
+    ) -> bool:
+        """Delete the export record for a listing. Returns True if a row was deleted."""
+        result = await db.execute(
+            delete(ImodigiExport).where(ImodigiExport.listing_id == listing_id)
+        )
+        return result.rowcount > 0
+
+    @staticmethod
+    async def delete_exports_by_listing_ids(
+        db: AsyncSession,
+        listing_ids: list[uuid.UUID],
+    ) -> int:
+        """Delete export records for a list of listings. Returns the number of deleted rows."""
+        result = await db.execute(
+            delete(ImodigiExport).where(ImodigiExport.listing_id.in_(listing_ids))
+        )
+        return result.rowcount
+
+    @staticmethod
+    async def delete_all_exports(db: AsyncSession) -> int:
+        """Delete ALL export records. Returns the number of deleted rows."""
+        result = await db.execute(delete(ImodigiExport))
+        return result.rowcount

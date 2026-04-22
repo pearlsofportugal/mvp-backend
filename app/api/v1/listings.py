@@ -53,6 +53,8 @@ async def list_listings(
     created_after: datetime | None = Query(None),
     created_before: datetime | None = Query(None),
     search: str | None = Query(None),
+    is_enriched: bool | None = Query(None, description="Filter by AI enrichment status."),
+    is_exported_to_imodigi: bool | None = Query(None, description="Filter by Imodigi export status (published or updated)."),
     sort_by: str = Query("created_at", enum=list(SORT_FIELDS.keys())),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -69,6 +71,8 @@ async def list_listings(
         "has_garage": has_garage, "has_pool": has_pool, "has_elevator": has_elevator,
         "created_after": created_after, "created_before": created_before,
         "search": search,
+        "is_enriched": is_enriched,
+        "is_exported_to_imodigi": is_exported_to_imodigi,
     }
     paginated, meta = await ListingService.get_all_listings(db, filter_kwargs, sort_by, sort_order, page, page_size)
     return ok(paginated, "Listings listed successfully", request, meta=meta)
@@ -86,11 +90,12 @@ async def selector_listings(
     q: str | None = Query(None),
     source_partner: str | None = Query(None),
     is_enriched: bool | None = Query(None),
+    is_exported_to_imodigi: bool | None = Query(None, description="Filter by Imodigi export status (published or updated)."),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
     """Lightweight listing picker for the selector UI."""
-    results, meta = await ListingService.search_listings(db, q, source_partner, is_enriched, page, page_size)
+    results, meta = await ListingService.search_listings(db, q, source_partner, is_enriched, is_exported_to_imodigi, page, page_size)
     return ok(results, "Listings found", request, meta=meta)
 
 

@@ -56,6 +56,28 @@ class ImodigiExportRequest(BaseModel):
     )
 
 
+class ImodigiBulkExportRequest(BaseModel):
+    """Request body for POST /api/v1/imodigi/publish/bulk."""
+
+    listing_ids: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Explicit listing IDs to export. "
+            "When empty all listings not yet published (or failed) are exported."
+        ),
+    )
+    client_id: int | None = Field(
+        None,
+        description="Imodigi store ID. Overrides the IMODIGI_CLIENT_ID setting when provided.",
+    )
+    limit: int = Field(
+        50,
+        ge=1,
+        le=500,
+        description="Maximum number of listings to process when listing_ids is empty.",
+    )
+
+
 class ImodigiExportResponse(BaseModel):
     """Returned after a successful export to Imodigi."""
     listing_id: UUID
@@ -63,3 +85,15 @@ class ImodigiExportResponse(BaseModel):
     imodigi_reference: str | None = None
     status: str
     action: str = Field(description="'created' or 'updated'")
+
+
+class ImodigiResetRequest(BaseModel):
+    """Request body for POST /api/v1/imodigi/publications/reset."""
+
+    listing_ids: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Listing IDs whose export records should be deleted. "
+            "Pass an empty list to reset ALL export records."
+        ),
+    )

@@ -1,5 +1,20 @@
 steps:
+  - name: 'python:3.13-slim'
+    id: Test
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -q -e ".[dev]" &&
+        python -m pytest tests/ -q --tb=short -x
+    env:
+      - 'DATABASE_URL=sqlite+aiosqlite:///./test.db'
+      - 'API_KEY=test-key'
+      - 'ENVIRONMENT=test'
+
   - name: 'gcr.io/kaniko-project/executor:latest'
+    id: Build
+    waitFor: ['Test']
     args:
       - '--dockerfile=Dockerfile'
       - '--context=.'
@@ -7,7 +22,6 @@ steps:
       - '--cache=true'
       - '--cache-ttl=24h'
       - '--cache-repo=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME-cache'
-    id: Build
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     args:
       - run
@@ -20,6 +34,7 @@ steps:
       - '--region=$_DEPLOY_REGION'
       - '--quiet'
     id: Deploy
+    waitFor: ['Build']
     entrypoint: gcloud
 options:
   substitutionOption: ALLOW_LOOSE

@@ -2,10 +2,18 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def resolve_enriched_title(
+    enriched_translations: "dict[str, Any] | None",
+    fallback: "str | None" = None,
+) -> "str | None":
+    """Extract the EN enriched title, falling back to the supplied canonical value."""
+    return (((enriched_translations or {}).get("en") or {}).get("title")) or fallback
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +81,7 @@ class ListingBase(BaseModel):
     bathrooms: int | None = Field(None, ge=0)
     floor: str | None = Field(None, description="Floor label (e.g. '3', 'R/C', 'último').")
     construction_year: int | None = Field(None, ge=1800, description="Year of construction.")
-    energy_certificate: str | None = Field(None, description="Energy certificate rating.")
+    energy_certificate: str | None = Field(None, max_length=20, description="Energy certificate rating (e.g. A+, A, B, C, Isento).")
 
     # ── Pricing ───────────────────────────────────────────────────────────
     price_amount: Decimal | None = Field(None, ge=0)
@@ -109,7 +117,7 @@ class ListingBase(BaseModel):
     description: str | None = Field(None, description="Cleaned / normalised description.")
     description_quality_score: int | None = Field(None, ge=0, le=100, description="AI quality score (0–100).")
     meta_description: str | None = Field(None, description="SEO meta description (scraped).")
-    enriched_translations: dict | None = Field(
+    enriched_translations: dict[str, Any] | None = Field(
         None,
         description="AI-generated SEO content per locale: {\"en\": {title, description, meta_description}, \"pt\": {...}, ...}",
     )
@@ -127,7 +135,7 @@ class ListingCreate(ListingBase):
     partner_id: str | None = Field(None, description="Partner's own listing identifier.")
     page_title: str | None = Field(None, description="Raw <title> of the scraped page.")
     media_assets: list[MediaAssetCreate] = Field(default_factory=list)
-    raw_payload: dict | None = Field(None, description="Full raw partner payload, preserved for debugging.")
+    raw_payload: dict[str, Any] | None = Field(None, description="Full raw partner payload, preserved for debugging.")
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +263,9 @@ class ListingListRead(BaseModel):
 
     @model_validator(mode="after")
     def _apply_enriched_title(self) -> "ListingListRead":
-        en_title = ((self.enriched_translations or {}).get("en") or {}).get("title")
-        if en_title:
-            self.title = en_title
+        enriched_title = resolve_enriched_title(self.enriched_translations)
+        if enriched_title:
+            self.title = enriched_title
         return self
 
 

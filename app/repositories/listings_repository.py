@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, asc, desc, func, or_, select
+from sqlalchemy import and_, asc, desc, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 
+from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory
@@ -33,7 +34,7 @@ class ListingRepository:
 
     @staticmethod
     async def count_listings(db: AsyncSession, filters: dict) -> int:
-        query = apply_listing_filters(select(func.count(Listing.id)), **filters)
+        query = apply_listing_filters(select(func.count(Listing.id)), filters)
         return (await db.execute(query)).scalar_one()
 
     @staticmethod
@@ -56,15 +57,29 @@ class ListingRepository:
         sort_order: str,
         page: int,
         page_size: int,
-    ) -> list[Listing]:
-        query = apply_listing_filters(select(Listing), **filters)
+    ) -> tuple[list[Listing], int]:
+        # COUNT(*) OVER() calcula o total sem query separada
+        total_count = func.count().over().label("total_count")
+    
+        query = apply_listing_filters(
+            select(Listing, total_count), filters
+        )
         query = query.order_by(desc(sort_column) if sort_order == "desc" else asc(sort_column))
         query = query.offset((page - 1) * page_size).limit(page_size)
-        return (await db.execute(query)).scalars().all()
+    
+        rows = (await db.execute(query)).all()
+    
+        if not rows:
+            return [], 0
+    
+        listings = [row[0] for row in rows]  # objeto Listing
+        total = rows[0][1]                   # total_count da primeira linha
+    
+        return listings, total
 
     @staticmethod
     async def get_listings_for_export(db: AsyncSession, filters: dict, limit: int | None = None) -> list[Listing]:
-        query = apply_listing_filters(select(Listing), **filters).order_by(Listing.created_at.desc())
+        query = apply_listing_filters(select(Listing), filters).order_by(Listing.created_at.desc())
         if limit is not None:
             query = query.limit(limit)
         return (await db.execute(query)).scalars().all()
@@ -75,6 +90,7 @@ class ListingRepository:
         q: str | None,
         source_partner: str | None,
         is_enriched: bool | None,
+        is_exported_to_imodigi: bool | None,
         page: int,
         page_size: int,
     ) -> tuple[list[Listing], int]:
@@ -95,6 +111,16 @@ class ListingRepository:
             stmt = stmt.where(Listing.enriched_translations.isnot(None))
         elif is_enriched is False:
             stmt = stmt.where(Listing.enriched_translations.is_(None))
+        _imodigi_exists = exists(
+            select(ImodigiExport.id).where(
+                ImodigiExport.listing_id == Listing.id,
+                ImodigiExport.status.in_(["published", "updated"]),
+            ).correlate(Listing)
+        )
+        if is_exported_to_imodigi is True:
+            stmt = stmt.where(_imodigi_exists)
+        elif is_exported_to_imodigi is False:
+            stmt = stmt.where(~_imodigi_exists)
 
         total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
         stmt = (
@@ -196,16 +222,18 @@ class ListingRepository:
             asset.listing_id = listing.id
             db.add(asset)
         await db.commit()
-        await db.refresh(listing)
-        return listing
+        # Re-query with selectinload — required since lazy="raise" on relationships
+        result = await ListingRepository.get_listing_by_id(db, listing.id)
+        return result  # type: ignore[return-value]  # always non-None immediately after create
 
     @staticmethod
     async def update_listing(db: AsyncSession, listing: Listing, price_history: PriceHistory | None = None) -> Listing:
         if price_history:
             db.add(price_history)
         await db.commit()
-        await db.refresh(listing)
-        return listing
+        # Re-query with selectinload — required since lazy="raise" on relationships
+        result = await ListingRepository.get_listing_by_id(db, listing.id)
+        return result  # type: ignore[return-value]  # always non-None for an existing listing
 
     @staticmethod
     async def delete_listing(db: AsyncSession, listing: Listing) -> None:

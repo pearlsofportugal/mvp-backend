@@ -148,13 +148,13 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
     if listing.energy_certificate:
         payload["energy"] = {"class": listing.energy_certificate}
 
-    # Images
+    # Images — limit to 20 per imodigi constraint
     if listing.media_assets:
-        payload["images"] = [a.url for a in listing.media_assets if a.url]
+        payload["images"] = [a.url for a in listing.media_assets if a.url][:20]
 
     # Translations — built from enriched_translations (all locales), EN falls back to canonical fields
     translations: dict[str, dict[str, str]] = {}
-    enriched: dict = listing.enriched_translations or {}
+    enriched: dict[str, Any] = listing.enriched_translations or {}
 
     for locale, locale_data in enriched.items():
         if not isinstance(locale_data, dict):
@@ -182,7 +182,7 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
 
     if translations:
         payload["translations"] = translations
-
+    logger.debug("Imodigi payload built", extra={"listing_id": str(listing.id)})
     return payload
 
 
@@ -348,3 +348,117 @@ async def get_export_record(
     if not record:
         raise NotFoundError(f"No Imodigi export found for listing {listing_id}")
     return record
+
+
+async def reset_export_record(
+    db: AsyncSession,
+    listing_id: UUID,
+) -> None:
+    """Delete the Imodigi export record for a single listing.
+
+    After reset, the next export will send a POST (create) instead of PATCH (update).
+    Raises NotFoundError if no export record exists.
+    """
+    deleted = await ImodigiRepository.delete_export_by_listing_id(db, listing_id)
+    if not deleted:
+        raise NotFoundError(f"No Imodigi export found for listing {listing_id}")
+    await db.commit()
+
+
+async def reset_export_records(
+    db: AsyncSession,
+    listing_ids: list[UUID],
+) -> int:
+    """Delete Imodigi export records for the given listings, or ALL if the list is empty.
+
+    Returns the number of records deleted.
+    After reset, the next export will send a POST (create) instead of PATCH (update).
+    """
+    if listing_ids:
+        count = await ImodigiRepository.delete_exports_by_listing_ids(db, listing_ids)
+    else:
+        count = await ImodigiRepository.delete_all_exports(db)
+    await db.commit()
+    return count
+
+
+async def get_listing_ids_for_bulk_imodigi(
+    db: AsyncSession,
+    listing_ids: list[UUID],
+    limit: int,
+) -> list[UUID]:
+    """Return listing IDs to process for bulk Imodigi export.
+
+    When *listing_ids* is provided, use those. Otherwise, return all listings that
+    have never been published or whose last export failed (up to *limit*).
+    """
+    from sqlalchemy import not_
+
+    if listing_ids:
+        return list(listing_ids)
+
+    # Subquery: listing IDs that are already published/updated
+    published_subq = (
+        select(ImodigiExport.listing_id)
+        .where(ImodigiExport.status.in_(["published", "updated"]))
+        .scalar_subquery()
+    )
+    stmt = (
+        select(Listing.id)
+        .where(not_(Listing.id.in_(published_subq)))
+        .order_by(Listing.created_at.asc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return list(rows)
+
+
+# ---------------------------------------------------------------------------
+# Background runner — called via FastAPI BackgroundTasks
+# ---------------------------------------------------------------------------
+
+
+async def run_bulk_imodigi_job(job_id: UUID, listing_ids: list[UUID], client_id: int) -> None:
+    """Background task: export listings to Imodigi and update job progress in-store."""
+    from datetime import datetime, timezone
+
+    from app.database import async_session_factory
+    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job
+
+    job = get_job(job_id)
+    if job is None:
+        logger.error("run_bulk_imodigi_job: job %s not found in store", job_id)
+        return
+
+    done = 0
+    failed = 0
+    results = []
+
+    for lid in listing_ids:
+        try:
+            async with async_session_factory() as db:
+                export_record, action = await export_listing_to_crm(db, lid, client_id)
+            job.done += 1
+            done += 1
+            results.append({
+                "listing_id": str(lid),
+                "status": export_record.status,
+                "action": action,
+                "imodigi_property_id": export_record.imodigi_property_id,
+            })
+        except Exception as exc:
+            logger.warning("Bulk Imodigi export failed for listing %s: %s", lid, exc)
+            job.failed += 1
+            failed += 1
+            job.errors.append(f"{lid}: {exc}")
+            results.append({"listing_id": str(lid), "status": "failed", "error": str(exc)})
+
+    job.result = {"total": len(listing_ids), "done": done, "failed": failed, "results": results}
+    job.status = STATUS_FAILED if done == 0 and failed > 0 else STATUS_COMPLETED
+    job.finished_at = datetime.now(timezone.utc)
+    logger.info(
+        "Bulk Imodigi export job %s finished: done=%s failed=%s",
+        job_id,
+        done,
+        failed,
+    )

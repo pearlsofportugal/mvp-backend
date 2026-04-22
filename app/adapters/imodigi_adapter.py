@@ -15,8 +15,11 @@ logger = get_logger(__name__)
 
 
 def _headers() -> dict[str, str]:
+    token = settings.imodigi_api_token
+    if not token:
+        raise ImodigiError("imodigi_api_token is not configured")
     return {
-        "X-API-Token": settings.imodigi_api_token,
+        "X-API-Token": token,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
@@ -49,24 +52,34 @@ class ImodigiAdapter:
     def __init__(self, base_url: str | None = None, timeout: int = 60) -> None:
         self._base_url = base_url or settings.imodigi_base_url
         self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return the shared AsyncClient, creating it lazily on first use."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client. Call during application shutdown."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
     async def get_stores(self) -> list[dict[str, Any]]:
         """GET /crm-stores.php — return list of active stores."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(
-                f"{self._base_url}/crm-stores.php",
-                headers=_headers(),
-            )
+        resp = await self._get_client().get(
+            f"{self._base_url}/crm-stores.php",
+            headers=_headers(),
+        )
         body = _raise_if_error(resp)
         return body.get("stores", [])
 
     async def get_catalog_values(self) -> dict[str, Any]:
         """GET /crm-property-values.php — return allowed catalog values."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(
-                f"{self._base_url}/crm-property-values.php",
-                headers=_headers(),
-            )
+        resp = await self._get_client().get(
+            f"{self._base_url}/crm-property-values.php",
+            headers=_headers(),
+        )
         body = _raise_if_error(resp)
         return body.get("values", {})
 
@@ -94,12 +107,11 @@ class ImodigiAdapter:
         if q:
             params["q"] = q
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(
-                f"{self._base_url}/crm-locations.php",
-                headers=_headers(),
-                params=params,
-            )
+        resp = await self._get_client().get(
+            f"{self._base_url}/crm-locations.php",
+            headers=_headers(),
+            params=params,
+        )
         body = _raise_if_error(resp)
         return body.get("items", [])
 
@@ -119,12 +131,11 @@ class ImodigiAdapter:
             request_body["translations"] = translations
         if settings.debug:
             logger.debug("Imodigi CREATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(
-                f"{self._base_url}/crm-properties.php",
-                headers=_headers(),
-                json=request_body,
-            )
+        resp = await self._get_client().post(
+            f"{self._base_url}/crm-properties.php",
+            headers=_headers(),
+            json=request_body,
+        )
         return _raise_if_error(resp)
 
     async def update_property(
@@ -148,12 +159,11 @@ class ImodigiAdapter:
             request_body["translations"] = translations
         if settings.debug:
             logger.debug("Imodigi UPDATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.patch(
-                f"{self._base_url}/crm-properties.php",
-                headers=_headers(),
-                json=request_body,
-            )
+        resp = await self._get_client().patch(
+            f"{self._base_url}/crm-properties.php",
+            headers=_headers(),
+            json=request_body,
+        )
         return _raise_if_error(resp)
 
 

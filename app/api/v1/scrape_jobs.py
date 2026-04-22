@@ -10,13 +10,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.responses import ERROR_RESPONSES, ok
 from app.database import async_session_factory
-from app.models.scrape_job_model import ScrapeJob
 from app.schemas.base_schema import ApiResponse
 from app.schemas.scrape_job_schema import JobCreate, JobListRead, JobRead
 from app.services.scrape_job_service import ScrapeJobService
@@ -108,8 +106,9 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
 
     try:
         async with async_session_factory() as db:
-            job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
-            if not job:
+            try:
+                await ScrapeJobService.get_job(db, job_id)
+            except Exception:
                 yield _sse_event("error", {"message": f"Job {job_id} not found"})
                 return
 
@@ -122,11 +121,11 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                 break
 
             async with async_session_factory() as db:
-                job = (await db.execute(select(ScrapeJob).where(ScrapeJob.id == job_id))).scalar_one_or_none()
-
-            if not job:
-                yield _sse_event("error", {"message": "Job disappeared from database"})
-                break
+                try:
+                    job = await ScrapeJobService.get_job(db, job_id)
+                except Exception:
+                    yield _sse_event("error", {"message": "Job disappeared from database"})
+                    break
 
             current_progress = job.progress or {}
             current_status = job.status

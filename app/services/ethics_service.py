@@ -7,8 +7,11 @@ Rules preserved:
 4. Retries with exponential backoff: 429/5xx retriable, 4xx returns None
 5. Per-domain robots.txt cache with 1-hour TTL
 6. URL deduplication within a job
+7. SSRF protection: requests to private/loopback IPs are blocked
 """
+import ipaddress
 import re
+import socket
 import time
 
 from urllib.parse import urlparse
@@ -47,9 +50,9 @@ class EthicalScraper:
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
 
-        # Robots.txt cache: domain -> (parser, is_loaded_successfully)
-        self._robots_cache: dict[str, tuple[RobotFileParser, bool]] = {}
-        self._cache_timestamps: dict[str, float] = {}
+        # Robots.txt cache: domain -> (parser, is_loaded_successfully, expires_at)
+        # Single dict for atomic reads/writes — no race between cache and timestamps.
+        self._robots_cache: dict[str, tuple[RobotFileParser, bool, float]] = {}
 
         # URL deduplication for current job
         self._visited_urls: set[str] = set()
@@ -71,20 +74,40 @@ class EthicalScraper:
                 self.user_agent,
             )
 
+    # Private and loopback IP ranges blocked for SSRF protection
+    _PRIVATE_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+        ipaddress.ip_network("127.0.0.0/8"),
+        ipaddress.ip_network("169.254.0.0/16"),
+        ipaddress.ip_network("::1/128"),
+        ipaddress.ip_network("fc00::/7"),
+    ]
+
     def _get_domain(self, url: str) -> str:
         """Extract domain from URL."""
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}"
 
+    def _is_private_host(self, url: str) -> bool:
+        """Return True if the URL resolves to a private or loopback IP (SSRF guard)."""
+        hostname = urlparse(url).hostname or ""
+        try:
+            ip = ipaddress.ip_address(socket.gethostbyname(hostname))
+            return any(ip in net for net in self._PRIVATE_NETWORKS)
+        except (socket.gaierror, ValueError):
+            # Cannot resolve or invalid hostname — let robots.txt/HTTP layer handle it
+            return False
+
     def _load_robots(self, domain: str) -> tuple[RobotFileParser, bool]:
         """Load and cache robots.txt for a domain."""
         now = time.time()
 
-        # Check cache
-        if domain in self._robots_cache:
-            cached_time = self._cache_timestamps.get(domain, 0)
-            if now - cached_time < self.ROBOTS_CACHE_TTL:
-                return self._robots_cache[domain]
+        # Check cache — single dict read is atomic; no partial state possible
+        entry = self._robots_cache.get(domain)
+        if entry is not None and entry[2] > now:
+            return entry[0], entry[1]
 
         # Load robots.txt
         robots_url = f"{domain}/robots.txt"
@@ -104,12 +127,17 @@ class EthicalScraper:
             )
             loaded = False
 
-        self._robots_cache[domain] = (parser, loaded)
-        self._cache_timestamps[domain] = now
+        # Atomic write: single tuple assignment, not two separate dict updates
+        self._robots_cache[domain] = (parser, loaded, now + self.ROBOTS_CACHE_TTL)
         return parser, loaded
 
     def allowed(self, url: str) -> bool:
         """Check if URL is allowed by robots.txt. FAIL-CLOSED: blocks if robots.txt unavailable."""
+        # SSRF guard: block requests to private/loopback IPs
+        if self._is_private_host(url):
+            logger.warning("Blocking %s — resolves to private/loopback IP (SSRF guard)", url)
+            return False
+
         domain = self._get_domain(url)
         parser, loaded = self._load_robots(domain)
 
@@ -169,3 +197,9 @@ class EthicalScraper:
     def close(self) -> None:
         """Close the HTTP session."""
         self._http.close()
+
+    def __enter__(self) -> "EthicalScraper":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()

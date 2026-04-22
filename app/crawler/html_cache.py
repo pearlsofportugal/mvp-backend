@@ -82,15 +82,20 @@ class HtmlCache:
                 self._inflight[url] = asyncio.Lock()
         url_lock = self._inflight[url]
 
-        async with url_lock:
-            # Double-check: another coroutine may have populated the cache
-            cached = await self.get(url)
-            if cached is not None:
-                return cached
+        try:
+            async with url_lock:
+                # Double-check: another coroutine may have populated the cache
+                cached = await self.get(url)
+                if cached is not None:
+                    return cached
 
-            html = await fetcher(url)
-            await self.set(url, html)
-            return html
+                html = await fetcher(url)
+                await self.set(url, html)
+                return html
+        finally:
+            # Remove the per-URL lock to prevent unbounded growth
+            async with self._lock:
+                self._inflight.pop(url, None)
 
     async def clear(self) -> None:
         """Remove all entries from the cache."""

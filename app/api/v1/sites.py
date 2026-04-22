@@ -16,6 +16,7 @@ from app.schemas.site_config_schema import (
     SiteConfigPreviewRequest,
     SiteConfigPreviewResponse,
     SiteConfigRead,
+    SiteConfigScheduleInfo,
     SiteConfigSuggestRequest,
     SiteConfigSuggestResponse,
     SiteConfigUpdate,
@@ -24,6 +25,7 @@ from app.schemas.site_config_schema import (
     TestScrapeRequest,
     TestScrapeResponse,
 )
+from app.services.scheduler_service import scheduler_service
 from app.services.selector_validation_service import validate_selectors
 from app.services.site_config_service import SiteConfigService
 from app.services.test_listing_page_service import run_test_listing_page
@@ -128,7 +130,34 @@ async def update_site(
 ):
     """Update a site configuration."""
     site = await SiteConfigService.update(db, key, payload)
+    scheduler_service.schedule_site(site)
     return ok(SiteConfigRead.model_validate(site), "Site updated successfully", request)
+
+
+@router.get(
+    "/{key}/schedule",
+    response_model=ApiResponse[SiteConfigScheduleInfo],
+    responses=ERROR_RESPONSES,
+    operation_id="get_site_schedule",
+)
+async def get_site_schedule(
+    key: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get schedule configuration and next run time for a site."""
+    site = await SiteConfigService.get_by_key(db, key)
+    info = SiteConfigScheduleInfo(
+        site_key=site.key,
+        schedule_enabled=site.schedule_enabled,
+        schedule_interval_minutes=site.schedule_interval_minutes,
+        schedule_start_at=site.schedule_start_at,
+        schedule_timezone=site.schedule_timezone,
+        schedule_start_url=site.schedule_start_url,
+        schedule_max_pages=site.schedule_max_pages,
+        next_run_at=scheduler_service.get_next_run(site.key),
+    )
+    return ok(info, "Schedule info retrieved", request)
 
 
 @router.post(

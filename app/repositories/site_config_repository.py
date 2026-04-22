@@ -15,6 +15,16 @@ class SiteConfigRepository:
         return (await db.execute(query)).scalars().all()
 
     @staticmethod
+    async def get_all_scheduled(db: AsyncSession) -> list[SiteConfig]:
+        """Return all active sites that have scheduling enabled."""
+        query = (
+            select(SiteConfig)
+            .where(SiteConfig.is_active.is_(True), SiteConfig.schedule_enabled.is_(True))
+            .order_by(SiteConfig.name)
+        )
+        return (await db.execute(query)).scalars().all()
+
+    @staticmethod
     async def get_by_key(db: AsyncSession, key: str) -> SiteConfig | None:
         return (
             await db.execute(select(SiteConfig).where(SiteConfig.key == key))

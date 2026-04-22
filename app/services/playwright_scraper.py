@@ -72,11 +72,16 @@ class PlaywrightScraper:
         if self._browser is not None:
             return
         from playwright.async_api import async_playwright  # noqa: PLC0415
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        pw = await async_playwright().start()
+        try:
+            self._browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            self._playwright = pw
+        except Exception:
+            await pw.stop()
+            raise
         logger.debug("Playwright Chromium launched (async)")
 
     async def close(self) -> None:

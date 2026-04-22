@@ -1,4 +1,5 @@
 import math
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,7 @@ from app.schemas.listing_schema import (
     ListingStats,
     ListingUpdate,
     PaginatedResponse,
+    resolve_enriched_title,
 )
 from app.schemas.listing_search_schema import ListingSearchItem, ListingSearchResponse
 
@@ -49,13 +51,17 @@ class ListingService:
         page_size: int,
     ) -> tuple[PaginatedResponse, Meta]:
         sort_column = SORT_FIELDS.get(sort_by, Listing.created_at)
-        listings = await ListingRepository.get_all_listings(
+
+        listings, total = await ListingRepository.get_all_listings(
             db, filters, sort_column, sort_order, page, page_size
         )
-        total = await ListingRepository.count_listings(db, filters)
+
         pages = math.ceil(total / page_size) if total else 0
         meta = Meta(page=page, page_size=page_size, total=total, pages=pages)
-        return PaginatedResponse(items=[ListingListRead.model_validate(listing) for listing in listings]), meta
+
+        return PaginatedResponse(
+            items=[ListingListRead.model_validate(l) for l in listings]
+        ), meta
 
     @staticmethod
     async def search_listings(
@@ -63,11 +69,12 @@ class ListingService:
         q: str | None,
         source_partner: str | None,
         is_enriched: bool | None,
+        is_exported_to_imodigi: bool | None,
         page: int,
         page_size: int,
     ) -> tuple[ListingSearchResponse, Meta]:
         listings, total = await ListingRepository.search_listings(
-            db, q, source_partner, is_enriched, page, page_size
+            db, q, source_partner, is_enriched, is_exported_to_imodigi, page, page_size
         )
         items: list[ListingSearchItem] = []
         for listing in listings:
@@ -79,7 +86,7 @@ class ListingService:
                 ListingSearchItem(
                     id=listing.id,
                     source_partner=listing.source_partner,
-                    title=((listing.enriched_translations or {}).get("en") or {}).get("title") or listing.title,
+                    title=resolve_enriched_title(listing.enriched_translations, listing.title),
                     property_type=listing.property_type,
                     typology=listing.typology,
                     bedrooms=listing.bedrooms,
@@ -156,6 +163,16 @@ class ListingService:
                 )
         for field, value in update_data.items():
             setattr(listing, field, value)
+
+        # Recalculate price_per_m2 whenever its inputs are touched
+        if "price_amount" in update_data or "area_useful_m2" in update_data:
+            if listing.price_amount is not None and listing.area_useful_m2:
+                listing.price_per_m2 = (
+                    Decimal(str(listing.price_amount)) / Decimal(str(listing.area_useful_m2))
+                ).quantize(Decimal("0.01"))
+            else:
+                listing.price_per_m2 = None
+
         return await ListingRepository.update_listing(db, listing, price_history)
 
     @staticmethod

@@ -16,10 +16,9 @@ class ScrapeJobService:
 
     @staticmethod
     async def create_job(db: AsyncSession, payload: JobCreate) -> ScrapeJob:
-        running = await ScrapeJobRepository.get_running(db)
-        if running:
+        if await ScrapeJobRepository.has_active_job(db, payload.site_key):
             raise JobAlreadyRunningError(
-                "A scrape job is already running. Wait for it to finish or cancel it."
+                f"A scrape job for site '{payload.site_key}' is already running or pending."
             )
 
         site_config = await SiteConfigRepository.get_by_key(db, payload.site_key)

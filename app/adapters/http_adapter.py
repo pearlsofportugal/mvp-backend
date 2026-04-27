@@ -68,6 +68,22 @@ class HttpAdapter:
             logger.error("Request error for %s: %s", url, str(exc))
             return None
 
+    def get_raw(self, url: str) -> requests.Response | None:
+        """Perform a GET request and return the response regardless of status code.
+
+        Used internally for fetching robots.txt so callers can inspect the status code
+        (e.g. 404 = no robots.txt, 403 = access denied to robots.txt itself).
+        Returns None only on connection/timeout errors.
+        """
+        try:
+            return self._session.get(url, timeout=self._timeout)
+        except requests.exceptions.Timeout:
+            logger.error("Timeout (%ds) fetching %s", self._timeout, url)
+            return None
+        except requests.exceptions.RequestException as exc:
+            logger.error("Request error for %s: %s", url, str(exc))
+            return None
+
     def sleep_random(self, min_delay: float, max_delay: float) -> None:
         """Sleep a random duration in [min_delay, max_delay] seconds."""
         delay = random.uniform(min_delay, max_delay)

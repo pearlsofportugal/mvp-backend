@@ -36,12 +36,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /install /usr/local
-# Instalar binários do Playwright num caminho partilhado acessível pelo appuser
+# Instalar binários do Playwright antes de copiar do builder — esta camada
+# não depende do código da app, por isso fica cacheada entre builds.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN pip install playwright && \
     playwright install chromium --with-deps && \
     chmod -R a+rx /opt/ms-playwright
+
+COPY --from=builder /install /usr/local
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser alembic ./alembic

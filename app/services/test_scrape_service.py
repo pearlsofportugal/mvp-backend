@@ -1,8 +1,8 @@
 """Service — run a dry-run scrape on a single listing URL without persisting.
 
-Fetches the URL with EthicalScraper, parses the HTML using the site's
-configuration, normalizes the result via mapper_service, and returns a
-structured report — no DB writes.
+Fetches the URL with EthicalScraper (or PlaywrightScraper when use_js_render is
+enabled), parses the HTML using the site's configuration, normalizes the result
+via mapper_service, and returns a structured report — no DB writes.
 """
 import asyncio
 
@@ -12,6 +12,7 @@ from app.schemas.site_config_schema import TestScrapeNormalized, TestScrapeRespo
 from app.services.ethics_service import EthicalScraper
 from app.services.mapper_service import normalize_partner_payload
 from app.services.parser_service import parse_listing_page
+from app.services.playwright_scraper import PlaywrightScraper
 
 logger = get_logger(__name__)
 
@@ -22,18 +23,34 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
     """Fetch *url* and run the full parse+normalize pipeline.
 
     Uses the site's selectors, extraction_mode, and site_key (for mapper
-    dispatch). Never writes to the database.
+    dispatch). Respects site.use_js_render — uses PlaywrightScraper for
+    JS-rendered pages so the result mirrors what the real scraper produces.
+    Never writes to the database.
     """
-    scraper = EthicalScraper(user_agent="MVPScraper/1.0 (+test-scrape)")
-    try:
-        response = await asyncio.to_thread(scraper.get, url)
-    except Exception as exc:
-        logger.error("test-scrape fetch failed for %s: %s", url, exc)
-        return TestScrapeResponse(url=url, success=False, error=str(exc))
-    finally:
-        scraper.close()
+    # ── Fetch ─────────────────────────────────────────────────────────────
+    html: str | None = None
 
-    if not response:
+    if site.use_js_render:
+        scraper = PlaywrightScraper(min_delay=1.0, max_delay=2.0, timeout=30)
+        try:
+            html = await scraper.get_html(url)
+        except Exception as exc:
+            logger.error("test-scrape (playwright) fetch failed for %s: %s", url, exc)
+            return TestScrapeResponse(url=url, success=False, error=str(exc))
+        finally:
+            await scraper.close()
+    else:
+        ethical = EthicalScraper(user_agent="MVPScraper/1.0 (+test-scrape)")
+        try:
+            response = await asyncio.to_thread(ethical.get, url)
+            html = response.text if response else None
+        except Exception as exc:
+            logger.error("test-scrape fetch failed for %s: %s", url, exc)
+            return TestScrapeResponse(url=url, success=False, error=str(exc))
+        finally:
+            ethical.close()
+
+    if not html:
         return TestScrapeResponse(
             url=url,
             success=False,
@@ -43,7 +60,7 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
     # ── Parse ─────────────────────────────────────────────────────────────
     try:
         raw = parse_listing_page(
-            response.text,
+            html,
             url,
             site.selectors,
             site.extraction_mode,
@@ -71,6 +88,20 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
             missing_critical=missing_critical,
             error=f"Normalization error: {exc}",
         )
+
+    # Refine missing_critical: some fields are derived from the URL in the
+    # mapper (e.g. realkey district) and won't appear in the raw parser output.
+    # Remove any "missing" field that is actually present in the normalized schema.
+    _normalized_map = {
+        "district": schema.address.region,
+        "title": schema.title,
+        "price": schema.price.amount if schema.price else None,
+        "property_type": schema.property_type,
+    }
+    missing_critical = [
+        f for f in missing_critical
+        if not (_normalized_map.get(f) is not None and str(_normalized_map[f]).strip())
+    ]
 
     normalized = TestScrapeNormalized(
         title=schema.title,

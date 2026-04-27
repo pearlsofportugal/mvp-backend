@@ -14,12 +14,13 @@ with `asyncio.to_thread()` to avoid blocking the event loop.
 """
 import asyncio
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -54,21 +55,17 @@ def _missing_critical_parser_fields(raw_data: dict[str, Any]) -> list[str]:
     return missing
 
 
-def _stale_job_cutoff() -> datetime:
-    return datetime.now(timezone.utc) - timedelta(seconds=settings.scrape_job_stale_after_seconds)
-
-
 async def recover_stale_jobs(db: AsyncSession) -> int:
-    """Mark stalled running jobs as failed so the worker queue can recover."""
+    """Mark all running jobs as failed on startup.
+
+    Any job with status='running' at startup is guaranteed orphaned — the
+    worker process that was executing it no longer exists. The heartbeat cutoff
+    is irrelevant here: even a job with a heartbeat 1 second old is dead once
+    the process restarts.
+    """
     stale_jobs = (
         await db.execute(
-            select(ScrapeJob).where(
-                ScrapeJob.status == "running",
-                or_(
-                    ScrapeJob.last_heartbeat_at.is_(None),
-                    ScrapeJob.last_heartbeat_at < _stale_job_cutoff(),
-                ),
-            )
+            select(ScrapeJob).where(ScrapeJob.status == "running")
         )
     ).scalars().all()
 
@@ -668,7 +665,11 @@ async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
 async def _update_site_confidence_scores(db: AsyncSession, site_key: str, job_uuid: UUID) -> None:
     """Persist field extraction confidence back to the site configuration."""
     listings = (
-        await db.execute(select(Listing).where(Listing.scrape_job_id == job_uuid))
+        await db.execute(
+            select(Listing)
+            .where(Listing.scrape_job_id == job_uuid)
+            .options(selectinload(Listing.media_assets))
+        )
     ).scalars().all()
     scores = calculate_confidence(listings)
 
@@ -697,7 +698,9 @@ async def _update_site_confidence_scores(db: AsyncSession, site_key: str, job_uu
 async def _fail_job(db: AsyncSession, job: ScrapeJob, error: str) -> None:
     """Marca o job como falhado."""
     await db.rollback()
-    if job and job.status == "running":
-        job.mark_failed(error)
-        await db.commit()
-        logger.error("Job %s failed: %s", job.id, error)
+    if job:
+        await db.refresh(job)
+        if job.status == "running":
+            job.mark_failed(error)
+            await db.commit()
+            logger.error("Job %s failed: %s", job.id, error)

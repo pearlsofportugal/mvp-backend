@@ -725,6 +725,21 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
 
             return normalized_value
 
+    # EgoRealEstate: energy class encoded as CSS class on <i> tag
+    # e.g. <i class="energyClass APlus"> → "A+",  <i class="energyClass C"> → "C"
+    if field == "energy_certificate":
+        target = el if el.name == "i" else el.select_one("i[class*='energyClass']")
+        if target:
+            for cls in (target.get("class") or []):
+                if cls.lower() == "energyclass":
+                    continue
+                if cls.lower() == "aplus":
+                    return "A+"
+                if cls.lower() in ("bminus", "b-"):
+                    return "B-"
+                if cls.upper() in {"A", "B", "C", "D", "E", "F", "G"}:
+                    return cls.upper()
+
     return ""
 
 
@@ -865,6 +880,10 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
         "business_type_selector": "business_type",
         "price_per_m2_selector": "price_per_m2",
         "publication_date_selector": "publication_date",
+        # Area fields — must be explicit here; they are not handled by any section extractor
+        "area_selector": "area",
+        "gross_area_selector": "gross_area",
+        "land_area_selector": "land_area",
     }
 
     for selector_key, field in simple_fields.items():

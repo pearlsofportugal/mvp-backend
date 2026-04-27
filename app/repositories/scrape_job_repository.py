@@ -16,15 +16,17 @@ class ScrapeJobRepository:
         ).scalar_one_or_none()
 
     @staticmethod
-    async def get_running(db: AsyncSession) -> ScrapeJob | None:
-        return (
-            await db.execute(
-                select(ScrapeJob)
-                .where(ScrapeJob.status == "running")
-                .order_by(desc(ScrapeJob.started_at), desc(ScrapeJob.created_at))
-                .limit(1)
+    async def has_active_job(db: AsyncSession, site_key: str) -> bool:
+        """Return True if there is a running or pending job for the given site_key."""
+        result = await db.execute(
+            select(func.count())
+            .select_from(ScrapeJob)
+            .where(
+                ScrapeJob.site_key == site_key,
+                ScrapeJob.status.in_(("running", "pending")),
             )
-        ).scalars().first()
+        )
+        return result.scalar_one() > 0
 
     @staticmethod
     async def get_all(

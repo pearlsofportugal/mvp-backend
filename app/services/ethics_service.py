@@ -109,16 +109,51 @@ class EthicalScraper:
         if entry is not None and entry[2] > now:
             return entry[0], entry[1]
 
-        # Load robots.txt
+        # Load robots.txt using our own User-Agent to avoid 403 from sites that block
+        # Python's default urllib User-Agent. RobotFileParser.read() uses urllib internally
+        # and treats a 403 response as disallow_all=True, blocking the entire site even when
+        # the actual rules would permit crawling.
         robots_url = f"{domain}/robots.txt"
         parser = RobotFileParser()
         parser.set_url(robots_url)
 
         loaded = False
         try:
-            parser.read()
-            loaded = True
-            logger.info("Loaded robots.txt from %s", robots_url)
+            response = self._http.get_raw(robots_url)
+            if response is None:
+                # Connection/timeout error — fail-closed
+                logger.warning(
+                    "Failed to fetch robots.txt from %s (connection error) — BLOCKING all requests (fail-closed)",
+                    robots_url,
+                )
+                loaded = False
+            elif response.status_code == 200:
+                parser.parse(response.text.splitlines())
+                loaded = True
+                logger.info("Loaded robots.txt from %s", robots_url)
+            elif response.status_code == 404:
+                # No robots.txt — allow all
+                parser.allow_all = True
+                loaded = True
+                logger.info("No robots.txt at %s (404) — allowing all", robots_url)
+            elif response.status_code in (401, 403):
+                # Site blocks robots.txt access itself. Treat as allow_all: if the site
+                # wanted to block our UA entirely, it would return 4xx on the actual pages
+                # too, which will surface naturally during scraping.
+                parser.allow_all = True
+                loaded = True
+                logger.warning(
+                    "robots.txt at %s returned %d — treating as allow_all (page-level access controls apply)",
+                    robots_url,
+                    response.status_code,
+                )
+            else:
+                logger.warning(
+                    "Failed to fetch robots.txt from %s (status: %d) — BLOCKING all requests (fail-closed)",
+                    robots_url,
+                    response.status_code,
+                )
+                loaded = False
         except Exception as e:
             logger.warning(
                 "Failed to load robots.txt from %s: %s — BLOCKING all requests (fail-closed)",

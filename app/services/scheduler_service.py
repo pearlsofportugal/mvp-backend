@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.core.exceptions import JobAlreadyRunningError
@@ -51,6 +51,35 @@ def _localize_start_date(start_date: datetime | None, tz: ZoneInfo) -> datetime 
         return start_date.replace(tzinfo=None).replace(tzinfo=tz)
     # Already has a non-UTC timezone — respect it as-is
     return start_date
+
+
+def _build_cron_trigger(interval_minutes: int, start: datetime | None, tz: ZoneInfo) -> CronTrigger:
+    """Build a CronTrigger pinned to a specific clock time.
+
+    CronTrigger is used instead of IntervalTrigger to avoid phase-alignment:
+    with IntervalTrigger, two sites whose start times differ by a multiple of
+    their shared interval will always fire simultaneously.
+    (e.g. start=10:30 and start=11:30 both with interval=60min → both fire at
+    11:30, 12:30, 13:30 … forever).
+
+    - interval >= 1440 min → once per day at H:M
+    - interval is a multiple of 60 → every N hours from H:M within the day
+    - otherwise → every N minutes, anchored to start's minute
+    """
+    if start is not None:
+        h, m = start.hour, start.minute
+    else:
+        now = datetime.now(tz)
+        h, m = now.hour, now.minute
+
+    if interval_minutes >= 1440:
+        return CronTrigger(hour=h, minute=m, timezone=tz)
+    elif interval_minutes % 60 == 0:
+        step_h = interval_minutes // 60
+        # "10/2" fires at 10, 12, 14 … — correct step within the day
+        return CronTrigger(hour=f"{h}/{step_h}", minute=m, timezone=tz)
+    else:
+        return CronTrigger(minute=f"{m}/{interval_minutes}", timezone=tz)
 
 
 async def _run_scheduled_scrape(site_key: str) -> None:
@@ -144,11 +173,8 @@ class SchedulerService:
             return
 
         tz = ZoneInfo(site.schedule_timezone)
-        trigger = IntervalTrigger(
-            minutes=site.schedule_interval_minutes,
-            start_date=_localize_start_date(site.schedule_start_at, tz),
-            timezone=tz,
-        )
+        start = _localize_start_date(site.schedule_start_at, tz)
+        trigger = _build_cron_trigger(site.schedule_interval_minutes, start, tz)
 
         self._scheduler.add_job(
             _run_scheduled_scrape,
@@ -189,11 +215,8 @@ class SchedulerService:
         if not site.schedule_enabled or not site.schedule_interval_minutes:
             return
         tz = ZoneInfo(site.schedule_timezone)
-        trigger = IntervalTrigger(
-            minutes=site.schedule_interval_minutes,
-            start_date=_localize_start_date(site.schedule_start_at, tz),
-            timezone=tz,
-        )
+        start = _localize_start_date(site.schedule_start_at, tz)
+        trigger = _build_cron_trigger(site.schedule_interval_minutes, start, tz)
         self._scheduler.add_job(
             _run_scheduled_scrape,
             trigger=trigger,

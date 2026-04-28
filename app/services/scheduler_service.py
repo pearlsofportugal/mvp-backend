@@ -9,7 +9,7 @@ registers them. On PATCH the router triggers reschedule/unschedule as needed.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -31,26 +31,25 @@ def _job_id(site_key: str) -> str:
 
 
 def _localize_start_date(start_date: datetime | None, tz: ZoneInfo) -> datetime | None:
-    """Ensure start_date is in the site's timezone, not UTC.
+    """Return start_date converted to the site's timezone.
 
-    When the frontend sends a naive datetime (no offset), the DB stores it as
-    UTC. This causes a 1-hour shift for Europe/Lisbon (UTC+1 in summer).
-    We detect this by checking if the stored time is UTC and re-interpret
-    the wall-clock value as being in the site's timezone instead.
+    Two cases from the DB:
+    - Naive datetime (no tzinfo): frontend sent wall-clock time without offset
+      → attach target timezone directly (preserve wall-clock value).
+    - Aware datetime (UTC from PostgreSQL): frontend sent a tz-aware value
+      (e.g. 12:35+01:00 Lisbon) which PostgreSQL stored as UTC (11:35+00:00)
+      → convert properly with astimezone() so 11:35 UTC → 12:35 Lisbon.
 
-    Example: user intends 17:03 Lisbon → frontend sends 17:03 naive
-             → DB stores 17:03 UTC → this function returns 17:03+01:00 Lisbon.
+    Example: user intends 12:35 Lisbon → frontend sends 12:35+01:00
+             → DB stores 11:35+00:00 UTC → astimezone(Lisbon) → 12:35+01:00 ✓
     """
     if start_date is None:
         return None
-    # Compare semantically (offset == 0), not by object identity.
-    # This handles cases where asyncpg or SQLAlchemy return a different UTC
-    # tzinfo instance than datetime.timezone.utc, which would break == comparison.
-    if start_date.tzinfo is None or start_date.utcoffset() == timedelta(0):
-        # Naive or UTC — treat wall-clock value as local time
-        return start_date.replace(tzinfo=None).replace(tzinfo=tz)
-    # Already has a non-UTC timezone — respect it as-is
-    return start_date
+    if start_date.tzinfo is None:
+        # Naive — treat wall-clock value as local time directly
+        return start_date.replace(tzinfo=tz)
+    # Aware (UTC or other) — proper timezone conversion
+    return start_date.astimezone(tz)
 
 
 def _build_cron_trigger(interval_minutes: int, start: datetime | None, tz: ZoneInfo) -> CronTrigger:

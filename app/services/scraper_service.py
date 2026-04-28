@@ -34,6 +34,7 @@ from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory
 from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
+from app.services.email_service import send_job_notification
 from app.services.ethics_service import EthicalScraper
 from app.services.playwright_scraper import PlaywrightScraper
 from app.services.mapper_service import normalize_partner_payload, schema_to_listing_dict
@@ -226,6 +227,8 @@ async def _run_scrape_async(
         listings_found = 0
         listings_scraped = 0
         errors = 0
+        new_count = 0
+        updated_count = 0
 
         job.touch_heartbeat()
         await db.commit()
@@ -288,11 +291,15 @@ async def _run_scrape_async(
                 if await _check_job_cancelled(db, job_id):
                     break
 
-                scraped, errored = await _process_listing_url(
+                scraped, errored, is_new = await _process_listing_url(
                     db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
                 )
                 if scraped:
                     listings_scraped += 1
+                    if is_new:
+                        new_count += 1
+                    else:
+                        updated_count += 1
                 if errored:
                     errors += 1
                 if scraped or errored:
@@ -301,6 +308,8 @@ async def _run_scrape_async(
                         listings_found=listings_found,
                         listings_scraped=listings_scraped,
                         errors=errors,
+                        new_listings=new_count,
+                        updated_listings=updated_count,
                     )
 
             # ---------- PAGINATION UNIVERSAL ----------
@@ -381,6 +390,8 @@ async def _run_sitemap_scrape(
         listings_found = len(urls)
         listings_scraped = 0
         errors = 0
+        new_count = 0
+        updated_count = 0
 
         for url in urls:
             job.add_url("found", url)
@@ -398,11 +409,15 @@ async def _run_sitemap_scrape(
                 logger.info("Job %s was cancelled", job_id)
                 break
 
-            scraped, errored = await _process_listing_url(
+            scraped, errored, is_new = await _process_listing_url(
                 db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
             )
             if scraped:
                 listings_scraped += 1
+                if is_new:
+                    new_count += 1
+                else:
+                    updated_count += 1
             if errored:
                 errors += 1
             if scraped or errored:
@@ -411,6 +426,8 @@ async def _run_sitemap_scrape(
                     listings_found=listings_found,
                     listings_scraped=listings_scraped,
                     errors=errors,
+                    new_listings=new_count,
+                    updated_listings=updated_count,
                 )
 
         await _complete_job(db, job)
@@ -428,13 +445,13 @@ async def _process_listing_url(
     link: str,
     full_selectors: dict[str, Any],
     extraction_mode: str,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
     """Fetch, parse e persist um único URL de listing.
 
-    Returns (scraped, errored):
+    Returns (scraped, errored, is_new):
     - scraped=True  → listing persistido com sucesso.
     - errored=True  → excepção durante o processamento.
-    - (False, True) → HTML não disponível (fetch devolveu None).
+    - (False, True, False) → HTML não disponível (fetch devolveu None).
 
     O caller é responsável por chamar job.update_progress() com os contadores actualizados.
     """
@@ -445,7 +462,7 @@ async def _process_listing_url(
             job.add_log("warning", "Failed to fetch listing page", link)
             job.touch_heartbeat()
             await db.commit()
-            return False, True
+            return False, True, False
 
         raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
 
@@ -458,11 +475,11 @@ async def _process_listing_url(
             )
 
         property_schema = normalize_partner_payload(raw_data, site_key)
-        await _persist_listing(db, job_id, property_schema, site_key)
+        is_new = await _persist_listing(db, job_id, property_schema, site_key)
         job.add_url("scraped", link)
         job.touch_heartbeat()
         await db.commit()
-        return True, False
+        return True, False, is_new
 
     except Exception as e:
         logger.error("Error processing listing %s: %s", link, str(e))
@@ -472,7 +489,7 @@ async def _process_listing_url(
         job.add_log("error", f"Error processing listing: {str(e)}", link)
         job.touch_heartbeat()
         await db.commit()
-        return False, True
+        return False, True, False
 
 
 async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:
@@ -487,7 +504,7 @@ async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:
     return status == "cancelled" or cancel_requested_at is not None
 
 
-async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str) -> None:
+async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str) -> bool:
     """Persist a listing atomically, using PostgreSQL upsert when possible."""
     listing_data = schema_to_listing_dict(schema, scrape_job_id=UUID(job_id))
     source_url = listing_data.get("source_url")
@@ -499,10 +516,9 @@ async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str)
         dialect_name = engine.dialect.name
 
     if source_url and dialect_name == "postgresql":
-        await _persist_listing_with_postgres_upsert(db, job_id, schema, listing_data)
-        return
+        return await _persist_listing_with_postgres_upsert(db, job_id, schema, listing_data)
 
-    await _persist_listing_legacy(db, job_id, schema, listing_data)
+    return await _persist_listing_legacy(db, job_id, schema, listing_data)
 
 
 async def _persist_listing_with_postgres_upsert(
@@ -510,7 +526,7 @@ async def _persist_listing_with_postgres_upsert(
     job_id: str,
     schema,
     listing_data: dict[str, Any],
-) -> None:
+) -> bool:
     """Persist a listing with lock-aware PostgreSQL conflict handling."""
     source_url = listing_data["source_url"]
     existing = (
@@ -534,7 +550,7 @@ async def _persist_listing_with_postgres_upsert(
         if inserted_id is not None:
             await _replace_media_assets(db, inserted_id, schema)
             await db.commit()
-            return
+            return True
 
         logger.info("Listing insert raced for %s; reloading winner", source_url)
         existing = (
@@ -578,6 +594,7 @@ async def _persist_listing_with_postgres_upsert(
 
     await _replace_media_assets(db, existing.id, schema)
     await db.commit()
+    return False
 
 
 async def _persist_listing_legacy(
@@ -585,7 +602,7 @@ async def _persist_listing_legacy(
     job_id: str,
     schema,
     listing_data: dict[str, Any],
-) -> None:
+) -> bool:
     """Fallback persistence path for non-PostgreSQL environments."""
     existing = None
     if listing_data.get("source_url"):
@@ -622,6 +639,8 @@ async def _persist_listing_legacy(
         existing.updated_at = datetime.now(timezone.utc)
         existing.scrape_job_id = UUID(job_id)
         await _replace_media_assets(db, existing.id, schema)
+        await db.commit()
+        return False
 
     else:
         listing = Listing(**listing_data)
@@ -629,8 +648,8 @@ async def _persist_listing_legacy(
         await db.flush()  # flush para obter o ID antes de adicionar media assets
 
         await _replace_media_assets(db, listing.id, schema)
-
-    await db.commit()
+        await db.commit()
+        return True
 
 
 async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> None:
@@ -659,6 +678,16 @@ async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
             await _update_site_confidence_scores(db, job.site_key, job.id)
             job.mark_completed()
             logger.info("Job %s completed successfully", job.id)
+            await send_job_notification(
+                site_key=job.site_key,
+                job_id=str(job.id),
+                status="completed",
+                progress=job.progress,
+                started_at=job.started_at,
+                finished_at=job.completed_at,
+                start_url=job.start_url,
+                warnings_count=len((job.logs or {}).get("warnings", [])),
+            )
         await db.commit()
 
 
@@ -704,3 +733,14 @@ async def _fail_job(db: AsyncSession, job: ScrapeJob, error: str) -> None:
             job.mark_failed(error)
             await db.commit()
             logger.error("Job %s failed: %s", job.id, error)
+            await send_job_notification(
+                site_key=job.site_key,
+                job_id=str(job.id),
+                status="failed",
+                progress=job.progress,
+                error_message=error,
+                started_at=job.started_at,
+                finished_at=job.completed_at,
+                start_url=job.start_url,
+                warnings_count=len((job.logs or {}).get("warnings", [])),
+            )

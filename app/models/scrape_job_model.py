@@ -78,6 +78,8 @@ class ScrapeJob(Base):
             "listings_found": 0,
             "listings_scraped": 0,
             "errors": 0,
+            "new_listings": 0,
+            "updated_listings": 0,
         }
         self.logs = {
             "errors": [],

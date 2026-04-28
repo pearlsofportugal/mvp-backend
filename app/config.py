@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     google_genai_temperature: float = 0.7
     ai_rate_limit_requests: int = 20
     ai_rate_limit_window: int = 60
+
+    # Email notifications
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    notify_emails: str = "" 
+    email_notifications_enabled: bool = True
+    frontend_url: str = ""
     
     @property
     def is_production(self) -> bool:

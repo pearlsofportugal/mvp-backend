@@ -47,7 +47,7 @@ class PlaywrightScraper:
         max_delay: float = 5.0,
         timeout: int = 30,
         extra_headers: dict | None = None,
-        wait_until: str = "networkidle",
+        wait_until: str = "domcontentloaded",
     ):
         self.min_delay = min_delay
         self.max_delay = max_delay
@@ -183,6 +183,12 @@ class PlaywrightScraper:
         page = await ctx.new_page()
         try:
             await page.goto(url, wait_until=self.wait_until, timeout=self.timeout)
+            # Give JS time to finish rendering without hard-failing if the site
+            # never reaches networkidle (analytics, websockets, etc.)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass  # best-effort — proceed with whatever is rendered
             html = await page.content()
             logger.debug("Playwright rendered %s (%d bytes)", url, len(html))
             return html

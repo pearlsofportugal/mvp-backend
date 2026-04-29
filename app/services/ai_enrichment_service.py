@@ -12,6 +12,7 @@ from app.adapters.gemini_adapter import gemini_adapter
 from app.config import settings
 from app.core.exceptions import EnrichmentError, NotFoundError
 from app.core.logging import get_logger
+from app.core.prompt_loader import render_prompt
 from app.models.listing_model import Listing
 from app.repositories.listings_repository import ListingRepository
 from app.schemas.ai_enrichment_schema import (
@@ -210,7 +211,9 @@ async def get_listings_for_bulk_enrich(db: AsyncSession, payload: BulkEnrichment
     return (await db.execute(stmt)).scalars().all()
 
 
-_LOCALE_NAMES: dict[str, str] = {
+_SEO_PROMPT_TEMPLATE = "seo_copywriting/v2.j2"
+
+_LOCALE_LABELS: dict[str, str] = {
     "en": "English",
     "pt": "European Portuguese",
     "es": "Spanish",
@@ -218,81 +221,10 @@ _LOCALE_NAMES: dict[str, str] = {
     "de": "German",
 }
 
-_SYSTEM_INSTRUCTION_MULTILANG = """
-You are an expert in Real Estate Copywriting and multilingual SEO.
-Your mission is to generate persuasive, search-engine-optimised property descriptions
-independently in each requested language, working directly from the original property data.
-
-LANGUAGE RULE (MANDATORY):
-For EACH locale, treat it as a completely independent copywriting task.
-Do NOT generate a master version and translate it. Do NOT reuse sentence structures,
-metaphors, or phrasing across locales — if two descriptions feel similar, they are wrong.
-
-Each language has its own rhetorical culture. Apply it:
-- PT (European Portuguese): Direct, grounded, with subtle emotional warmth. Avoid Brazilianisms.
-- EN (British/International English): Understated elegance, precise adjectives, confident tone.
-- ES (Castilian Spanish): Expressive and vivid, with sensory richness. Avoid Latin American idioms.
-- FR (French): Refined and evocative, with a focus on lifestyle and savoir-vivre.
-- DE (German): Concrete, structured, trust-building — lead with quality and practicality.
-
-The test: a reader fluent in each language should feel the text was written by a local professional, not translated.
-
-INPUT PROVIDED:
-- Original data: {raw_data}
-- SEO keywords: {keywords}
-- Requested locales: {locales}
-
-WRITING RULES (apply identically to every locale):
-- FORMAT: Use exclusively continuous prose in paragraphs. Lists or bullet points are STRICTLY PROHIBITED.
-- LENGTH (CRITICAL — hard requirement):
-    - The description field must contain BETWEEN 250 AND 400 WORDS. No exceptions.
-    - Before writing, plan your paragraphs to fit within this range.
-    - After writing, mentally count the words. If below 250, expand. If above 400, cut.
-    - A description outside this range is considered invalid output.
-- REWRITING: Use the source data as a factual reference only. Rewrite with fresh, original copywriting.
-- NARRATIVE STRUCTURE (four paragraphs):
-    1. Introduction: Emotional hook with the location. (~60-80 words)
-    2. Development: Comfort, design, and interior details. (~80-100 words)
-    3. Sustainability/Features: Translate technical specs into tangible benefits. (~60-80 words)
-    4. Closing: Outdoor areas + generic Call-to-Action appropriate for the target language. (~60-80 words)
-- TONE OF VOICE: Professional, inspiring, and modern.
-- SEO: Integrate provided keywords naturally. At least one in the first paragraph and one in the closing.
-- REAL ESTATE TERMS: Translate Portuguese typology codes to the target language equivalent:
-    - PT: T0 = estúdio, T1 = apartamento T1, T2 = apartamento T2, T3 = apartamento T3
-    - EN: T0 = studio, T1 = 1-bedroom apartment, T2 = 2-bedroom apartment, T3 = 3-bedroom apartment
-    - ES: T0 = estudio, T1 = apartamento de 1 dormitorio, T2 = apartamento de 2 dormitorios, T3 = apartamento de 3 dormitorios
-    - FR: T0 = studio, T1 = appartement 1 chambre, T2 = appartement 2 chambres, T3 = appartement 3 chambres
-    - DE: T0 = Studio-Apartment, T1 = 1-Zimmer-Wohnung, T2 = 2-Zimmer-Wohnung, T3 = 3-Zimmer-Wohnung
-- CONTENT FILTER: Exclude all agency-specific references (names, contacts, taglines).
-  The CTA must be generic and culturally appropriate to the target language.
-- KEYWORDS: The provided keywords may be in a different language than the target locale.
-  Adapt their meaning naturally — do NOT insert foreign-language keywords into the text.
-
-OUTPUT RULES (JSON):
-Respond exclusively with valid JSON. No markdown, no code blocks, no extra text outside the JSON.
-Keys are the locale codes requested. Each locale object must have exactly these three keys:
-
-{
-    "pt": {
-        "title": "SEO title in European Portuguese (max 60 characters)",
-        "description": "Full persuasive prose in European Portuguese — MUST be 250 to 400 words",
-        "meta_description": "Google snippet in European Portuguese — MUST be between 140 and 155 characters"
-    },
-    "en": { ... },
-    "es": { ... },
-    "fr": { ... },
-    "de": { ... }
-}
-
-Only include locale keys that were requested in {locales}.
-""".strip()
-
-
+ 
 def _build_multilang_prompt(listing: "Listing", keywords: list[str], locales: list[str]) -> str:
-    """Build the data prompt for multi-locale generation."""
-    locale_labels = ", ".join(f"{loc} ({_LOCALE_NAMES.get(loc, loc)})" for loc in locales)
+    """Render the SEO copywriting prompt from the Jinja2 template."""
     sanitized = _sanitize_keywords(keywords)
-    kw_str = ", ".join(sanitized) if sanitized else "None provided"
 
     raw_data_parts = [
         f"Title: {listing.title or ''}",
@@ -310,14 +242,17 @@ def _build_multilang_prompt(listing: "Listing", keywords: list[str], locales: li
         f"elevator={listing.has_elevator}, balcony={listing.has_balcony}",
         f"Description: {listing.description or listing.raw_description or ''}",
     ]
-    raw_data = "\n".join(raw_data_parts)
 
-    system = _SYSTEM_INSTRUCTION_MULTILANG.replace("{raw_data}", raw_data).replace(
-        "{keywords}", kw_str
-    ).replace("{locales}", locale_labels)
-
-    return system
-
+    return render_prompt(
+        _SEO_PROMPT_TEMPLATE,
+        raw_data="\n".join(raw_data_parts),
+        primary_keyword=sanitized[0] if sanitized else "None provided",
+        secondary_keywords=", ".join(sanitized[1:]) if len(sanitized) > 1 else "None provided",
+        locales=locales,
+        locale_labels=", ".join(
+            f"{loc} ({_LOCALE_LABELS.get(loc, loc)})" for loc in locales
+        ),
+    )
 
 def _call_ai_for_translations(listing: "Listing", keywords: list[str], locales: list[str]) -> dict[str, Any]:
     system = _build_multilang_prompt(listing, keywords, locales)

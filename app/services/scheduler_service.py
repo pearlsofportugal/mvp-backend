@@ -9,7 +9,7 @@ registers them. On PATCH the router triggers reschedule/unschedule as needed.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -95,10 +95,13 @@ def _build_trigger(
         return CronTrigger(hour=h, minute=m, timezone=tz)
 
     # Sub-daily — IntervalTrigger anchored to the configured H:M today.
-    # Using today's date is fine: if start_dt is in the past, APScheduler
-    # advances it forward by the interval automatically.
-    today = datetime.now(tz)
-    start_dt = today.replace(hour=h, minute=m, second=0, microsecond=0)
+    # start_dt is advanced past now so APScheduler never fires immediately on
+    # startup (a past start_date with misfire_grace_time=None would fire at
+    # the first scheduler tick instead of waiting a full interval).
+    now_tz = datetime.now(tz)
+    start_dt = now_tz.replace(hour=h, minute=m, second=0, microsecond=0)
+    while start_dt <= now_tz:
+        start_dt += timedelta(minutes=interval_minutes)
     return IntervalTrigger(minutes=interval_minutes, start_date=start_dt, timezone=tz)
 
 
@@ -171,7 +174,11 @@ class SchedulerService:
         )
 
     def shutdown(self, wait: bool = True) -> None:
-        """Stop the scheduler gracefully (does not wait for running jobs)."""
+        """Stop the scheduler gracefully.
+
+        Waits for running jobs to finish by default (wait=True). Pass
+        wait=False for a fast shutdown that does not block on active jobs.
+        """
         if self._scheduler.running:
             self._scheduler.shutdown(wait=wait)
             logger.info("Scheduler stopped (wait=%s)", wait)

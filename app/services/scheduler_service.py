@@ -9,11 +9,13 @@ registers them. On PATCH the router triggers reschedule/unschedule as needed.
 """
 from __future__ import annotations
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.core.exceptions import JobAlreadyRunningError
@@ -28,6 +30,19 @@ _JOB_ID_PREFIX = "scrape__"
 
 def _job_id(site_key: str) -> str:
     return f"{_JOB_ID_PREFIX}{site_key}"
+
+
+def _safe_zoneinfo(tz_str: str, site_key: str = "") -> ZoneInfo:
+    """Return ZoneInfo for tz_str, falling back to UTC on invalid names."""
+    try:
+        return ZoneInfo(tz_str)
+    except ZoneInfoNotFoundError:
+        logger.error(
+            "Unknown timezone %r for site '%s' — falling back to UTC",
+            tz_str,
+            site_key,
+        )
+        return ZoneInfo("UTC")
 
 
 def _localize_start_date(start_date: datetime | None, tz: ZoneInfo) -> datetime | None:
@@ -52,18 +67,22 @@ def _localize_start_date(start_date: datetime | None, tz: ZoneInfo) -> datetime 
     return start_date.astimezone(tz)
 
 
-def _build_cron_trigger(interval_minutes: int, start: datetime | None, tz: ZoneInfo) -> CronTrigger:
-    """Build a CronTrigger pinned to a specific clock time.
+def _build_trigger(
+    interval_minutes: int, start: datetime | None, tz: ZoneInfo
+) -> BaseTrigger:
+    """Build the appropriate APScheduler trigger.
 
-    CronTrigger is used instead of IntervalTrigger to avoid phase-alignment:
-    with IntervalTrigger, two sites whose start times differ by a multiple of
-    their shared interval will always fire simultaneously.
-    (e.g. start=10:30 and start=11:30 both with interval=60min → both fire at
-    11:30, 12:30, 13:30 … forever).
+    - Daily (>= 1440 min): CronTrigger at H:M — fires once per day at the
+      exact configured time. CronTrigger is correct here because it pins to
+      a wall-clock time regardless of DST changes.
 
-    - interval >= 1440 min → once per day at H:M
-    - interval is a multiple of 60 → every N hours from H:M within the day
-    - otherwise → every N minutes, anchored to start's minute
+    - Sub-daily (< 1440 min): IntervalTrigger anchored to today's H:M.
+      APScheduler auto-advances a past start_date to the next future occurrence:
+        next_fire = start_date + ceil((now - start_date) / interval) * interval
+      This correctly wraps around midnight and avoids the two bugs that
+      CronTrigger has for sub-daily intervals:
+        1. `minute="{m}/{step}"` only fires once/hour when m + step > 59.
+        2. `hour="{h}/{step_h}"` does not wrap past midnight — creates large gaps.
     """
     if start is not None:
         h, m = start.hour, start.minute
@@ -72,13 +91,18 @@ def _build_cron_trigger(interval_minutes: int, start: datetime | None, tz: ZoneI
         h, m = now.hour, now.minute
 
     if interval_minutes >= 1440:
+        # Daily — CronTrigger pinned to H:M, fires every day at that time.
         return CronTrigger(hour=h, minute=m, timezone=tz)
-    elif interval_minutes % 60 == 0:
-        step_h = interval_minutes // 60
-        # "10/2" fires at 10, 12, 14 … — correct step within the day
-        return CronTrigger(hour=f"{h}/{step_h}", minute=m, timezone=tz)
-    else:
-        return CronTrigger(minute=f"{m}/{interval_minutes}", timezone=tz)
+
+    # Sub-daily — IntervalTrigger anchored to the configured H:M today.
+    # start_dt is advanced past now so APScheduler never fires immediately on
+    # startup (a past start_date with misfire_grace_time=None would fire at
+    # the first scheduler tick instead of waiting a full interval).
+    now_tz = datetime.now(tz)
+    start_dt = now_tz.replace(hour=h, minute=m, second=0, microsecond=0)
+    while start_dt <= now_tz:
+        start_dt += timedelta(minutes=interval_minutes)
+    return IntervalTrigger(minutes=interval_minutes, start_date=start_dt, timezone=tz)
 
 
 async def _run_scheduled_scrape(site_key: str) -> None:
@@ -149,11 +173,15 @@ class SchedulerService:
             len(sites),
         )
 
-    def shutdown(self) -> None:
-        """Stop the scheduler gracefully (does not wait for running jobs)."""
+    def shutdown(self, wait: bool = True) -> None:
+        """Stop the scheduler gracefully.
+
+        Waits for running jobs to finish by default (wait=True). Pass
+        wait=False for a fast shutdown that does not block on active jobs.
+        """
         if self._scheduler.running:
-            self._scheduler.shutdown(wait=False)
-            logger.info("Scheduler stopped")
+            self._scheduler.shutdown(wait=wait)
+            logger.info("Scheduler stopped (wait=%s)", wait)
 
     # ------------------------------------------------------------------
     # Per-site management
@@ -165,24 +193,11 @@ class SchedulerService:
         If schedule_enabled is False the job is removed (if present).
         Always safe to call — idempotent via replace_existing=True.
         """
-        job_id = _job_id(site.key)
-
         if not site.schedule_enabled or not site.schedule_interval_minutes:
             self.unschedule_site(site.key)
             return
 
-        tz = ZoneInfo(site.schedule_timezone)
-        start = _localize_start_date(site.schedule_start_at, tz)
-        trigger = _build_cron_trigger(site.schedule_interval_minutes, start, tz)
-
-        self._scheduler.add_job(
-            _run_scheduled_scrape,
-            trigger=trigger,
-            args=[site.key],
-            id=job_id,
-            replace_existing=True,
-            name=f"scrape:{site.key}",
-        )
+        self._add_job(site)
         next_run = self.get_next_run(site.key)
         logger.info(
             "Scheduled scrape registered for site '%s' — every %d min, next run: %s",
@@ -209,13 +224,11 @@ class SchedulerService:
     # Internal
     # ------------------------------------------------------------------
 
-    def _register(self, site: SiteConfig) -> None:
-        """Register a site job without logging — used during bulk startup."""
-        if not site.schedule_enabled or not site.schedule_interval_minutes:
-            return
-        tz = ZoneInfo(site.schedule_timezone)
+    def _add_job(self, site: SiteConfig) -> None:
+        """Build trigger and register the APScheduler job for a site."""
+        tz = _safe_zoneinfo(site.schedule_timezone, site.key)
         start = _localize_start_date(site.schedule_start_at, tz)
-        trigger = _build_cron_trigger(site.schedule_interval_minutes, start, tz)
+        trigger = _build_trigger(site.schedule_interval_minutes, start, tz)
         self._scheduler.add_job(
             _run_scheduled_scrape,
             trigger=trigger,
@@ -224,6 +237,12 @@ class SchedulerService:
             replace_existing=True,
             name=f"scrape:{site.key}",
         )
+
+    def _register(self, site: SiteConfig) -> None:
+        """Register a site job without logging — used during bulk startup."""
+        if not site.schedule_enabled or not site.schedule_interval_minutes:
+            return
+        self._add_job(site)
 
 
 # Singleton — imported by main.py and sites.py

@@ -15,6 +15,8 @@ import time
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
+from playwright.async_api import async_playwright
+
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -71,7 +73,7 @@ class PlaywrightScraper:
         """Start Playwright + Chromium if not already running."""
         if self._browser is not None:
             return
-        from playwright.async_api import async_playwright  # noqa: PLC0415
+
         pw = await async_playwright().start()
         try:
             self._browser = await pw.chromium.launch(

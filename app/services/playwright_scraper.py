@@ -186,7 +186,7 @@ class PlaywrightScraper:
             # Give JS time to finish rendering without hard-failing if the site
             # never reaches networkidle (analytics, websockets, etc.)
             try:
-                await page.wait_for_load_state("networkidle", timeout=5000)
+                await page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass  # best-effort — proceed with whatever is rendered
             html = await page.content()

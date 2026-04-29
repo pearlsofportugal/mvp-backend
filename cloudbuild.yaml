@@ -34,6 +34,7 @@ steps:
       - '--region=$_DEPLOY_REGION'
       - '--memory=2Gi'
       - '--cpu=2'
+      - '--timeout=3600'
       - '--quiet'
     id: Deploy
     waitFor: ['Build']

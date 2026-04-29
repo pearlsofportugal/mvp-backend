@@ -11,8 +11,11 @@ steps:
       - 'DATABASE_URL=sqlite+aiosqlite:///./test.db'
       - 'API_KEY=test-key'
       - 'ENVIRONMENT=test'
+    volumes:
+      - name: pip-cache
+        path: /root/.cache/pip
 
-  - name: 'gcr.io/kaniko-project/executor:latest'
+  - name: 'gcr.io/kaniko-project/executor:v1.23.2'
     id: Build
     waitFor: ['Test']
     args:
@@ -22,7 +25,7 @@ steps:
       - '--cache=true'
       - '--cache-ttl=24h'
       - '--cache-repo=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME-cache'
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:502.0.0-slim
     args:
       - run
       - services
@@ -30,11 +33,14 @@ steps:
       - $_SERVICE_NAME
       - '--platform=managed'
       - '--image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
-      - '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID'
+      - '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$BUILD_TRIGGER_ID'
       - '--region=$_DEPLOY_REGION'
       - '--memory=2Gi'
       - '--cpu=2'
-      - '--timeout=3600'
+      - '--timeout=60'
+      - '--min-instances=1'
+      - '--max-instances=3'
+      - '--no-cpu-throttling'
       - '--quiet'
     id: Deploy
     waitFor: ['Build']
@@ -42,13 +48,13 @@ steps:
 options:
   substitutionOption: ALLOW_LOOSE
   logging: CLOUD_LOGGING_ONLY
+# _AR_PROJECT_ID and _TRIGGER_ID must be set in the
+# Cloud Build trigger via Console or Terraform — do not commit here
 substitutions:
   _AR_REPOSITORY: cloud-run-source-deploy
-  _AR_PROJECT_ID: mvp-scraper-488408
   _PLATFORM: managed
   _SERVICE_NAME: mvp-backend
   _DEPLOY_REGION: europe-west1
-  _TRIGGER_ID: 5c526d45-0c9c-499e-9917-4b7c7d2f80dc
   _AR_HOSTNAME: europe-west1-docker.pkg.dev
 tags:
   - gcp-cloud-build-deploy-cloud-run

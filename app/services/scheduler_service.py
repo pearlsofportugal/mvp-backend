@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.core.exceptions import JobAlreadyRunningError
@@ -52,18 +53,22 @@ def _localize_start_date(start_date: datetime | None, tz: ZoneInfo) -> datetime 
     return start_date.astimezone(tz)
 
 
-def _build_cron_trigger(interval_minutes: int, start: datetime | None, tz: ZoneInfo) -> CronTrigger:
-    """Build a CronTrigger pinned to a specific clock time.
+def _build_trigger(
+    interval_minutes: int, start: datetime | None, tz: ZoneInfo
+) -> CronTrigger | IntervalTrigger:
+    """Build the appropriate APScheduler trigger.
 
-    CronTrigger is used instead of IntervalTrigger to avoid phase-alignment:
-    with IntervalTrigger, two sites whose start times differ by a multiple of
-    their shared interval will always fire simultaneously.
-    (e.g. start=10:30 and start=11:30 both with interval=60min → both fire at
-    11:30, 12:30, 13:30 … forever).
+    - Daily (>= 1440 min): CronTrigger at H:M — fires once per day at the
+      exact configured time. CronTrigger is correct here because it pins to
+      a wall-clock time regardless of DST changes.
 
-    - interval >= 1440 min → once per day at H:M
-    - interval is a multiple of 60 → every N hours from H:M within the day
-    - otherwise → every N minutes, anchored to start's minute
+    - Sub-daily (< 1440 min): IntervalTrigger anchored to today's H:M.
+      APScheduler auto-advances a past start_date to the next future occurrence:
+        next_fire = start_date + ceil((now - start_date) / interval) * interval
+      This correctly wraps around midnight and avoids the two bugs that
+      CronTrigger has for sub-daily intervals:
+        1. `minute="{m}/{step}"` only fires once/hour when m + step > 59.
+        2. `hour="{h}/{step_h}"` does not wrap past midnight — creates large gaps.
     """
     if start is not None:
         h, m = start.hour, start.minute
@@ -72,13 +77,15 @@ def _build_cron_trigger(interval_minutes: int, start: datetime | None, tz: ZoneI
         h, m = now.hour, now.minute
 
     if interval_minutes >= 1440:
+        # Daily — CronTrigger pinned to H:M, fires every day at that time.
         return CronTrigger(hour=h, minute=m, timezone=tz)
-    elif interval_minutes % 60 == 0:
-        step_h = interval_minutes // 60
-        # "10/2" fires at 10, 12, 14 … — correct step within the day
-        return CronTrigger(hour=f"{h}/{step_h}", minute=m, timezone=tz)
-    else:
-        return CronTrigger(minute=f"{m}/{interval_minutes}", timezone=tz)
+
+    # Sub-daily — IntervalTrigger anchored to the configured H:M today.
+    # Using today's date is fine: if start_dt is in the past, APScheduler
+    # advances it forward by the interval automatically.
+    today = datetime.now(tz)
+    start_dt = today.replace(hour=h, minute=m, second=0, microsecond=0)
+    return IntervalTrigger(minutes=interval_minutes, start_date=start_dt, timezone=tz)
 
 
 async def _run_scheduled_scrape(site_key: str) -> None:
@@ -173,7 +180,7 @@ class SchedulerService:
 
         tz = ZoneInfo(site.schedule_timezone)
         start = _localize_start_date(site.schedule_start_at, tz)
-        trigger = _build_cron_trigger(site.schedule_interval_minutes, start, tz)
+        trigger = _build_trigger(site.schedule_interval_minutes, start, tz)
 
         self._scheduler.add_job(
             _run_scheduled_scrape,
@@ -215,7 +222,7 @@ class SchedulerService:
             return
         tz = ZoneInfo(site.schedule_timezone)
         start = _localize_start_date(site.schedule_start_at, tz)
-        trigger = _build_cron_trigger(site.schedule_interval_minutes, start, tz)
+        trigger = _build_trigger(site.schedule_interval_minutes, start, tz)
         self._scheduler.add_job(
             _run_scheduled_scrape,
             trigger=trigger,

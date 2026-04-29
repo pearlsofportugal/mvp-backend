@@ -237,6 +237,7 @@ async def _run_scrape_async(
         listings_found = 0
         listings_scraped = 0
         errors = 0
+        warnings = 0
         new_count = 0
         updated_count = 0
 
@@ -301,7 +302,7 @@ async def _run_scrape_async(
                 if await _check_job_cancelled(db, job_id):
                     break
 
-                scraped, errored, is_new = await _process_listing_url(
+                scraped, errored, warned, is_new = await _process_listing_url(
                     db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
                 )
                 if scraped:
@@ -312,12 +313,15 @@ async def _run_scrape_async(
                         updated_count += 1
                 if errored:
                     errors += 1
-                if scraped or errored:
+                if warned:
+                    warnings += 1
+                if scraped or errored or warned:
                     job.update_progress(
                         pages_visited=pages_visited,
                         listings_found=listings_found,
                         listings_scraped=listings_scraped,
                         errors=errors,
+                        warnings=warnings,
                         new_listings=new_count,
                         updated_listings=updated_count,
                     )
@@ -400,6 +404,7 @@ async def _run_sitemap_scrape(
         listings_found = len(urls)
         listings_scraped = 0
         errors = 0
+        warnings = 0
         new_count = 0
         updated_count = 0
 
@@ -419,7 +424,7 @@ async def _run_sitemap_scrape(
                 logger.info("Job %s was cancelled", job_id)
                 break
 
-            scraped, errored, is_new = await _process_listing_url(
+            scraped, errored, warned, is_new = await _process_listing_url(
                 db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
             )
             if scraped:
@@ -430,12 +435,15 @@ async def _run_sitemap_scrape(
                     updated_count += 1
             if errored:
                 errors += 1
-            if scraped or errored:
+            if warned:
+                warnings += 1
+            if scraped or errored or warned:
                 job.update_progress(
                     pages_visited=1,
                     listings_found=listings_found,
                     listings_scraped=listings_scraped,
                     errors=errors,
+                    warnings=warnings,
                     new_listings=new_count,
                     updated_listings=updated_count,
                 )
@@ -458,10 +466,10 @@ async def _process_listing_url(
 ) -> tuple[bool, bool, bool]:
     """Fetch, parse e persist um único URL de listing.
 
-    Returns (scraped, errored, is_new):
+    Returns (scraped, errored, warned, is_new):
     - scraped=True  → listing persistido com sucesso.
-    - errored=True  → excepção durante o processamento.
-    - (False, True, False) → HTML não disponível (fetch devolveu None).
+    - errored=True  → excepção durante o processamento (parsing, DB, etc.).
+    - warned=True   → HTML não disponível (fetch devolveu None — 404, timeout, bloqueio).
 
     O caller é responsável por chamar job.update_progress() com os contadores actualizados.
     """
@@ -472,7 +480,7 @@ async def _process_listing_url(
             job.add_log("warning", "Failed to fetch listing page", link)
             job.touch_heartbeat()
             await db.commit()
-            return False, True, False
+            return False, False, True, False
 
         raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
 
@@ -489,7 +497,7 @@ async def _process_listing_url(
         job.add_url("scraped", link)
         job.touch_heartbeat()
         await db.commit()
-        return True, False, is_new
+        return True, False, False, is_new
 
     except Exception as e:
         logger.error("Error processing listing %s: %s", link, str(e))
@@ -499,7 +507,7 @@ async def _process_listing_url(
         job.add_log("error", f"Error processing listing: {str(e)}", link)
         job.touch_heartbeat()
         await db.commit()
-        return False, True, False
+        return False, True, False, False
 
 
 async def _check_job_cancelled(db: AsyncSession, job_id: str) -> bool:
@@ -696,7 +704,7 @@ async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
                 started_at=job.started_at,
                 finished_at=job.completed_at,
                 start_url=job.start_url,
-                warnings_count=len((job.logs or {}).get("warnings", [])),
+                warnings_count=(job.progress or {}).get("warnings", 0),
             )
         await db.commit()
 
@@ -752,5 +760,5 @@ async def _fail_job(db: AsyncSession, job: ScrapeJob, error: str) -> None:
                 started_at=job.started_at,
                 finished_at=job.completed_at,
                 start_url=job.start_url,
-                warnings_count=len((job.logs or {}).get("warnings", [])),
+                warnings_count=(job.progress or {}).get("warnings", 0),
             )

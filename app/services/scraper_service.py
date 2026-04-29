@@ -202,7 +202,7 @@ async def _run_scrape_async(
         scraper: EthicalScraper | PlaywrightScraper = PlaywrightScraper(
             min_delay=config.get("min_delay") or settings.default_min_delay,
             max_delay=config.get("max_delay") or settings.default_max_delay,
-            timeout=settings.request_timeout,
+            timeout=settings.playwright_timeout,
             extra_headers=request_headers or {},
         )
         logger.info("Job %s using PlaywrightScraper (JS rendering enabled)", job_id)

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     default_user_agent: str = "RealEstateResearchBot/1.0 (+contact: you@example.com)"
     default_max_pages: int = 10
     request_timeout: int = 120
+    playwright_timeout: int = 30
     scrape_job_stale_after_seconds: int = 300
     export_max_rows: int = 5000
 

@@ -14,7 +14,7 @@ with `asyncio.to_thread()` to avoid blocking the event loop.
 """
 import asyncio
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -57,16 +57,26 @@ def _missing_critical_parser_fields(raw_data: dict[str, Any]) -> list[str]:
 
 
 async def recover_stale_jobs(db: AsyncSession) -> int:
-    """Mark all running jobs as failed on startup.
+    """Mark running jobs as failed if their heartbeat has gone silent.
 
-    Any job with status='running' at startup is guaranteed orphaned — the
-    worker process that was executing it no longer exists. The heartbeat cutoff
-    is irrelevant here: even a job with a heartbeat 1 second old is dead once
-    the process restarts.
+    A job is only considered stale when its last_heartbeat_at is older than
+    STALE_THRESHOLD_SECONDS. This avoids a split-brain problem in multi-instance
+    deployments (e.g. Cloud Run autoscaling): a new instance that starts while
+    another instance is actively running a job must not mark that job as failed
+    just because it sees status='running' on startup.
+
+    A job with a recent heartbeat is alive on another instance — leave it alone.
+    A job with no heartbeat at all (never started) is always considered stale.
     """
+    STALE_THRESHOLD_SECONDS = 120
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_THRESHOLD_SECONDS)
+
     stale_jobs = (
         await db.execute(
-            select(ScrapeJob).where(ScrapeJob.status == "running")
+            select(ScrapeJob).where(
+                ScrapeJob.status == "running",
+                (ScrapeJob.last_heartbeat_at == None) | (ScrapeJob.last_heartbeat_at < cutoff),  # noqa: E711
+            )
         )
     ).scalars().all()
 

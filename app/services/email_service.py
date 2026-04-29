@@ -110,7 +110,7 @@ async def send_job_notification(
     # CTA button
     dashboard_button = ""
     if settings.frontend_url:
-        _url = f"{settings.frontend_url}/jobs/{job_id}"
+        _url = f"{settings.frontend_url}/jobs?jobId={job_id}"
         dashboard_button = f"""
         <tr>
           <td style="padding:0 32px 32px;">

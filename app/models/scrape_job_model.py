@@ -130,7 +130,8 @@ class ScrapeJob(Base):
             self.logs = {"errors": [], "warnings": [], "info": []}
 
         bucket_key = f"{level}s" if not level.endswith("s") else level
-        bucket: list = self.logs.setdefault(bucket_key, [])
+        current = dict(self.logs)
+        bucket = list(current.get(bucket_key, []))
         if len(bucket) >= _MAX_LOG_ENTRIES:
             return
 
@@ -142,16 +143,19 @@ class ScrapeJob(Base):
             log_entry["url"] = url
 
         bucket.append(log_entry)
-        self.logs[bucket_key] = bucket
+        current[bucket_key] = bucket
+        self.logs = current
 
     def add_url(self, status: str, url: str) -> None:
         """Track URLs. Status: 'found', 'scraped', 'failed'."""
         if self.urls is None:
             self.urls = {"found": [], "scraped": [], "failed": []}
 
-        bucket: list = self.urls.setdefault(status, [])
+        current = dict(self.urls)
+        bucket = list(current.get(status, []))
         if len(bucket) >= _MAX_URL_ENTRIES:
             return
         if url not in bucket:
             bucket.append(url)
-        self.urls[status] = bucket
+        current[status] = bucket
+        self.urls = current

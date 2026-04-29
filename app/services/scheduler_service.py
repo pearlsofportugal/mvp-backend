@@ -10,9 +10,10 @@ registers them. On PATCH the router triggers reschedule/unschedule as needed.
 from __future__ import annotations
 
 from datetime import datetime
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -29,6 +30,19 @@ _JOB_ID_PREFIX = "scrape__"
 
 def _job_id(site_key: str) -> str:
     return f"{_JOB_ID_PREFIX}{site_key}"
+
+
+def _safe_zoneinfo(tz_str: str, site_key: str = "") -> ZoneInfo:
+    """Return ZoneInfo for tz_str, falling back to UTC on invalid names."""
+    try:
+        return ZoneInfo(tz_str)
+    except ZoneInfoNotFoundError:
+        logger.error(
+            "Unknown timezone %r for site '%s' — falling back to UTC",
+            tz_str,
+            site_key,
+        )
+        return ZoneInfo("UTC")
 
 
 def _localize_start_date(start_date: datetime | None, tz: ZoneInfo) -> datetime | None:
@@ -55,7 +69,7 @@ def _localize_start_date(start_date: datetime | None, tz: ZoneInfo) -> datetime 
 
 def _build_trigger(
     interval_minutes: int, start: datetime | None, tz: ZoneInfo
-) -> CronTrigger | IntervalTrigger:
+) -> BaseTrigger:
     """Build the appropriate APScheduler trigger.
 
     - Daily (>= 1440 min): CronTrigger at H:M — fires once per day at the
@@ -156,11 +170,11 @@ class SchedulerService:
             len(sites),
         )
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait: bool = True) -> None:
         """Stop the scheduler gracefully (does not wait for running jobs)."""
         if self._scheduler.running:
-            self._scheduler.shutdown(wait=False)
-            logger.info("Scheduler stopped")
+            self._scheduler.shutdown(wait=wait)
+            logger.info("Scheduler stopped (wait=%s)", wait)
 
     # ------------------------------------------------------------------
     # Per-site management
@@ -172,24 +186,11 @@ class SchedulerService:
         If schedule_enabled is False the job is removed (if present).
         Always safe to call — idempotent via replace_existing=True.
         """
-        job_id = _job_id(site.key)
-
         if not site.schedule_enabled or not site.schedule_interval_minutes:
             self.unschedule_site(site.key)
             return
 
-        tz = ZoneInfo(site.schedule_timezone)
-        start = _localize_start_date(site.schedule_start_at, tz)
-        trigger = _build_trigger(site.schedule_interval_minutes, start, tz)
-
-        self._scheduler.add_job(
-            _run_scheduled_scrape,
-            trigger=trigger,
-            args=[site.key],
-            id=job_id,
-            replace_existing=True,
-            name=f"scrape:{site.key}",
-        )
+        self._add_job(site)
         next_run = self.get_next_run(site.key)
         logger.info(
             "Scheduled scrape registered for site '%s' — every %d min, next run: %s",
@@ -216,11 +217,9 @@ class SchedulerService:
     # Internal
     # ------------------------------------------------------------------
 
-    def _register(self, site: SiteConfig) -> None:
-        """Register a site job without logging — used during bulk startup."""
-        if not site.schedule_enabled or not site.schedule_interval_minutes:
-            return
-        tz = ZoneInfo(site.schedule_timezone)
+    def _add_job(self, site: SiteConfig) -> None:
+        """Build trigger and register the APScheduler job for a site."""
+        tz = _safe_zoneinfo(site.schedule_timezone, site.key)
         start = _localize_start_date(site.schedule_start_at, tz)
         trigger = _build_trigger(site.schedule_interval_minutes, start, tz)
         self._scheduler.add_job(
@@ -231,6 +230,12 @@ class SchedulerService:
             replace_existing=True,
             name=f"scrape:{site.key}",
         )
+
+    def _register(self, site: SiteConfig) -> None:
+        """Register a site job without logging — used during bulk startup."""
+        if not site.schedule_enabled or not site.schedule_interval_minutes:
+            return
+        self._add_job(site)
 
 
 # Singleton — imported by main.py and sites.py

@@ -15,11 +15,9 @@ CONFIGURATION:
 
 Expandable per partner — dispatcher pattern.
 """
-import asyncio
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
-from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -43,7 +41,6 @@ logger = get_logger(__name__)
 _CURRENCY_MAP_CACHE: dict[str, str] = {}
 _CACHE_TIMESTAMP: datetime | None = None
 _CACHE_TTL_SECONDS = 300  # 5 minutes
-_CACHE_LOCK = asyncio.Lock()
 
 # Default fallback currency mappings
 _DEFAULT_CURRENCY_MAP = {
@@ -88,24 +85,13 @@ async def _load_currency_map() -> dict[str, str]:
 
     now = datetime.now(timezone.utc)
 
-    # Fast path — no lock needed for a read when cache is warm
+    # Check cache validity
     if (
         _CACHE_TIMESTAMP
         and _CURRENCY_MAP_CACHE
         and (now - _CACHE_TIMESTAMP).total_seconds() < _CACHE_TTL_SECONDS
     ):
         return _CURRENCY_MAP_CACHE
-
-    async with _CACHE_LOCK:
-        # Re-check after acquiring the lock — another coroutine may have
-        # already populated the cache while we were waiting.
-        now = datetime.now(timezone.utc)
-        if (
-            _CACHE_TIMESTAMP
-            and _CURRENCY_MAP_CACHE
-            and (now - _CACHE_TIMESTAMP).total_seconds() < _CACHE_TTL_SECONDS
-        ):
-            return _CURRENCY_MAP_CACHE
 
     try:
         from sqlalchemy import select
@@ -178,11 +164,9 @@ def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
     if not match:
         return None, None
 
-    # Strip all whitespace upfront — scraped HTML uses \xa0 (non-breaking space)
-    # as a thousands separator; plain .replace(" ", "") misses it.
-    num_str = re.sub(r"\s+", "", match.group())
-    # Normalize: handle European decimal notation
-    # "250000", "1.234,56" → "1234.56"
+    num_str = match.group().strip()
+    # Normalize: remove spaces, handle European decimal notation
+    # "250 000" → "250000", "1.234,56" → "1234.56"
     if "," in num_str and "." in num_str:
         # European format: 1.234,56
         num_str = num_str.replace(".", "").replace(",", ".")
@@ -202,6 +186,9 @@ def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
             # All groups after the first are 3 digits → thousand separators: 1.250.000
             num_str = num_str.replace(".", "")
         # else: single dot like 1250.50 — leave as-is (decimal)
+        num_str = num_str.replace(" ", "")
+    else:
+        num_str = num_str.replace(" ", "")
 
     try:
         amount = Decimal(num_str)
@@ -389,18 +376,6 @@ def _normalize_habinedita_address(raw: dict[str, Any]) -> tuple[str | None, str 
 
 # ───────── Partner Normalizers ─────────
 
-_PARTNER_NORMALIZERS: dict[str, Callable[[dict[str, Any]], PropertySchema]] = {}
-
-
-def partner_normalizer(key: str) -> Callable:
-    """Register a normalizer function in the dispatcher table."""
-    def decorator(fn: Callable[[dict[str, Any]], PropertySchema]) -> Callable:
-        _PARTNER_NORMALIZERS[key] = fn
-        return fn
-    return decorator
-
-
-@partner_normalizer("pearls")
 def normalize_pearls_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw Pearls of Portugal payload into canonical PropertySchema."""
     price_amount, price_currency = parse_price(raw.get("price"))
@@ -483,7 +458,6 @@ def normalize_pearls_payload(raw: dict[str, Any]) -> PropertySchema:
         raw_partner_payload=raw,
     )
 
-@partner_normalizer("habinedita")
 def normalize_habinedita_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw Habinédita payload into canonical PropertySchema."""
     price_amount, price_currency = parse_price(raw.get("price"))
@@ -594,7 +568,6 @@ def normalize_habinedita_payload(raw: dict[str, Any]) -> PropertySchema:
 
 # ───────── Dispatcher ─────────
 
-@partner_normalizer("habita")
 def normalize_habita_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw Habita payload into canonical PropertySchema."""
     price_amount, price_currency = parse_price(raw.get("price"))
@@ -611,45 +584,16 @@ def normalize_habita_payload(raw: dict[str, Any]) -> PropertySchema:
         w in business_type_raw for w in ("arrend", "arrendar", "rent", "aluguer")
     ) else "sale"
 
-    # Location: prefer direct selector values (district_selector, county_selector);
-    # fall back to parsing ".wb-fld-location" which may contain "County > Parish"
-    # or "District, City" depending on the listing.
+    # Location: ".wb-fld-location" typically returns "City" or "District, City"
     location = _normalize_whitespace(raw.get("location") or "") or ""
-    region: str | None = raw.get("district") or None
-    city: str | None = raw.get("county") or None
-    area_parish: str | None = raw.get("parish") or None
-
-    if not region and not city:
-        if "," in location:
-            parts = [p.strip() for p in location.split(",")]
-            region = parts[0] or None
-            city = parts[-1] or None
-        elif ">" in location:
-            parts = [p.strip() for p in location.split(">")]
-            if len(parts) >= 3:
-                # "District > County > Parish" format
-                region = parts[0] or None
-                city = parts[1] or None
-                area_parish = parts[-1] or None
-            else:
-                city = parts[0] or None
-                if len(parts) > 1:
-                    area_parish = parts[-1] or None
-        else:
-            city = location or None
-    elif not city and location:
-        if ">" in location:
-            parts = [p.strip() for p in location.split(">")]
-            if len(parts) >= 3:
-                region = parts[0] or None
-                city = parts[1] or None
-                area_parish = parts[-1] or None
-            else:
-                city = parts[0] or None
-                if len(parts) > 1:
-                    area_parish = parts[-1] or None
-        elif city is None:
-            city = location or None
+    region: str | None = None
+    city: str | None = None
+    if "," in location:
+        parts = [p.strip() for p in location.split(",")]
+        region = parts[0] or None
+        city = parts[-1] or None
+    else:
+        city = location or None
 
     property_type = raw.get("property_type")
     if not property_type and raw.get("title"):
@@ -693,7 +637,6 @@ def normalize_habita_payload(raw: dict[str, Any]) -> PropertySchema:
             country="Portugal",
             region=region,
             city=city,
-            area=area_parish,
             full_address=_truncate_text(location, 500) or None,
         ),
         media=[
@@ -724,7 +667,6 @@ def normalize_habita_payload(raw: dict[str, Any]) -> PropertySchema:
     )
 
 
-@partner_normalizer("t2mais1")
 def normalize_t2mais1_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw T2+1 (EgoRealEstate platform) payload into canonical PropertySchema."""
     price_amount, price_currency = parse_price(raw.get("price"))
@@ -752,19 +694,9 @@ def normalize_t2mais1_payload(raw: dict[str, Any]) -> PropertySchema:
 
     if not city and location_raw:
         parts = [p.strip() for p in location_raw.split(">")]
-        if len(parts) >= 3:
-            # "District > County > Parish" format
-            region = parts[0] or None
-            city = parts[1] or None
+        city = parts[0] or None
+        if len(parts) > 1:
             area_parish = parts[-1] or None
-        else:
-            city = parts[0] or None
-            if len(parts) > 1:
-                area_parish = parts[-1] or None
-
-    # Fall back: use city as region (district) when no explicit district available
-    if not region:
-        region = city
 
     # Reference: strip "Ref. " prefix added by the template
     partner_id = raw.get("property_id") or raw.get("reference")
@@ -779,18 +711,11 @@ def normalize_t2mais1_payload(raw: dict[str, Any]) -> PropertySchema:
             "Escritório", "Armazém", "Terreno", "Garagem", "Lote",
             "Quintal", "Quinta",
         )
-        title_stripped = raw["title"].strip()
-        title_lower = title_stripped.lower()
+        title_lower = raw["title"].strip().lower()
         for pt in _T2MAIS1_TYPES:
-            if pt.lower() in title_lower:
+            if title_lower.startswith(pt.lower()):
                 property_type = pt
                 break
-        # Infer from typology-style titles: "T2 mobilado" → Apartamento, "V3 ..." → Moradia
-        if not property_type:
-            if re.search(r"\bT\d+\b", title_stripped, re.IGNORECASE):
-                property_type = "Apartamento"
-            elif re.search(r"\bV\d+\b", title_stripped, re.IGNORECASE):
-                property_type = "Moradia"
 
     price_per_m2_amount = calculate_price_per_m2(price_amount, gross_area or useful_area)
     raw_description = raw.get("raw_description")
@@ -844,7 +769,6 @@ def normalize_t2mais1_payload(raw: dict[str, Any]) -> PropertySchema:
             for key, value in {
                 "raw": raw_description,
                 "pt": normalized_description,
-                "meta": raw.get("meta_description"),
             }.items()
             if value
         },
@@ -854,42 +778,12 @@ def normalize_t2mais1_payload(raw: dict[str, Any]) -> PropertySchema:
     )
 
 
-@partner_normalizer("imobiliariaprp")
 def normalize_imobiliariaprp_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize an Imobiliária PRP (EgoRealEstate platform) payload into canonical PropertySchema."""
     schema = normalize_t2mais1_payload(raw)
     return schema.model_copy(update={"source_partner": "imobiliariaprp"})
 
 
-@partner_normalizer("escolhacerta")
-def normalize_escolhacerta_payload(raw: dict[str, Any]) -> PropertySchema:
-    """Normalize an Escolha Certa (EgoRealEstate platform) payload into canonical PropertySchema."""
-    schema = normalize_t2mais1_payload(raw)
-    return schema.model_copy(update={"source_partner": "escolhacerta"})
-
-
-@partner_normalizer("sottomayor")
-def normalize_sottomayor_payload(raw: dict[str, Any]) -> PropertySchema:
-    """Normalize a Sottomayor Properties (EgoRealEstate platform) payload into canonical PropertySchema."""
-    schema = normalize_t2mais1_payload(raw)
-    return schema.model_copy(update={"source_partner": "sottomayor"})
-
-
-@partner_normalizer("barcelcasa")
-def normalize_barcelcasa_payload(raw: dict[str, Any]) -> PropertySchema:
-    """Normalize a Barcelcasa Imobiliária (EgoRealEstate platform) payload into canonical PropertySchema."""
-    schema = normalize_t2mais1_payload(raw)
-    return schema.model_copy(update={"source_partner": "barcelcasa"})
-
-
-@partner_normalizer("sunpoint")
-def normalize_sunpoint_payload(raw: dict[str, Any]) -> PropertySchema:
-    """Normalize a Sunpoint Properties (EgoRealEstate platform) payload into canonical PropertySchema."""
-    schema = normalize_t2mais1_payload(raw)
-    return schema.model_copy(update={"source_partner": "sunpoint"})
-
-
-@partner_normalizer("realkey")
 def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw Realkey (Centralimo platform) payload into canonical PropertySchema."""
     price_amount, price_currency = parse_price(raw.get("price"))
@@ -926,28 +820,11 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
     condition_raw = raw.get("condition") or ""
     condition = re.sub(r"^[^:]+:\s*", "", condition_raw).strip() or None
 
-    # Typology: realkey HTML does not expose a dedicated typology field.
-    # Infer from title: "Apartamento T2 no centro do Porto" → "T2"
-    typology = raw.get("typology")
-    if not typology and title:
-        typ_match = re.search(r"\b([TV]\d+)\b", title, re.IGNORECASE)
-        if typ_match:
-            typology = typ_match.group(1).upper()
-
-    # Location: extract district + county from URL path (most reliable source)
-    # URL pattern: /pt-PT/Imovel/{listing_type}/{property_type}/{district}/{county}/{parish}/{id}
+    # Location: "São Mamede de Infesta e Senhora da Hora, Norteshopping (Senhora da Hora)"
     region: str | None = None
     city: str | None = None
     area_parish: str | None = None
-    url_match = re.search(
-        r"/Imovel/[^/]+/[^/]+/([^/?#]+)/([^/?#]+)/([^/?#]+)/\d+",
-        source_url,
-    )
-    if url_match:
-        region = url_match.group(1).replace("-", " ")  # district
-        city = url_match.group(2).replace("-", " ")    # county
-        area_parish = url_match.group(3).replace("-", " ")  # parish
-    elif "," in location_raw:
+    if "," in location_raw:
         parts = [p.strip() for p in location_raw.split(",")]
         area_parish = parts[0] or None
         city = parts[-1] or None
@@ -965,7 +842,7 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
         title=title or None,
         listing_type=listing_type,
         property_type=raw.get("property_type"),
-        typology=typology,
+        typology=raw.get("typology"),
         bedrooms=bedrooms,
         bathrooms=parse_int(raw.get("bathrooms")),
         floor=None,
@@ -1013,6 +890,16 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
         energy_certificate=raw.get("energy_certificate"),
         raw_partner_payload={**raw, "condition": condition} if condition else raw,
     )
+
+
+_PARTNER_NORMALIZERS = {
+    "pearls": normalize_pearls_payload,
+    "habinedita": normalize_habinedita_payload,
+    "habita": normalize_habita_payload,
+    "t2mais1": normalize_t2mais1_payload,
+    "imobiliariaprp": normalize_imobiliariaprp_payload,
+    "realkey": normalize_realkey_payload,
+}
 
 
 def normalize_partner_payload(raw: dict[str, Any], partner: str) -> PropertySchema:

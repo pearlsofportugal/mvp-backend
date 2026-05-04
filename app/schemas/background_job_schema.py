@@ -5,13 +5,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.core.enums import BulkStatus
+
 
 class BulkJobAccepted(BaseModel):
     """Returned immediately when a background bulk job is accepted (HTTP 202)."""
 
     job_id: UUID
     job_type: str
-    status: str = "running"
+    status: BulkStatus = BulkStatus.RUNNING
     total: int = Field(..., ge=0, description="Number of items to process.")
     message: str
 
@@ -21,7 +23,7 @@ class BulkJobStatus(BaseModel):
 
     job_id: UUID
     job_type: str
-    status: str = Field(..., description="running | completed | failed")
+    status: BulkStatus  # em vez de str
     total: int
     done: int
     failed: int

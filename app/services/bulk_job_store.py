@@ -66,9 +66,15 @@ class BulkJobState:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
         }
 
+    def append_error(self, msg: str, *, max_errors: int = 100) -> None:
+        """Append an error message, capped to prevent unbounded growth."""
+        if len(self.errors) < max_errors:
+            self.errors.append(msg)
+
 
 def create_job(job_type: str, total: int) -> BulkJobState:
     """Register a new job in the store and return its initial state."""
+    evict_completed_jobs()
     job = BulkJobState(id=uuid4(), job_type=job_type, status=STATUS_RUNNING, total=total)
     _JOBS[job.id] = job
     return job

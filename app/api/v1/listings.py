@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, listing_filter_params
 from app.api.responses import ERROR_RESPONSES, ok
 from app.schemas.base_schema import ApiResponse
 from app.schemas.listing_schema import (
@@ -33,26 +33,7 @@ router = APIRouter()
 async def list_listings(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    district: str | None = Query(None),
-    county: str | None = Query(None),
-    parish: str | None = Query(None),
-    property_type: str | None = Query(None),
-    typology: str | None = Query(None),
-    listing_type: str | None = Query(None, pattern="^(sale|rent)$"),
-    source_partner: str | None = Query(None),
-    scrape_job_id: UUID | None = Query(None),
-    price_min: Decimal | None = Query(None),
-    price_max: Decimal | None = Query(None),
-    area_min: float | None = Query(None),
-    area_max: float | None = Query(None),
-    bedrooms_min: int | None = Query(None),
-    bedrooms_max: int | None = Query(None),
-    has_garage: bool | None = Query(None),
-    has_pool: bool | None = Query(None),
-    has_elevator: bool | None = Query(None),
-    created_after: datetime | None = Query(None),
-    created_before: datetime | None = Query(None),
-    search: str | None = Query(None),
+    filters: dict = Depends(listing_filter_params),
     is_enriched: bool | None = Query(None, description="Filter by AI enrichment status."),
     is_exported_to_imodigi: bool | None = Query(None, description="Filter by Imodigi export status (published or updated)."),
     sort_by: str = Query("created_at", enum=list(SORT_FIELDS.keys())),
@@ -61,19 +42,7 @@ async def list_listings(
     page_size: int = Query(20, ge=1, le=100),
 ):
     """List listings with filtering, sorting, and pagination."""
-    filter_kwargs = {
-        "district": district, "county": county, "parish": parish,
-        "property_type": property_type, "typology": typology, "listing_type": listing_type,
-        "source_partner": source_partner, "scrape_job_id": scrape_job_id,
-        "price_min": price_min, "price_max": price_max,
-        "area_min": area_min, "area_max": area_max,
-        "bedrooms_min": bedrooms_min, "bedrooms_max": bedrooms_max,
-        "has_garage": has_garage, "has_pool": has_pool, "has_elevator": has_elevator,
-        "created_after": created_after, "created_before": created_before,
-        "search": search,
-        "is_enriched": is_enriched,
-        "is_exported_to_imodigi": is_exported_to_imodigi,
-    }
+    filter_kwargs = {**filters, "is_enriched": is_enriched, "is_exported_to_imodigi": is_exported_to_imodigi}
     paginated, meta = await ListingService.get_all_listings(db, filter_kwargs, sort_by, sort_order, page, page_size)
     return ok(paginated, "Listings listed successfully", request, meta=meta)
 

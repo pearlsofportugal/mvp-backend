@@ -112,50 +112,49 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                 yield _sse_event("error", {"message": f"Job {job_id} not found"})
                 return
 
-        while True:
-            if await request.is_disconnected():
-                break
+            while True:
+                if await request.is_disconnected():
+                    break
 
-            if time.monotonic() - stream_started > _SSE_MAX_DURATION:
-                yield _sse_event("done", {"job_id": str(job_id), "message": "Stream max duration reached"})
-                break
+                if time.monotonic() - stream_started > _SSE_MAX_DURATION:
+                    yield _sse_event("done", {"job_id": str(job_id), "message": "Stream max duration reached"})
+                    break
 
-            async with async_session_factory() as db:
                 try:
                     job = await ScrapeJobService.get_job(db, job_id)
                 except Exception:
                     yield _sse_event("error", {"message": "Job disappeared from database"})
                     break
 
-            current_progress = job.progress or {}
-            current_status = job.status
+                current_progress = job.progress or {}
+                current_status = job.status
 
-            if current_progress != last_progress or current_status != last_status:
-                payload = {
-                    "job_id": str(job_id),
-                    "status": current_status,
-                    "progress": current_progress,
-                    "error_message": job.error_message,
-                }
-                event_type = "status" if current_status != last_status else "progress"
-                yield _sse_event(event_type, payload)
-                last_progress = current_progress
-                last_status = current_status
+                if current_progress != last_progress or current_status != last_status:
+                    payload = {
+                        "job_id": str(job_id),
+                        "status": current_status,
+                        "progress": current_progress,
+                        "error_message": job.error_message,
+                    }
+                    event_type = "status" if current_status != last_status else "progress"
+                    yield _sse_event(event_type, payload)
+                    last_progress = current_progress
+                    last_status = current_status
 
-            if current_status in _SSE_TERMINAL_STATUSES:
-                yield _sse_event("done", {
-                    "job_id": str(job_id),
-                    "status": current_status,
-                    "progress": current_progress,
-                    "error_message": job.error_message,
-                })
-                break
+                if current_status in _SSE_TERMINAL_STATUSES:
+                    yield _sse_event("done", {
+                        "job_id": str(job_id),
+                        "status": current_status,
+                        "progress": current_progress,
+                        "error_message": job.error_message,
+                    })
+                    break
 
-            tick += 1
-            if tick % _SSE_HEARTBEAT_EVERY == 0:
-                yield _sse_event("heartbeat", {"tick": tick})
+                tick += 1
+                if tick % _SSE_HEARTBEAT_EVERY == 0:
+                    yield _sse_event("heartbeat", {"tick": tick})
 
-            await asyncio.sleep(_SSE_POLL_INTERVAL)
+                await asyncio.sleep(_SSE_POLL_INTERVAL)
 
     except asyncio.CancelledError:
         pass  # client disconnected — clean exit

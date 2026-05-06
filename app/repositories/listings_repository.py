@@ -122,15 +122,19 @@ class ListingRepository:
         elif is_exported_to_imodigi is False:
             stmt = stmt.where(~_imodigi_exists)
 
-        total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
-        stmt = (
+        count_col = func.count().over().label("total_count")
+        data_stmt = (
             stmt
+            .add_columns(count_col)
             .options(selectinload(Listing.media_assets))
             .order_by(Listing.updated_at.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
-        return (await db.execute(stmt)).scalars().all(), total
+        rows = (await db.execute(data_stmt)).unique().all()
+        if not rows:
+            return [], 0
+        return [row[0] for row in rows], rows[0][1]
 
     @staticmethod
     async def get_stats(

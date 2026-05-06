@@ -1,6 +1,7 @@
 ﻿"""Pydantic schemas for SiteConfig API requests and responses."""
 
 import ipaddress
+import socket
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -29,10 +30,19 @@ def _validate_no_ssrf(raw: str) -> str:
         raise ValueError("url hostname is not permitted")
     try:
         addr = ipaddress.ip_address(hostname)
-    except ValueError:
-        return raw  # domain name — allowed
-    if addr.is_private or addr.is_loopback or addr.is_link_local:
-        raise ValueError("url must not target private or reserved IP ranges")
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
+            raise ValueError("url must not target private or reserved IP ranges")
+    except ValueError as exc:
+        if "url must not" in str(exc):
+            raise
+        # hostname is a domain name — resolve and verify it doesn't point to a private IP
+        try:
+            resolved = socket.gethostbyname(hostname)
+            resolved_addr = ipaddress.ip_address(resolved)
+            if resolved_addr.is_private or resolved_addr.is_loopback or resolved_addr.is_link_local or resolved_addr.is_reserved:
+                raise ValueError(f"url hostname resolves to a private/reserved IP address ({resolved})")
+        except socket.gaierror:
+            pass  # unresolvable hostname — let the HTTP layer handle it
     return raw
 
 

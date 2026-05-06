@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     database_url: str
     database_url_sync: str
     api_key: str = ""
+    dev_auth_bypass: bool = False
 
     # Scraping defaults
     default_min_delay: float = 2.0

@@ -20,14 +20,20 @@ FIX (prioridade alta): Adicionada autenticação por API key.
   para um MVP interno ou tool privada.
 """
 import secrets
+from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, AsyncGenerator
+from uuid import UUID
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Query, Security, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.logging import get_logger
 from app.database import async_session_factory
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -63,13 +69,13 @@ async def verify_api_key(
 ) -> str:
     """Validate the X-API-Key header."""
     if not settings.api_key:
-        if settings.app_env == "production":
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Authentication is not configured on the server.",
-            )
-        # Non-production: allow unauthenticated access with a dev placeholder
-        return "dev-bypass"
+        if settings.dev_auth_bypass and not settings.is_production:
+            logger.warning("DEV_AUTH_BYPASS is active — all requests accepted without authentication")
+            return "dev-bypass"
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API_KEY is not configured on the server.",
+        )
 
     if not api_key or not secrets.compare_digest(api_key, settings.api_key):
         raise HTTPException(
@@ -82,3 +88,41 @@ async def verify_api_key(
 
 
 RequireApiKey = Depends(verify_api_key)
+
+
+# ── Shared listing filter query parameters ──────────────────────────────────────────────────
+
+def listing_filter_params(
+    district: str | None = Query(None),
+    county: str | None = Query(None),
+    parish: str | None = Query(None),
+    property_type: str | None = Query(None),
+    typology: str | None = Query(None),
+    listing_type: str | None = Query(None, pattern="^(sale|rent)$"),
+    source_partner: str | None = Query(None),
+    scrape_job_id: UUID | None = Query(None),
+    price_min: Decimal | None = Query(None),
+    price_max: Decimal | None = Query(None),
+    area_min: float | None = Query(None),
+    area_max: float | None = Query(None),
+    bedrooms_min: int | None = Query(None),
+    bedrooms_max: int | None = Query(None),
+    has_garage: bool | None = Query(None),
+    has_pool: bool | None = Query(None),
+    has_elevator: bool | None = Query(None),
+    created_after: datetime | None = Query(None),
+    created_before: datetime | None = Query(None),
+    search: str | None = Query(None),
+) -> dict:
+    """Shared listing filter parameters used by /listings and /export endpoints."""
+    return dict(
+        district=district, county=county, parish=parish,
+        property_type=property_type, typology=typology, listing_type=listing_type,
+        source_partner=source_partner, scrape_job_id=scrape_job_id,
+        price_min=price_min, price_max=price_max,
+        area_min=area_min, area_max=area_max,
+        bedrooms_min=bedrooms_min, bedrooms_max=bedrooms_max,
+        has_garage=has_garage, has_pool=has_pool, has_elevator=has_elevator,
+        created_after=created_after, created_before=created_before,
+        search=search,
+    )

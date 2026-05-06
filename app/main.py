@@ -102,7 +102,7 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
+        allow_headers=["X-API-Key", "Content-Type", "Accept"],
     )
 
     @application.middleware("http")

@@ -31,7 +31,7 @@ test.db
 .pytest_cache/
 htmlcov/
 .coverage
-
+./graphify-out
 # OS
 .DS_Store
 Thumbs.db

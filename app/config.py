@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     docs_enabled: bool | None = None
     cors_origins: list[str] = ["http://localhost:4200", 
+                               "http://localhost:3000",
                                "http://localhost:8080",
                                "https://frontend-app-41588214705.europe-west1.run.app"
                                ]

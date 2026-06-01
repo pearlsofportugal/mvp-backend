@@ -242,7 +242,13 @@ def parse_area(raw: str | None) -> float | None:
                 return None
         return None
 
-    num_str = match.group(1).strip().replace(" ", "").replace(",", ".")
+    num_str = match.group(1).strip().replace(" ", "")
+    # Detect European thousands separator: digit(s) + dot + exactly 3 digits
+    # e.g. "2.408" → 2408.0  but "120.5" → 120.5
+    if re.match(r"^\d+\.\d{3}$", num_str):
+        num_str = num_str.replace(".", "")
+    else:
+        num_str = num_str.replace(",", ".")
     try:
         return float(num_str)
     except ValueError:
@@ -274,6 +280,11 @@ def parse_bool(raw: str | None) -> bool | None:
         return True
     if raw_lower in ("no", "não", "false", "0"):
         return False
+    # Numeric string: positive number → True (e.g. garage count "3" → has_garage=True)
+    try:
+        return float(raw_lower) > 0
+    except ValueError:
+        pass
     return None
 
 
@@ -772,6 +783,12 @@ def normalize_habita_payload(raw: dict[str, Any]) -> PropertySchema:
         area_gross=parse_area(raw.get("gross_area")),
         area_land=parse_area(raw.get("land_area")),
     )
+
+
+@partner_normalizer("brightmangroup_pt")
+def normalize_brightmangroup_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a raw Brightman Group payload into canonical PropertySchema."""
+    return normalize_ego_platform_payload(raw, "brightmangroup_pt")
 
 
 @partner_normalizer("t2mais1")

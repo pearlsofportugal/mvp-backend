@@ -245,6 +245,8 @@ async def _run_scrape_async(
         await db.commit()
 
         # ── Sitemap mode ────────────────────────────────────────────────────
+        visited_page_urls: set[str] = set()   # pagination page URLs visited this job
+        seen_listing_urls: set[str] = set()   # listing detail URLs seen across all pages
         if pagination_type == "sitemap":
             await _run_sitemap_scrape(
                 db=db,
@@ -271,6 +273,15 @@ async def _run_scrape_async(
 
             logger.info("Scraping page %d: %s", page_num + 1, current_url)
 
+            # Guard: stop if we've already visited this pagination URL this job.
+            # Uses a local set so it works for both EthicalScraper and PlaywrightScraper
+            # and catches URL normalization variants (e.g. ordem-1/pagina-1 vs pagina-1
+            # resolving to the same page via a mis-configured next_page_selector).
+            if current_url in visited_page_urls:
+                logger.info("Pagination page already visited — stopping: %s", current_url)
+                break
+            visited_page_urls.add(current_url)
+
             html = await _fetch_html(scraper, current_url)
             if not html:
                 logger.warning("Failed to fetch page: %s", current_url)
@@ -290,15 +301,29 @@ async def _run_scrape_async(
             pages_visited += 1
 
             links = parse_listing_links(html, base_url, full_selectors)
-            listings_found += len(links)
+
+            # Deduplicate listing URLs across pages: if the paginator cycles or
+            # two pagination page URLs serve identical content, avoid double-counting
+            # listings_found and redundant per-listing HTTP fetches.
+            new_links = [link for link in links if link not in seen_listing_urls]
+            seen_listing_urls.update(new_links)
+
+            duplicate_count = len(links) - len(new_links)
+            if duplicate_count:
+                logger.info(
+                    "Page %d: %d links found, %d already seen — skipping duplicates",
+                    page_num + 1, len(links), duplicate_count,
+                )
+
+            listings_found += len(new_links)
 
             # Batch-track found URLs — single commit per page
-            for link in links:
+            for link in new_links:
                 job.add_url("found", link)
             job.touch_heartbeat()
             await db.commit()
 
-            for link in links:
+            for link in new_links:
                 if await _check_job_cancelled(db, job_id):
                     break
 
@@ -336,6 +361,11 @@ async def _run_scrape_async(
                 next_url = parse_next_page(html, base_url, full_selectors)
                 if not next_url:
                     logger.info("No more pages — stopping")
+                    break
+                # Guard: if the selector is too broad and returns an already-visited
+                # URL (e.g. a "previous" page link), treat it as end-of-pagination.
+                if next_url in visited_page_urls:
+                    logger.info("Next-page URL already visited — stopping: %s", next_url)
                     break
                 current_url = next_url
             else:

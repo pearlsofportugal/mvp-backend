@@ -103,6 +103,10 @@ _DEFAULT_FIELD_MAP = {
     "reference": "property_id",
     "referência": "property_id",
     "ref": "property_id",
+    # Self-labeling listing-type keys (label IS the value)
+    "venda": "listing_type",
+    "arrendamento": "listing_type",
+    "trespasse": "listing_type",
 }
 
 _DEFAULT_FEATURE_MAP = {
@@ -141,7 +145,18 @@ _SUMMARY_FIELD_MAP = {
     "concelho": "county",
     "freguesia": "parish",
     "zona": "zone",
+    # Self-labeling: the label itself is the value (e.g. "Venda" row has price as .value)
+    "venda": "listing_type",
+    "arrendamento": "listing_type",
+    "trespasse": "listing_type",
 }
+
+# Keys where the HTML label IS the value (not the .value child element).
+# E.g. Brightmangroup has a row with label "Venda" and price in .value —
+# the listing type is "Venda", not the price string.
+_SELF_LABELING_KEYS: frozenset[str] = frozenset({
+    "venda", "arrendamento", "trespasse", "sale", "rent",
+})
 
 
 def _get_summary_field_map() -> dict[str, str]:
@@ -428,6 +443,12 @@ def _extract_summary_pairs(section: Tag, selectors: dict[str, Any]) -> dict[str,
         if not field:
             continue
 
+        # Self-labeling: the label IS the value (e.g. "Venda" — its sibling
+        # element contains the price, not the listing type string).
+        if label in _SELF_LABELING_KEYS:
+            data[field] = label.capitalize()
+            continue
+
         value_el = item.select_one(value_selector)
         if value_el:
             value = value_el.get_text(" ", strip=True)
@@ -549,7 +570,12 @@ def _extract_name_value_pairs(section: Tag, selectors: dict[str, Any]) -> dict[s
         # Map field name to canonical key
         for key, field in field_map.items():
             if key in name:
-                data[field] = value
+                # Self-labeling: the label IS the value (e.g. "Venda" row — its
+                # .value child contains the price, not the listing type string).
+                if key in _SELF_LABELING_KEYS:
+                    data[field] = key.capitalize()
+                else:
+                    data[field] = value
                 break
 
     return data
@@ -967,6 +993,9 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
             _assign_feature_matches(text, data)
 
     # Individual feature selectors
+    # If the matched element contains a number (e.g. garage count "3"), store that
+    # value so the mapper can both set has_garage=True and preserve the count.
+    # Otherwise fall back to "Yes" (presence-only feature).
     individual_features = {
         "garage_selector": "garage",
         "elevator_selector": "elevator",
@@ -977,8 +1006,11 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
     }
     for selector_key, field in individual_features.items():
         selector = selectors.get(selector_key)
-        if selector and soup.select_one(selector):
-            data[field] = "Yes"
+        if selector:
+            el = soup.select_one(selector)
+            if el:
+                value = _extract_element_value(el, field=field)
+                data[field] = value if value else "Yes"
 
     # Text patterns
     text_patterns = selectors.get("text_patterns", {})

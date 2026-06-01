@@ -341,6 +341,17 @@ async def enrich_listing_translations(
     if locales_to_generate:
         await _check_ai_rate_limit()
         raw = await _call_ai_for_translations_async(listing, keywords_used, locales_to_generate)
+        # Normalize: the model may return a list instead of a locale-keyed dict.
+        if isinstance(raw, list):
+            normalized: dict[str, Any] = {}
+            for item in raw:
+                if isinstance(item, dict):
+                    if "locale" in item:
+                        loc = item["locale"]
+                        normalized[loc] = {k: v for k, v in item.items() if k != "locale"}
+                    else:
+                        normalized.update(item)
+            raw = normalized
         for locale in locales_to_generate:
             results[locale] = _parse_locale_output(raw, locale)
 

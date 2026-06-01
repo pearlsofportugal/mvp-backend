@@ -72,6 +72,15 @@ class PlaywrightScraper:
     async def _ensure_browser(self) -> None:
         """Start Playwright + Chromium if not already running."""
         if self._browser is not None:
+            try:
+                # Probe that the browser process is still alive.
+                await self._browser.version()
+            except Exception:
+                logger.warning("Playwright browser appears to have crashed — re-launching")
+                self._browser = None
+                self._playwright = None
+
+        if self._browser is not None:
             return
 
         pw = await async_playwright().start()
@@ -82,9 +91,8 @@ class PlaywrightScraper:
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
-                    "--no-zygote",
-                    "--single-process",
                     "--disable-setuid-sandbox",
+                    "--no-zygote",
                 ],
             )
             self._playwright = pw

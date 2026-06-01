@@ -78,7 +78,14 @@ class PlaywrightScraper:
         try:
             self._browser = await pw.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-zygote",
+                    "--single-process",
+                    "--disable-setuid-sandbox",
+                ],
             )
             self._playwright = pw
         except Exception:
@@ -119,7 +126,7 @@ class PlaywrightScraper:
         parser.set_url(robots_url)
         loaded = False
         try:
-            await asyncio.to_thread(parser.read)
+            await asyncio.wait_for(asyncio.to_thread(parser.read), timeout=15.0)
             loaded = True
         except Exception as exc:
             logger.warning(

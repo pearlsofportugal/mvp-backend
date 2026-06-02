@@ -34,6 +34,14 @@ services:
       DATABASE_URL_SYNC: ${DOCKER_DATABASE_URL_SYNC:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       API_KEY: ${API_KEY:?API_KEY is required}
       CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+# CORREÇÃO 1: Sintaxe corrigida (:?) e agora aponta para o caminho INTERNO do Docker
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-credentials.json
+      
+      # CORREÇÃO 2: Sintaxe corrigida para validação obrigatória simples
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:?GOOGLE_CLOUD_PROJECT is required}
+    volumes:
+      # CORREÇÃO 2: Mapeia o ficheiro do teu Windows para o destino interno do Docker
+      - C:\Users\joaop\AppData\Roaming\gcloud\application_default_credentials.json:/app/gcp-credentials.json:ro
     depends_on:
       db:
         condition: service_healthy

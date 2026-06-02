@@ -12,11 +12,17 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from fastapi import Security
+from fastapi.security import APIKeyHeader
+
+from app.api.deps import RequireApiKey, get_db, verify_api_key
 from app.api.responses import ERROR_RESPONSES, ok
+from app.config import settings
+from app.core.exceptions import JobAlreadyRunningError, NotFoundError
 from app.database import async_session_factory
 from app.schemas.base_schema import ApiResponse
 from app.schemas.scrape_job_schema import JobCreate, JobListRead, JobRead
+from app.repositories.site_config_repository import SiteConfigRepository
 from app.services.scrape_job_service import ScrapeJobService
 from app.services.scraper_service import run_scrape_job
 
@@ -79,6 +85,41 @@ async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
     return ok(None, "Job deleted successfully", request)
 
 
+@router.post(
+    "/trigger/{site_key}",
+    response_model=ApiResponse[JobRead],
+    status_code=201,
+    responses={**ERROR_RESPONSES, 409: {"model": ApiResponse, "description": "A scrape job is already running for this site."}},
+    operation_id="trigger_scheduled_job",
+)
+async def trigger_scheduled_job(
+    site_key: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _: str = Security(verify_api_key),
+):
+    """Trigger a scheduled scrape job for a site.
+
+    Called by Google Cloud Scheduler. Uses the site's schedule_start_url and
+    schedule_max_pages (falling back to base_url and default_max_pages).
+    """
+    site = await SiteConfigRepository.get_by_key(db, site_key)
+    if not site or not site.is_active:
+        raise NotFoundError(f"Site config '{site_key}' not found or inactive")
+
+    start_url = site.schedule_start_url or site.base_url
+    if not start_url:
+        raise NotFoundError(f"Site '{site_key}' has no start URL configured")
+
+    max_pages = site.schedule_max_pages or settings.default_max_pages
+
+    payload = JobCreate(site_key=site_key, start_url=start_url, max_pages=max_pages)
+    job = await ScrapeJobService.create_job(db, payload)
+    background_tasks.add_task(run_scrape_job, str(job.id))
+    return ok(JobRead.model_validate(job), "Scheduled job triggered successfully", request)
+
+
 # ---------------------------------------------------------------------------
 # SSE — Server-Sent Events
 # ---------------------------------------------------------------------------
@@ -86,18 +127,6 @@ async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
 async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
     """
     Async generator that emits SSE events with live job progress.
-
-    Event types:
-      - 'progress'  — counter updates (pages_visited, listings_found, etc.)
-      - 'status'    — job state change (pending → running → completed/failed/cancelled)
-      - 'heartbeat' — keepalive every ~15 s to prevent proxy timeouts
-      - 'done'      — final snapshot when the job reaches a terminal state
-      - 'error'     — job not found or internal stream error
-
-    The stream closes automatically when:
-      1. The job reaches a terminal state (completed/failed/cancelled)
-      2. The client disconnects (request.is_disconnected())
-      3. An unrecoverable error occurs
     """
     tick = 0
     last_progress: dict | None = None
@@ -105,6 +134,7 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
     stream_started = time.monotonic()
 
     try:
+        # 1. Validação inicial: Verifica se o job existe antes de iniciar o loop
         async with async_session_factory() as db:
             try:
                 await ScrapeJobService.get_job(db, job_id)
@@ -112,14 +142,17 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                 yield _sse_event("error", {"message": f"Job {job_id} not found"})
                 return
 
-            while True:
-                if await request.is_disconnected():
-                    break
+        # 2. Loop principal de monitorização
+        while True:
+            if await request.is_disconnected():
+                break
 
-                if time.monotonic() - stream_started > _SSE_MAX_DURATION:
-                    yield _sse_event("done", {"job_id": str(job_id), "message": "Stream max duration reached"})
-                    break
+            if time.monotonic() - stream_started > _SSE_MAX_DURATION:
+                yield _sse_event("done", {"job_id": str(job_id), "message": "Stream max duration reached"})
+                break
 
+            # Abre uma sessão fresca Apenas para esta iteração (evita o Identity Map Cache)
+            async with async_session_factory() as db:
                 try:
                     job = await ScrapeJobService.get_job(db, job_id)
                 except Exception:
@@ -129,6 +162,7 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                 current_progress = job.progress or {}
                 current_status = job.status
 
+                # Deteta alterações de progresso ou estado
                 if current_progress != last_progress or current_status != last_status:
                     payload = {
                         "job_id": str(job_id),
@@ -141,6 +175,7 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                     last_progress = current_progress
                     last_status = current_status
 
+                # Se chegou a um estado final, envia o snapshot 'done' e quebra o loop
                 if current_status in _SSE_TERMINAL_STATUSES:
                     yield _sse_event("done", {
                         "job_id": str(job_id),
@@ -150,17 +185,20 @@ async def _sse_job_stream(job_id: UUID, request: Request) -> AsyncIterator[str]:
                     })
                     break
 
-                tick += 1
-                if tick % _SSE_HEARTBEAT_EVERY == 0:
-                    yield _sse_event("heartbeat", {"tick": tick})
+            # A sessão fecha aqui ao sair do 'async with'. 
+            # O link à BD fica livre enquanto a função aguarda no sleep.
+            tick += 1
+            if tick % _SSE_HEARTBEAT_EVERY == 0:
+                yield _sse_event("heartbeat", {"tick": tick})
 
-                await asyncio.sleep(_SSE_POLL_INTERVAL)
+            await asyncio.sleep(_SSE_POLL_INTERVAL)
 
     except asyncio.CancelledError:
-        pass  # client disconnected — clean exit
+        # Captura a desconexão nativa do cliente/browser (Client Disconnect)
+        pass  
     except Exception as e:
+        # Captura qualquer outro erro inesperado no stream
         yield _sse_event("error", {"message": f"Stream error: {str(e)}"})
-
 
 def _sse_event(event_type: str, data: dict) -> str:
     """Format an SSE event per RFC 8895."""

@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     ai_rate_limit_requests: int = 20
     ai_rate_limit_window: int = 60
 
+    # Google Cloud
+    google_cloud_project: str = ""
+    google_cloud_scheduler_location: str = "europe-west1"
+    backend_url: str = ""
+
     # Email notifications
     smtp_host: str = ""
     smtp_port: int = 587

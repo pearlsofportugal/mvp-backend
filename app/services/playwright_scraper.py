@@ -64,42 +64,67 @@ class PlaywrightScraper:
         # Playwright browser — lazily initialised on first use
         self._playwright = None
         self._browser = None
+        self._relaunch_count = 0
+        self._max_relaunches = 3
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def _ensure_browser(self) -> None:
-        """Start Playwright + Chromium if not already running."""
-        if self._browser is not None:
-            try:
-                # Probe that the browser process is still alive.
-                await self._browser.version()
-            except Exception:
-                logger.warning("Playwright browser appears to have crashed — re-launching")
+            """Start Playwright + Chromium if not already running."""
+            if self._browser is not None:
+                # CORREÇÃO 1: `is_connected` é uma propriedade booleana. 
+                # Não usa parênteses () nem 'await'.
+                if self._browser.is_connected:
+                    return
+    
+                # Se chegou aqui, o browser realmente perdeu a ligação ou crashou
+                self._relaunch_count += 1
+                if self._relaunch_count > self._max_relaunches:
+                    raise RuntimeError(
+                        f"Playwright Chromium crashed {self._relaunch_count} times — aborting job"
+                    )
+                
+                logger.warning(
+                    "Playwright browser appears to have crashed — re-launching (%d/%d)",
+                    self._relaunch_count,
+                    self._max_relaunches,
+                )
+                # Properly clean up the crashed instance to avoid process leaks.
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                try:
+                    if self._playwright:
+                        await self._playwright.stop()
+                except Exception:
+                    pass
                 self._browser = None
                 self._playwright = None
-
-        if self._browser is not None:
-            return
-
-        pw = await async_playwright().start()
-        try:
-            self._browser = await pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-setuid-sandbox",
-                    "--no-zygote",
-                ],
-            )
-            self._playwright = pw
-        except Exception:
-            await pw.stop()
-            raise
-        logger.debug("Playwright Chromium launched (async)")
+    
+            pw = await async_playwright().start()
+            try:
+                self._browser = await pw.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-setuid-sandbox",
+                    ],
+                )
+                self._playwright = pw
+                
+                # CORREÇÃO 2 (Opcional mas recomendada): 
+                # Se o browser abriu com sucesso, limpamos o contador de falhas consecutivas.
+                self._relaunch_count = 0  
+                
+            except Exception:
+                await pw.stop()
+                raise
+            logger.debug("Playwright Chromium launched (async)")
 
     async def close(self) -> None:
         """Close the browser and Playwright instance."""
@@ -200,12 +225,13 @@ class PlaywrightScraper:
         page = await ctx.new_page()
         try:
             await page.goto(url, wait_until=self.wait_until, timeout=self.timeout)
-            # Give JS time to finish rendering without hard-failing if the site
-            # never reaches networkidle (analytics, websockets, etc.)
+            # Best-effort: wait briefly for JS to finish. Many sites have persistent
+            # websockets/analytics that never reach networkidle — cap at 3 s so we
+            # don't waste time on connections that will never close.
             try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_load_state("networkidle", timeout=3000)
             except Exception:
-                pass  # best-effort — proceed with whatever is rendered
+                pass  # proceed with whatever is rendered
             html = await page.content()
             logger.debug("Playwright rendered %s (%d bytes)", url, len(html))
             return html

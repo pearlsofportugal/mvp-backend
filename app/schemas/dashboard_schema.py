@@ -41,3 +41,17 @@ class PartnerStatsResponse(BaseModel):
 
     partners: list[PartnerStats] = Field(default_factory=list)
     total_partners: int = Field(0, ge=0)
+    
+class WeeklyStats(BaseModel):
+    """Estatísticas consolidadas para uma determinada semana."""
+
+    label: str = Field(..., description="Nome de exibição da semana (ex: 'Semana 1' ou '04/05 - 11/05').")
+    total_listings: int = Field(0, ge=0, description="Volume total acumulado de imóveis até ao fim dessa semana.")
+    listings_captured: int = Field(0, ge=0, description="Quantidade de novos imóveis capturados especificamente nessa semana.")
+
+
+class WeeklyStatsResponse(BaseModel):
+    """Corpo da resposta para GET /api/v1/dashboard/weekly-stats."""
+
+    history: list[WeeklyStats] = Field(default_factory=list, description="Histórico cronológico das últimas semanas.")
+    total_weeks: int = Field(0, ge=0, description="Total de semanas retornadas (normalmente 6).")

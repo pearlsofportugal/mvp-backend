@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 from app.models.scrape_job_model import ScrapeJob
-from app.schemas.dashboard_schema import PartnerStats, PartnerStatsResponse
+from app.schemas.dashboard_schema import PartnerStats, PartnerStatsResponse, WeeklyStats, WeeklyStatsResponse
 
 
 class DashboardService:
@@ -105,3 +105,60 @@ class DashboardService:
         partners.sort(key=lambda p: p.last_listing_updated_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
         return PartnerStatsResponse(partners=partners, total_partners=len(partners))
+    @staticmethod
+    async def get_weekly_stats(db: AsyncSession) -> WeeklyStatsResponse:
+        """
+        Calcula o histórico de crescimento de imóveis agrupado cronologicamente
+        pelas últimas 6 semanas para alimentar o gráfico do dashboard.
+        """
+        now = datetime.now(timezone.utc)
+        
+        # 1. Gerar os limites das 6 semanas (da mais antiga para a mais recente)
+        # Cada semana termina num ponto e recua 7 dias.
+        weeks_bounds = []
+        for i in reversed(range(6)):
+            end_date = now - timedelta(weeks=i)
+            start_date = end_date - timedelta(days=7)
+            # Guardamos uma label simples (ex: "Semana 1", "Semana 2")
+            # Dica: Podes alterar o formato da label para "De DD/MM a DD/MM" usando strftime se preferires
+            label = f"Semana {6 - i}"
+            weeks_bounds.append((label, start_date, end_date))
+
+        # 2. Construir uma query única eficiente usando CASE condicionais.
+        # Isto evita fazer 6 queries separadas à base de dados.
+        select_expressions = []
+        for label, start, end in weeks_bounds:
+            # COUNT para capturados especificamente dentro desta janela de 7 dias
+            select_expressions.append(
+                func.count(
+                    case((and_(Listing.created_at >= start, Listing.created_at <= end), 1))
+                ).label(f"captured_{label.replace(' ', '_').lower()}")
+            )
+            # COUNT para o total acumulado que já existia na DB ATÉ ao fim desta semana
+            select_expressions.append(
+                func.count(
+                    case((Listing.created_at <= end, 1))
+                ).label(f"total_{label.replace(' ', '_').lower()}")
+            )
+
+        # Executa a query agregada na tabela de listings
+        query_result = await db.execute(select(*select_expressions))
+        row = query_result.one()
+
+        # 3. Montar a lista de schemas de resposta do Pydantic
+        history: list[WeeklyStats] = []
+        for label, _, _ in weeks_bounds:
+            key_suffix = label.replace(' ', '_').lower()
+            
+            captured_count = getattr(row, f"captured_{key_suffix}", 0)
+            total_count = getattr(row, f"total_{key_suffix}", 0)
+            
+            history.append(
+                WeeklyStats(
+                    label=label,
+                    total_listings=total_count,
+                    listings_captured=captured_count
+                )
+            )
+
+        return WeeklyStatsResponse(history=history, total_weeks=len(history))

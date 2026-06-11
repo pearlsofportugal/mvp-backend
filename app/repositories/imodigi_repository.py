@@ -29,16 +29,17 @@ class ImodigiRepository:
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[Sequence[ImodigiExport], int]:
-        stmt = select(ImodigiExport)
+        stmt = select(
+            ImodigiExport,
+            func.count(ImodigiExport.id).over().label("total_count"),
+        )
         if status:
             stmt = stmt.where(ImodigiExport.status == status)
-
-        count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
-        total = count_result.scalar_one()
-
         stmt = stmt.order_by(ImodigiExport.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
-        rows = (await db.execute(stmt)).scalars().all()
-        return rows, total
+
+        rows = (await db.execute(stmt)).all()
+        total = rows[0].total_count if rows else 0
+        return [r.ImodigiExport for r in rows], total
 
     @staticmethod
     async def upsert_export(
@@ -50,6 +51,7 @@ class ImodigiRepository:
         imodigi_client_id: int,
         status: str,
         last_error: str | None = None,
+        partner_id: str | None = None,      # ✅ novo parâmetro
     ) -> ImodigiExport:
         now = datetime.now(timezone.utc)
         values: dict = {
@@ -63,9 +65,11 @@ class ImodigiRepository:
             values["imodigi_property_id"] = imodigi_property_id
         if imodigi_reference is not None:
             values["imodigi_reference"] = imodigi_reference
+        if partner_id is not None:           # ✅ persistir se fornecido
+            values["partner_id"] = partner_id
         if status in ("published", "updated"):
             values["last_exported_at"] = now
-
+    
         set_values = {k: v for k, v in values.items() if k != "listing_id"}
 
         stmt = (

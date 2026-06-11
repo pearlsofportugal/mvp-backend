@@ -84,40 +84,6 @@ async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
     await ScrapeJobService.delete_job(db, job_id)
     return ok(None, "Job deleted successfully", request)
 
-
-# @router.post(
-#     "/trigger/{site_key}",
-#     response_model=ApiResponse[JobRead],
-#     status_code=201,
-#     responses={**ERROR_RESPONSES, 409: {"model": ApiResponse, "description": "A scrape job is already running for this site."}},
-#     operation_id="trigger_scheduled_job",
-# )
-# async def trigger_scheduled_job(
-#     site_key: str,
-#     request: Request,
-#     background_tasks: BackgroundTasks,
-#     db: AsyncSession = Depends(get_db),
-#     _: str = Security(verify_api_key),
-# ):
-#     """Trigger a scheduled scrape job for a site.
-
-#     Called by Google Cloud Scheduler. Uses the site's schedule_start_url and
-#     schedule_max_pages (falling back to base_url and default_max_pages).
-#     """
-#     site = await SiteConfigRepository.get_by_key(db, site_key)
-#     if not site or not site.is_active:
-#         raise NotFoundError(f"Site config '{site_key}' not found or inactive")
-
-#     start_url = site.schedule_start_url or site.base_url
-#     if not start_url:
-#         raise NotFoundError(f"Site '{site_key}' has no start URL configured")
-
-#     max_pages = site.schedule_max_pages or settings.default_max_pages
-
-#     payload = JobCreate(site_key=site_key, start_url=start_url, max_pages=max_pages)
-#     job = await ScrapeJobService.create_job(db, payload)
-#     background_tasks.add_task(run_scrape_job, str(job.id))
-#     return ok(JobRead.model_validate(job), "Scheduled job triggered successfully", request)
 @router.post(
     "/trigger/{site_key}",
     response_model=ApiResponse[JobRead],
@@ -128,7 +94,6 @@ async def delete_job(job_id: UUID, request: Request, db: AsyncSession = Depends(
 async def trigger_scheduled_job(
     site_key: str,
     request: Request,
-    # background_tasks: BackgroundTasks,  # <-- Podes remover isto, já não vamos usar!
     db: AsyncSession = Depends(get_db),
     _: str = Security(verify_api_key),
 ):
@@ -150,19 +115,7 @@ async def trigger_scheduled_job(
     payload = JobCreate(site_key=site_key, start_url=start_url, max_pages=max_pages)
     job = await ScrapeJobService.create_job(db, payload)
     
-    # ------------------------------------------------------------------
-    # CORREÇÃO CRUCIAL: Executar de forma síncrona/bloqueante
-    # ------------------------------------------------------------------
-    # Em vez de atirar para segundo plano, aguardamos que ele termine aqui.
-    # Se a tua função 'run_scrape_job' for uma função síncrona normal (def), chama-a assim:
-    # run_scrape_job(str(job.id))
-    #
-    # Se ela for uma função assíncrona (async def), chama-a com await:
     await run_scrape_job(str(job.id))
-    
-    # Atualiza o estado do job na DB para devolver ao utilizador se necessário, 
-    # ou faz o fetch do job atualizado antes do return:
-    # job = await ScrapeJobService.get_job(db, job.id)
 
     return ok(JobRead.model_validate(job), "Scheduled job executed and completed successfully", request)
 

@@ -31,8 +31,12 @@ class ImodigiExport(Base):
     imodigi_property_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="ID returned by POST /crm-properties.php")
     imodigi_reference: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="Platform reference, e.g. PG09041")
     imodigi_client_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="ID da loja usada no momento do export")
-
-    # Status
+    partner_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="partner_id / external reference do listing no momento do export",
+    )
+        # Status
     status: Mapped[str] = mapped_column(
         String(20),
         default="pending",

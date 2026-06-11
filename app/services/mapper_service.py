@@ -39,6 +39,14 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════
 # Configuration Cache
 # ═══════════════════════════════════════════════════════════
+_TYPOLOGY_PATTERN = re.compile(r"[TtVv](\d+)")
+_EGO_REF_PATTERN = re.compile(r"^Ref\.\s*")
+_CLEAN_DESC_PREFIX_PATTERN = re.compile(r"^(descriç[aã]o|description)\s*[:\-]?\s*", re.IGNORECASE)
+_CLEAN_DESC_PUNCT_SPACES = re.compile(r"\s+([,.;:!?])")
+_CLEAN_DESC_MISSING_SPACES = re.compile(r"([.!?;:])(\S)")
+_MULTIPLE_SPACES_PATTERN = re.compile(r"\s+")
+_URL_LOCATION_PATTERN = re.compile(r"/Imovel/[^/]+/[^/]+/([^/?#]+)/([^/?#]+)/([^/?#]+)/\d+")
+
 
 _CURRENCY_MAP_CACHE: dict[str, str] = {}
 _CACHE_TIMESTAMP: datetime | None = None
@@ -324,7 +332,7 @@ def typology_to_bedrooms(typology: str | None) -> int | None:
     """
     if not typology:
         return None
-    match = re.search(r"[TtVv](\d+)", typology)
+    match = _TYPOLOGY_PATTERN.search(typology)
     if match:
         return int(match.group(1))
     return None
@@ -362,10 +370,11 @@ def _normalize_description_text(value: str | None) -> str | None:
     if not normalized:
         return None
 
-    normalized = re.sub(r"^(descriç[aã]o|description)\s*[:\-]?\s*", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
-    normalized = re.sub(r"([.!?;:])(\S)", r"\1 \2", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    normalized = _CLEAN_DESC_PREFIX_PATTERN.sub("", normalized)
+    normalized = _CLEAN_DESC_PUNCT_SPACES.sub(r"\1", normalized)
+    normalized = _CLEAN_DESC_MISSING_SPACES.sub(r"\1 \2", normalized)
+    normalized = _MULTIPLE_SPACES_PATTERN.sub(" ", normalized).strip()
     return normalized or None
 
 
@@ -607,8 +616,8 @@ def normalize_ego_platform_payload(raw: dict[str, Any], source_partner: str) -> 
     # EGO injects a "Ref. " text prefix — strip it
     partner_id: str | None = raw.get("property_id") or raw.get("reference")
     if partner_id and isinstance(partner_id, str):
-        partner_id = re.sub(r"^Ref\.\s*", "", partner_id).strip() or None
-
+        partner_id = _EGO_REF_PATTERN.sub("", partner_id).strip() or None
+        # partner_id = _EGO_REF_PATTERN.search(partner_id).strip() or None   
     # Infer property type from title when not explicitly scraped
     title = raw.get("title") or ""
     property_type = (
@@ -826,6 +835,14 @@ def normalize_sunpoint_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a Sunpoint Properties (EGO RealEstate platform) payload into canonical PropertySchema."""
     return normalize_ego_platform_payload(raw, "sunpoint")
 
+@partner_normalizer("casa10_pt")
+def normalize_casa10_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a casa10_pt Properties (EGO RealEstate platform) payload into canonical PropertySchema."""
+    return normalize_ego_platform_payload(raw, "casa10_pt")
+@partner_normalizer("entreparedes")
+def normalize_entreparedes_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a entreparedes Properties (EGO RealEstate platform) payload into canonical PropertySchema."""
+    return normalize_ego_platform_payload(raw, "entreparedes")
 
 @partner_normalizer("realkey")
 def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
@@ -864,10 +881,11 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
     region: str | None = None
     city: str | None = None
     area_parish: str | None = None
-    url_match = re.search(
-        r"/Imovel/[^/]+/[^/]+/([^/?#]+)/([^/?#]+)/([^/?#]+)/\d+",
-        source_url,
-    )
+    # url_match = re.search(
+    #     r"/Imovel/[^/]+/[^/]+/([^/?#]+)/([^/?#]+)/([^/?#]+)/\d+",
+    #     source_url,
+    # )
+    url_match = _URL_LOCATION_PATTERN.search(source_url)
     if url_match:
         region = url_match.group(1).replace("-", " ")  # district
         city = url_match.group(2).replace("-", " ")    # county
@@ -901,6 +919,48 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
         raw_partner_payload={**raw, "condition": condition, "typology": typology} if (condition or typology) else None,
     )
 
+@partner_normalizer("mysquare")
+def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a raw mysquare payload into canonical PropertySchema."""
+    district, county, parish = _normalize_habinedita_address(raw)
+    condition = _normalize_whitespace(raw.get("condition"))
+
+    is_new_construction: bool | None = None
+    if condition and any(m in condition.lower() for m in ("novo", "new", "constru", "em planta")):
+        is_new_construction = True
+
+    seo = {k: v for k, v in {
+        "page_title": raw.get("page_title"),
+        "meta_description": raw.get("meta_description"),
+        "headers": raw.get("headers"),
+    }.items() if v}
+
+    return _build_base_schema(
+        raw,
+        source_partner="mysquare",
+        listing_type=_infer_listing_type(raw),
+        property_type=(
+            raw.get("property_type")
+            or _infer_property_type_from_title(raw.get("title"), _HABINEDITA_PROPERTY_TYPES)
+        ),
+        partner_id=raw.get("property_id"),
+        address=Address(
+            country="Portugal",
+            region=district,
+            city=county,
+            area=parish,
+            full_address=_truncate_text(raw.get("full_address"), 500),
+        ),
+        area_useful=parse_area(raw.get("useful_area")),
+        area_gross=parse_area(raw.get("gross_area")),
+        area_land=parse_area(raw.get("land_area")),
+        floor=raw.get("floor"),
+        construction_year=parse_int(raw.get("construction_year")),
+        seo=seo or None,
+        advertiser=raw.get("advertiser"),
+        contacts=raw.get("contacts"),
+        extra_flags={"is_new_construction": is_new_construction} if is_new_construction is not None else None,
+    )
 
 def normalize_partner_payload(raw: dict[str, Any], partner: str) -> PropertySchema:
     """Dispatch normalization to the appropriate partner normalizer."""

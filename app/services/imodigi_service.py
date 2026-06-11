@@ -14,6 +14,8 @@ External API endpoints used:
   PATCH /crm-properties.php         → update existing property
 """
 from __future__ import annotations
+import asyncio
+from sqlalchemy import not_
 
 from typing import Any
 from uuid import UUID
@@ -29,6 +31,7 @@ from app.core.logging import get_logger
 from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 from app.repositories.imodigi_repository import ImodigiRepository
+from app.schemas.imodigi_schema import ImodigiSyncReport
 
 logger = get_logger(__name__)
 
@@ -123,7 +126,9 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
             "lng": str(listing.longitude),
             "publish": True,
         }
-
+    condition = _map_condition(getattr(listing, "condition", None))
+    if condition:
+        payload["state"] = condition
     # Areas
     areas: dict[str, Any] = {}
     if listing.area_useful_m2 is not None:
@@ -220,52 +225,49 @@ async def search_locations(
     )
 
 
-async def create_property(
-    client_id: int,
-    property_payload: dict[str, Any],
-    *,
-    images: list[str] | None = None,
-    translations: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """POST /crm-properties.php — create a new property. Returns full response body."""
-    return await imodigi_adapter.create_property(client_id, property_payload, images=images, translations=translations)
+# async def create_property(
+#     client_id: int,
+#     property_payload: dict[str, Any],
+#     *,
+#     images: list[str] | None = None,
+#     translations: dict[str, Any] | None = None,
+# ) -> dict[str, Any]:
+#     """POST /crm-properties.php — create a new property. Returns full response body."""
+#     return await imodigi_adapter.create_property(client_id, property_payload, images=images, translations=translations)
 
 
-async def update_property(
-    client_id: int,
-    imodigi_property_id: int,
-    property_payload: dict[str, Any],
-    *,
-    images: list[str] | None = None,
-    translations: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """PATCH /crm-properties.php — update an existing property."""
-    return await imodigi_adapter.update_property(client_id, imodigi_property_id, property_payload, images=images, translations=translations)
+# async def update_property(
+#     client_id: int,
+#     imodigi_property_id: int,
+#     property_payload: dict[str, Any],
+#     *,
+#     images: list[str] | None = None,
+#     translations: dict[str, Any] | None = None,
+# ) -> dict[str, Any]:
+#     """PATCH /crm-properties.php — update an existing property."""
+#     return await imodigi_adapter.update_property(client_id, imodigi_property_id, property_payload, images=images, translations=translations)
 
+async def get_property(client_id: int) -> list[dict[str, Any]]:
+    """GET /crm-properties.php — list all properties published for a given client."""
 
-async def export_listing(
-    listing: Listing,
-    *,
-    client_id: int,
-    existing_imodigi_id: int | None,
-) -> tuple[int | None, str | None, str]:
-    """Export a single listing to Imodigi.
+    return await imodigi_adapter.get_property(client_id)
 
-    Returns (imodigi_property_id, imodigi_reference, action)
-    where action is 'created' or 'updated'.
-    """
+async def export_listing(listing, *, client_id, existing_imodigi_id):
     payload = build_property_payload(listing)
-    # Extract top-level fields before sending property payload
-    images: list[str] | None = payload.pop("images", None)
-    translations: dict[str, Any] | None = payload.pop("translations", None)
+    images = payload.pop("images", None)
+    translations = payload.pop("translations", None)
 
     if existing_imodigi_id is None:
-        logger.info("Creating new imodigi property for listing %s", listing.id)
-        result = await create_property(client_id, payload, images=images, translations=translations)
+        logger.info("Creating imodigi property for listing %s", listing.id)
+        result = await imodigi_adapter.create_property(
+            client_id, payload, images=images, translations=translations
+        )
         return result.get("property"), result.get("reference"), "created"
 
     logger.info("Updating imodigi property %d for listing %s", existing_imodigi_id, listing.id)
-    await update_property(client_id, existing_imodigi_id, payload, images=images, translations=translations)
+    await imodigi_adapter.update_property(
+        client_id, existing_imodigi_id, payload, images=images, translations=translations
+    )
     return existing_imodigi_id, None, "updated"
 
 
@@ -311,10 +313,12 @@ async def export_listing_to_crm(
             imodigi_client_id=client_id,
             status=status,
             last_error=None,
+            partner_id=listing.partner_id,   # ✅
         )
         await db.commit()
         await db.refresh(export_record)
         return export_record, action
+
     except ImodigiError as exc:
         await ImodigiRepository.upsert_export(
             db,
@@ -324,6 +328,7 @@ async def export_listing_to_crm(
             imodigi_client_id=client_id,
             status="failed",
             last_error=str(exc),
+            partner_id=listing.partner_id,   # ✅ também no path de falha
         )
         await db.commit()
         raise
@@ -387,25 +392,18 @@ async def get_listing_ids_for_bulk_imodigi(
     listing_ids: list[UUID],
     limit: int,
 ) -> list[UUID]:
-    """Return listing IDs to process for bulk Imodigi export.
-
-    When *listing_ids* is provided, use those. Otherwise, return all listings that
-    have never been published or whose last export failed (up to *limit*).
-    """
-    from sqlalchemy import not_
-
     if listing_ids:
         return list(listing_ids)
 
-    # Subquery: listing IDs that are already published/updated
-    published_subq = (
+    published_export = (
         select(ImodigiExport.listing_id)
         .where(ImodigiExport.status.in_(["published", "updated"]))
-        .scalar_subquery()
+        .correlate(Listing)
+        .exists()
     )
     stmt = (
         select(Listing.id)
-        .where(not_(Listing.id.in_(published_subq)))
+        .where(~published_export)
         .order_by(Listing.created_at.asc())
         .limit(limit)
     )
@@ -461,4 +459,156 @@ async def run_bulk_imodigi_job(job_id: UUID, listing_ids: list[UUID], client_id:
         job_id,
         done,
         failed,
+    )
+
+
+
+# Adicionar ao ficheiro existente, após reset_export_records
+
+async def sync_check_with_crm(
+    db: AsyncSession,
+    client_id: int,
+) -> ImodigiSyncReport:
+    """Sync check completo entre listings locais e propriedades no Imodigi CRM.
+
+    Chave de comparação: partner_id (= reference enviada no POST, devolvida no GET).
+
+    Grupos:
+    - in_both:          partner_id existe nos dois lados (sincronizado)
+    - only_in_db:       temos export record mas o partner_id não existe no CRM
+    - only_in_crm:      CRM tem propriedade sem export record local
+    - never_exported:   listings locais com partner_id que nunca foram ao CRM
+    - property_id_mismatches: in_both mas property_id diverge (apagado e re-criado no CRM)
+    """
+    from datetime import datetime, timezone
+    from app.schemas.imodigi_schema import (
+        ImodigiSyncItem, ImodigiSyncReport, ImodigiSyncSummary
+    )
+
+    # ── 1. Buscar os três conjuntos em paralelo ──────────────────────────
+    db_exports_result, crm_properties, all_listings_result = await asyncio.gather(
+        db.execute(
+            select(ImodigiExport).where(
+                ImodigiExport.imodigi_reference.is_not(None),
+            )
+        ),
+        imodigi_adapter.get_property(client_id),
+        db.execute(
+            select(Listing.id, Listing.partner_id).where(
+                Listing.partner_id.is_not(None)
+            )
+        ),
+    )
+
+    db_exports: list[ImodigiExport] = list(db_exports_result.scalars().all())
+    all_listings: list[tuple] = list(all_listings_result.all())  # (id, partner_id)
+
+    # ── 2. Indexar por partner_id / reference ────────────────────────────
+    # DB exports: {imodigi_reference -> ImodigiExport}
+    db_by_ref: dict[str, ImodigiExport] = {
+        e.partner_id: e
+        for e in db_exports
+        if e.partner_id
+    }
+
+    # CRM: {reference -> property_id}
+    crm_by_ref: dict[str, int] = {
+        p["reference"]: p["property_id"]
+        for p in crm_properties
+        if p.get("reference") and p.get("property_id") is not None
+    }
+
+    # Listings locais sem export record: {partner_id -> listing_id}
+    exported_refs = set(db_by_ref.keys())
+    never_exported_map: dict[str, UUID] = {
+        partner_id: listing_id
+        for listing_id, partner_id in all_listings
+        if partner_id not in exported_refs
+    }
+
+    # ── 3. Calcular grupos ───────────────────────────────────────────────
+    in_both: list[ImodigiSyncItem] = []
+    only_in_db: list[ImodigiSyncItem] = []
+    property_id_mismatches: list[ImodigiSyncItem] = []
+
+    for ref, export in db_by_ref.items():
+        if ref in crm_by_ref:
+            crm_pid = crm_by_ref[ref]
+            base = ImodigiSyncItem(
+                listing_id=export.listing_id,
+                imodigi_property_id=crm_pid,
+                local_property_id=export.imodigi_property_id,
+                partner_id=ref,
+                export_status=export.status,
+                divergence="in_both",
+            )
+            in_both.append(base)
+            # Subconjunto: property_id mudou (apagado e re-criado no CRM)
+            if export.imodigi_property_id != crm_pid:
+                property_id_mismatches.append(
+                    base.model_copy(update={"divergence": "property_id_mismatch"})
+                )
+        else:
+            only_in_db.append(ImodigiSyncItem(
+                listing_id=export.listing_id,
+                imodigi_property_id=None,
+                local_property_id=export.imodigi_property_id,
+                partner_id=ref,
+                export_status=export.status,
+                divergence="only_in_db",
+            ))
+
+    only_in_crm: list[ImodigiSyncItem] = [
+        ImodigiSyncItem(
+            listing_id=None,
+            imodigi_property_id=crm_pid,
+            local_property_id=None,
+            partner_id=ref,
+            export_status=None,
+            divergence="only_in_crm",
+        )
+        for ref, crm_pid in crm_by_ref.items()
+        if ref not in db_by_ref
+    ]
+
+    never_exported: list[ImodigiSyncItem] = [
+        ImodigiSyncItem(
+            listing_id=listing_id,
+            imodigi_property_id=None,
+            local_property_id=None,
+            partner_id=partner_id,
+            export_status=None,
+            divergence="never_exported",
+        )
+        for partner_id, listing_id in never_exported_map.items()
+    ]
+
+    # ── 4. Summary ───────────────────────────────────────────────────────
+    summary = ImodigiSyncSummary(
+        total_in_crm=len(crm_by_ref),
+        total_in_db=len(db_by_ref),
+        total_in_both=len(in_both),
+        total_only_in_crm=len(only_in_crm),
+        total_only_in_db=len(only_in_db),
+        total_never_exported=len(never_exported),
+        total_property_id_mismatches=len(property_id_mismatches),
+    )
+
+    logger.info(
+        "Imodigi sync client=%d | crm=%d db=%d both=%d only_db=%d only_crm=%d never=%d pid_mismatch=%d",
+        client_id,
+        summary.total_in_crm, summary.total_in_db, summary.total_in_both,
+        summary.total_only_in_db, summary.total_only_in_crm,
+        summary.total_never_exported, summary.total_property_id_mismatches,
+    )
+
+    return ImodigiSyncReport(
+        client_id=client_id,
+        checked_at=datetime.now(timezone.utc),
+        summary=summary,
+        in_both=in_both,
+        only_in_db=only_in_db,
+        only_in_crm=only_in_crm,
+        never_exported=never_exported,
+        property_id_mismatches=property_id_mismatches,
     )

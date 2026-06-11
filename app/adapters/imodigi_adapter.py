@@ -165,6 +165,15 @@ class ImodigiAdapter:
             json=request_body,
         )
         return _raise_if_error(resp)
+    # ✅ Depois
+    async def get_property(self, client_id: int) -> list[dict[str, Any]]:
+        resp = await self._get_client().get(
+            f"{self._base_url}/crm-properties.php",
+            headers=_headers(),
+            params={"client": client_id},
+        )
+        body = _raise_if_error(resp)
+        return body.get("properties", [])  # extrai a lista, ignora "state" e "total"
 
 
 # Module-level singleton — services import this directly.

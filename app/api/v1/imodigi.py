@@ -22,9 +22,11 @@ from app.schemas.imodigi_schema import (
     ImodigiExportRequest,
     ImodigiExportResponse,
     ImodigiExportRead,
+    ImodigiGetProperty,
     ImodigiLocationItem,
     ImodigiResetRequest,
     ImodigiStoreRead,
+    ImodigiSyncReport,
 )
 from app.services.bulk_job_store import create_job, get_job
 from app.services.imodigi_service import (
@@ -32,12 +34,14 @@ from app.services.imodigi_service import (
     get_catalog_values,
     get_export_record,
     get_listing_ids_for_bulk_imodigi,
+    get_property,
     get_stores,
     list_export_records,
     reset_export_record,
     reset_export_records,
     run_bulk_imodigi_job,
     search_locations,
+    sync_check_with_crm,
 )
 
 router = APIRouter()
@@ -60,6 +64,22 @@ async def list_stores(request: Request):
     """Proxy GET /crm-stores.php — list active Imodigi stores."""
     stores = await get_stores()
     return ok([ImodigiStoreRead(**s) for s in stores], "Stores retrieved", request)
+
+# ✅ Depois
+@router.get(
+    "/properties",
+    response_model=ApiResponse[list[ImodigiGetProperty]],
+    responses=ERROR_RESPONSES,
+    operation_id="imodigi_get_properties",
+)
+async def list_imodigi_properties(request: Request, client_id: int):
+    """Lista todas as propriedades publicadas no Imodigi para um dado client_id."""
+    properties = await get_property(client_id)
+    return ok(
+        [ImodigiGetProperty(**p) for p in properties],
+        "Properties retrieved",
+        request,
+    )
 
 
 @router.get(
@@ -292,6 +312,7 @@ async def publish_listing(
     )
 
 
+
 @router.get(
     "/publications",
     response_model=ApiResponse[list[ImodigiExportRead]],
@@ -314,7 +335,6 @@ async def list_publications(
         request,
         meta=Meta(page=page, page_size=page_size, total=total, pages=pages),
     )
-
 
 @router.post(
     "/publications/reset",
@@ -359,7 +379,44 @@ async def reset_publication(
     await reset_export_record(db, listing_id)
     return ok({"deleted": 1}, f"Export record reset for listing {listing_id}", request)
 
+# Adicionar o endpoint — sugerido junto aos endpoints de /publications
+@router.get(
+    "/publications/sync",
+    response_model=ApiResponse[ImodigiSyncReport],
+    responses=ERROR_RESPONSES,
+    operation_id="imodigi_sync_check",
+)
+async def sync_check(
+    request: Request,
+    client_id: int = Query(..., description="Imodigi store ID a verificar"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sync check completo entre listings locais e o Imodigi CRM.
 
+    Compara por `partner_id` (= reference enviada no POST e devolvida no GET).
+
+    **Grupos devolvidos:**
+    - `in_both` — sincronizados, existem nos dois lados
+    - `only_in_db` — exportados mas já não existem no CRM (apagados manualmente)
+    - `only_in_crm` — existem no CRM sem registo local (criados directamente no CRM)
+    - `never_exported` — listings locais que nunca foram publicados no Imodigi
+    - `property_id_mismatches` — subconjunto de `in_both` onde o `property_id` diverge
+
+    Endpoint **read-only**. Para corrigir divergências:
+    - `only_in_db` → `DELETE /publications/{listing_id}` + `POST /publish/{listing_id}`
+    - `property_id_mismatch` → mesmo fluxo acima (reset + re-export actualiza o property_id)
+    """
+    report = await sync_check_with_crm(db, client_id)
+    s = report.summary
+    message = (
+        f"CRM: {s.total_in_crm} | "
+        f"DB: {s.total_in_db} | "
+        f"Ambos: {s.total_in_both} | "
+        f"Só DB: {s.total_only_in_db} | "
+        f"Só CRM: {s.total_only_in_crm} | "
+        f"Nunca exportados: {s.total_never_exported}"
+    )
+    return ok(report, message, request)
 @router.get(
     "/publications/{listing_id}",
     response_model=ApiResponse[ImodigiExportRead],

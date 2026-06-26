@@ -6,11 +6,11 @@ import time
 from typing import AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Security
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, verify_api_key
 from app.api.responses import ERROR_RESPONSES, ok
 from app.config import settings
 from app.core.exceptions import ImodigiError
@@ -43,6 +43,9 @@ from app.services.imodigi_service import (
     search_locations,
     sync_check_with_crm,
 )
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -431,3 +434,60 @@ async def get_publication(
     """Get the Imodigi publication record for a specific listing."""
     record = await get_export_record(db, listing_id)
     return ok(ImodigiExportRead.model_validate(record), "Export retrieved", request)
+
+@router.post(
+    "/trigger/sync",
+    response_model=ApiResponse[dict],
+    operation_id="trigger_imodigi_sync",
+    responses=ERROR_RESPONSES,
+)
+async def trigger_imodigi_sync(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=500),
+    _: str = Security(verify_api_key),
+):
+    """Chamado pelo Cloud Scheduler — exporta listings pendentes para o Imodigi.
+
+    Bloqueia até conclusão para que o Cloud Run mantenha CPU activo.
+    Igual ao padrão de trigger_scheduled_job em scrape_jobs.py.
+    """
+    client_id = settings.imodigi_client_id
+    if not client_id:
+        raise ImodigiError(
+            "IMODIGI_CLIENT_ID não configurado. "
+            "Define a variável de ambiente antes de activar o sync."
+        )
+
+    listing_ids = await get_listing_ids_for_bulk_imodigi(db, [], limit)
+
+    if not listing_ids:
+        return ok(
+            {"total": 0, "success": 0, "failed": 0},
+            "Nenhum listing pendente para exportar",
+            request,
+        )
+
+    success = 0
+    failed = 0
+    errors: list[str] = []
+
+    for lid in listing_ids:
+        try:
+            await export_listing_to_crm(db, lid, client_id)
+            success += 1
+        except Exception as exc:
+            logger.warning("Imodigi trigger sync falhou para %s: %s", lid, exc)
+            failed += 1
+            errors.append(f"{lid}: {exc}")
+
+    return ok(
+        {
+            "total": len(listing_ids),
+            "success": success,
+            "failed": failed,
+            "errors": errors[:10],  # cap para não explodir o payload de resposta
+        },
+        f"Imodigi sync: {success}/{len(listing_ids)} exportados",
+        request,
+    )

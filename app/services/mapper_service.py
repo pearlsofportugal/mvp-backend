@@ -89,7 +89,29 @@ _LISTING_STRING_LIMITS = {
     "page_title": 500,
 }
 
+# ───────── Price Parsing ─────────
 
+PRICE_ON_REQUEST = Decimal("-1")
+
+_PRICE_PATTERN = re.compile(r"[\d][0-9\s.,]*[\d]|[\d]")
+
+_PRICE_ON_REQUEST_PATTERN = re.compile(
+    r"sob\s+consulta|on\s+request|price\s+on\s+request|a\s+definir|consultar|sob\s+pedido",
+    re.IGNORECASE,
+)
+# ───────── Area Parsing ─────────
+
+_AREA_PATTERN = re.compile(r"([\d\s.,]+)\s*m[²2]?", re.IGNORECASE)
+# ───────── Date Parsing ─────────
+
+_DATE_FORMATS = [
+    "%Y-%m-%d",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%Y/%m/%d",
+]
 async def _load_currency_map() -> dict[str, str]:
     """Load currency symbol mappings from DB with caching."""
     global _CURRENCY_MAP_CACHE, _CACHE_TIMESTAMP
@@ -170,46 +192,40 @@ async def init_mapper_cache() -> None:
     await _load_currency_map()
 
 
-# ───────── Price Parsing ─────────
-
-_PRICE_PATTERN = re.compile(r"[\d\s.,]+")
-
 
 
 def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
-    """Parse a price string like '250 000 €' into (Decimal(250000), 'EUR')."""
+    """Parse a price string like '250 000 €' into (Decimal(250000), 'EUR').
+
+    Returns (Decimal('-1'), None) for 'price on request' strings.
+    Returns (None, None) for empty input or unparseable strings.
+    """
     if not raw:
         return None, None
 
-    # Extract numeric part
+    # Preço sob consulta — sentinela -1
+    if _PRICE_ON_REQUEST_PATTERN.search(raw):
+        return PRICE_ON_REQUEST, None
+
     match = _PRICE_PATTERN.search(raw)
     if not match:
+        logger.warning("No numeric pattern found in price string: '%s'", raw)
         return None, None
 
-    # Strip all whitespace upfront — scraped HTML uses \xa0 (non-breaking space)
-    # as a thousands separator; plain .replace(" ", "") misses it.
     num_str = re.sub(r"\s+", "", match.group())
-    # Normalize: handle European decimal notation
-    # "250000", "1.234,56" → "1234.56"
+
     if "," in num_str and "." in num_str:
-        # European format: 1.234,56
         num_str = num_str.replace(".", "").replace(",", ".")
     elif "," in num_str:
-        # Could be European decimal or thousands
         parts = num_str.split(",")
         if len(parts[-1]) == 2:
-            # Likely decimal: 250,00
             num_str = num_str.replace(",", ".")
         else:
-            # Likely thousands: 250,000
             num_str = num_str.replace(",", "")
     elif "." in num_str:
-        # Could be decimal or European thousands (dots only)
         parts = num_str.split(".")
         if all(len(p) == 3 for p in parts[1:]):
-            # All groups after the first are 3 digits → thousand separators: 1.250.000
             num_str = num_str.replace(".", "")
-        # else: single dot like 1250.50 — leave as-is (decimal)
 
     try:
         amount = Decimal(num_str)
@@ -217,11 +233,14 @@ def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
         logger.warning("Failed to parse price amount from: '%s'", raw)
         return None, None
 
-    # Extract currency (from cache)
+    if amount < Decimal("1000"):
+        logger.warning("Suspiciously low price (%s) parsed from: '%s'", amount, raw)
+        return None, None
+
     currency_map = _get_currency_map()
-    currency = "EUR"  # Default
+    currency = "EUR"
     raw_lower = raw.lower()
-    for symbol, code in currency_map.items():
+    for symbol, code in sorted(currency_map.items(), key=lambda x: -len(x[0])):
         if symbol in raw_lower or symbol in raw:
             currency = code
             break
@@ -229,9 +248,6 @@ def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
     return amount, currency
 
 
-# ───────── Area Parsing ─────────
-
-_AREA_PATTERN = re.compile(r"([\d\s.,]+)\s*m[²2]?", re.IGNORECASE)
 
 
 def parse_area(raw: str | None) -> float | None:
@@ -296,16 +312,6 @@ def parse_bool(raw: str | None) -> bool | None:
     return None
 
 
-# ───────── Date Parsing ─────────
-
-_DATE_FORMATS = [
-    "%Y-%m-%d",
-    "%Y-%m-%dT%H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S.%f",
-    "%d/%m/%Y",
-    "%d-%m-%Y",
-    "%Y/%m/%d",
-]
 
 
 def parse_date(raw: str | None) -> datetime | None:
@@ -461,7 +467,13 @@ def _infer_property_type_from_title(
             return pt
     return None
 
-
+# ✅ Depois
+def _price_amount_to_money(amount: Decimal | None) -> float | None:
+    if amount is None:
+        return None
+    if amount == PRICE_ON_REQUEST:
+        return None          # ← None, não "-"
+    return float(amount)
 def _build_base_schema(
     raw: dict[str, Any],
     *,
@@ -498,8 +510,14 @@ def _build_base_schema(
         title = raw.get("title")
 
     price_amount, price_currency = parse_price(raw.get("price"))
-    price_per_m2_amount = calculate_price_per_m2(price_amount, area_gross or area_useful)
+    price_per_m2_amount = None
+
+    if price_amount is not None and price_amount != PRICE_ON_REQUEST:
+        price_per_m2_amount = calculate_price_per_m2(price_amount, area_gross or area_useful)
     raw_description = raw.get("raw_description")
+    is_on_request = price_amount == PRICE_ON_REQUEST
+
+    # price_for_money = None if (is_on_request or price_amount is None) else float(price_amount)
 
     return PropertySchema(
         partner_id=partner_id,
@@ -513,10 +531,9 @@ def _build_base_schema(
         bathrooms=parse_int(raw.get("bathrooms")),
         floor=floor,
         construction_year=construction_year,
-        price=Money(
-            amount=float(price_amount) if price_amount else None,
-            currency=price_currency,
-        ),
+        price=Money(    amount=_price_amount_to_money(price_amount),
+    currency=price_currency),
+
         price_per_m2=Money(
             amount=float(price_per_m2_amount) if price_per_m2_amount else None,
             currency=price_currency,
@@ -988,6 +1005,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "price_amount": Decimal(str(schema.price.amount)) if schema.price.amount else None,
         "price_currency": schema.price.currency or "EUR",
         "price_per_m2": Decimal(str(schema.price_per_m2.amount)) if schema.price_per_m2 and schema.price_per_m2.amount else None,
+        "price_on_request": schema.price_on_request,
         "area_useful_m2": schema.area_useful_m2,
         "area_gross_m2": schema.area_gross_m2,
         "area_land_m2": schema.area_land_m2,

@@ -11,6 +11,7 @@ from app.database import Base
 
 _MAX_LOG_ENTRIES = 500
 _MAX_URL_ENTRIES = 2000
+_LEVEL_TO_BUCKET = {"error": "errors", "warning": "warnings", "info": "info"}
 
 
 class ScrapeJob(Base):
@@ -129,20 +130,20 @@ class ScrapeJob(Base):
         """Add a log entry. Level: 'error', 'warning', 'info'."""
         if self.logs is None:
             self.logs = {"errors": [], "warnings": [], "info": []}
-
-        bucket_key = f"{level}s" if not level.endswith("s") else level
+    
+        bucket_key = _LEVEL_TO_BUCKET.get(level, f"{level}s")  # fallback seguro
         current = dict(self.logs)
         bucket = list(current.get(bucket_key, []))
         if len(bucket) >= _MAX_LOG_ENTRIES:
             return
-
+    
         log_entry: dict = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "message": message,
         }
         if url:
             log_entry["url"] = url
-
+    
         bucket.append(log_entry)
         current[bucket_key] = bucket
         self.logs = current

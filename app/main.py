@@ -58,6 +58,17 @@ async def lifespan(app: FastAPI):
         scheduled_sites = await SiteConfigRepository.get_all_scheduled(session)
 
     scheduler_service.start(scheduled_sites)
+    if settings.imodigi_sync_enabled and settings.imodigi_client_id:
+        from app.services.cloud_scheduler_service import cloud_scheduler_service
+        cloud_scheduler_service.schedule_imodigi_sync(
+            interval_minutes=settings.imodigi_sync_interval_minutes,
+            limit=settings.imodigi_sync_limit,
+        )
+        logger.info(
+            "Imodigi sync agendado: cada %d min, limit=%d",
+            settings.imodigi_sync_interval_minutes,
+            settings.imodigi_sync_limit,
+        )
 
     # Pre-warm parser field mapping cache so the first scrape request uses DB values
     try:

@@ -49,7 +49,7 @@ _PROPERTY_TYPE_MAP: dict[str, str] = {
     "moradia": "House",
     "moradia geminada": "House",
     "land": "Land",
-    "terreno": "Land",
+    "terreno": "Lot",
     "commercial": "Commercial",
     "loja": "Commercial",
     "escritório": "Commercial",

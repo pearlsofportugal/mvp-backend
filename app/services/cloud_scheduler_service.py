@@ -183,7 +183,97 @@ class CloudSchedulerService:
         job = client.get_job(request=scheduler_v1.GetJobRequest(name=job_name))
         # schedule_time is a google.protobuf.Timestamp → auto-converted to datetime by the SDK
         return job.schedule_time or None  # type: ignore[return-value]
+    def schedule_imodigi_sync(
+    self,
+    *,
+    interval_minutes: int = 60,
+    limit: int = 50,
+) -> None:
+        """Cria ou actualiza o Cloud Scheduler job para o sync Imodigi."""
+        from app.config import settings
+    
+        if not settings.google_cloud_project:
+            logger.debug(
+                "GOOGLE_CLOUD_PROJECT não definido — a ignorar Cloud Scheduler para Imodigi sync"
+            )
+            return
+    
+        try:
+            self._upsert_imodigi_job(interval_minutes=interval_minutes, limit=limit)
+        except Exception as exc:
+            logger.error("Falha ao registar Cloud Scheduler job para Imodigi sync: %s", exc)
 
+
+    def unschedule_imodigi_sync(self) -> None:
+        """Remove o Cloud Scheduler job do Imodigi sync."""
+        from app.config import settings
+
+        if not settings.google_cloud_project:
+            return
+
+        try:
+            self._delete_imodigi_job()
+        except Exception as exc:
+            if "NOT_FOUND" not in str(exc) and "404" not in str(exc):
+                logger.error("Falha ao remover Cloud Scheduler job Imodigi: %s", exc)
+
+
+    def _upsert_imodigi_job(
+        self,
+        *,
+        interval_minutes: int,
+        limit: int,
+    ) -> None:
+        from google.cloud import scheduler_v1
+        from app.config import settings
+
+        project = settings.google_cloud_project
+        location = settings.google_cloud_scheduler_location
+        backend_url = settings.backend_url.rstrip("/")
+
+        client = self._client()
+        parent = f"projects/{project}/locations/{location}"
+        job_name = f"{parent}/jobs/imodigi-sync"
+        cron = _to_cron(interval_minutes, None)
+
+        job = scheduler_v1.Job(
+            name=job_name,
+            http_target=scheduler_v1.HttpTarget(
+                uri=f"{backend_url}/api/v1/imodigi/trigger/sync?limit={limit}",
+                http_method=scheduler_v1.HttpMethod.POST,
+                headers={
+                    "X-API-Key": settings.api_key,
+                    "Content-Type": "application/json",
+                },
+            ),
+            schedule=cron,
+            time_zone="Europe/Lisbon",
+            attempt_deadline={"seconds": 1800},
+        )
+
+        try:
+            client.update_job(request=scheduler_v1.UpdateJobRequest(job=job))
+            logger.info("Cloud Scheduler job Imodigi sync actualizado — cron: %s", cron)
+        except Exception as exc:
+            if "NOT_FOUND" in str(exc) or "404" in str(exc):
+                client.create_job(
+                    request=scheduler_v1.CreateJobRequest(parent=parent, job=job)
+                )
+                logger.info("Cloud Scheduler job Imodigi sync criado — cron: %s", cron)
+            else:
+                raise
+
+
+    def _delete_imodigi_job(self) -> None:
+        from google.cloud import scheduler_v1
+        from app.config import settings
+
+        project = settings.google_cloud_project
+        location = settings.google_cloud_scheduler_location
+        client = self._client()
+        job_name = f"projects/{project}/locations/{location}/jobs/imodigi-sync"
+        client.delete_job(request=scheduler_v1.DeleteJobRequest(name=job_name))
+        logger.info("Cloud Scheduler job Imodigi sync removido")
 
 # Singleton — imported by scheduler_service.py
 cloud_scheduler_service = CloudSchedulerService()

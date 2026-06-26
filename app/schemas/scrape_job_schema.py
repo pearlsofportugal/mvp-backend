@@ -142,10 +142,20 @@ class JobRead(BaseModel):
         """DB stores logs as {errors:[...], warnings:[...], info:[...]}; flatten to a list."""
         if not isinstance(v, dict):
             return v
-        level_map = {"errors": "error", "warnings": "warning", "info": "info"}
+        level_map = {
+            "errors": "error",
+            "error": "error",
+            "warnings": "warning",
+            "warning": "warning",
+            "info": "info",
+            "infos": "info",  # normaliza chave suja gerada por bug anterior no add_log
+        }
         flat: list[dict[str, Any]] = []
         for key, entries in v.items():
-            level = level_map.get(key, key)
+            level = level_map.get(key)
+            if level is None:
+                # Chave desconhecida — descarta em vez de passar valor inválido ao Literal
+                continue
             for entry in (entries or []):
                 flat.append({**entry, "level": level})
         return flat

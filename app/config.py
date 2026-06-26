@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     imodigi_client_id: int | None = None
     imodigi_base_url: str = "https://www.imodigi.com/crm_api"
 
+    # Imodigi Cloud Scheduler
+    imodigi_sync_enabled: bool = False
+    imodigi_sync_interval_minutes: int = 60
+    imodigi_sync_limit: int = 50
     # AI / GenAI
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-3-flash-preview"

@@ -207,7 +207,23 @@ class SiteConfigRead(SiteConfigBase):
 
         return raw
 
+# Adicionar após SiteConfigRead, antes de SiteConfigScheduleInfo
 
+class SiteIdentity(BaseModel):
+    """Subset leve de SiteConfigRead para uso em respostas de outros domínios.
+    
+    Expõe apenas campos de identidade e estado — evita vazar
+    selectors, schedules e confidence scores fora do contexto /sites/*.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    key: str
+    name: str
+    is_active: bool
+    base_url: str
+    
 class SiteConfigScheduleInfo(BaseModel):
     """Schedule status for a site — DB fields + live next_run_at from the in-memory scheduler."""
 

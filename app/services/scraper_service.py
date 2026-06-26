@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -372,7 +372,27 @@ async def _run_scrape_async(
                 logger.warning("Unknown pagination_type %s — stopping", pagination_type)
                 await _fail_job(db, job, f"Unknown pagination_type: {pagination_type}")
                 return
-
+        deleted_count = await _delete_missing_listings(
+            db=db,
+            job=job,
+            site_key=site_key,
+            discovered_urls=seen_listing_urls,
+        )
+        # Sempre actualiza o progress final antes de completar o job —
+        # independentemente de ter havido deletes ou não.
+        # Garante que pages_visited reflecte as páginas realmente visitadas
+        # e não o último valor intermédio guardado dentro do loop.
+        job.update_progress(
+            pages_visited=pages_visited,
+            listings_found=listings_found,
+            listings_scraped=listings_scraped,
+            errors=errors,
+            warnings=warnings,
+            new_listings=new_count,
+            updated_listings=updated_count,
+            deleted_listings=deleted_count,
+        )
+        await db.commit()
         await _complete_job(db, job)
 
     except Exception as e:
@@ -477,7 +497,24 @@ async def _run_sitemap_scrape(
                     new_listings=new_count,
                     updated_listings=updated_count,
                 )
-
+        deleted_count = await _delete_missing_listings(
+            db=db,
+            job=job,
+            site_key=site_key,
+            discovered_urls=set(urls),   # urls já é a lista completa do sitemap
+        )
+        if deleted_count:
+            job.update_progress(
+                pages_visited=1,
+                listings_found=listings_found,
+                listings_scraped=listings_scraped,
+                errors=errors,
+                warnings=warnings,
+                new_listings=new_count,
+                updated_listings=updated_count,
+                deleted_listings=deleted_count,
+            )
+            await db.commit()
         await _complete_job(db, job)
     finally:
         if owned_sitemap_scraper:
@@ -714,7 +751,78 @@ async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> N
                 position=media.position,
             )
         )
+async def _delete_missing_listings(
+    db: AsyncSession,
+    job: ScrapeJob,
+    site_key: str,
+    discovered_urls: set[str],
+    *,
+    min_discovered: int = 10,
+    max_delete_ratio: float = 0.30,
+) -> int:
+    """Hard delete listings for this partner that were not seen in this crawl.
 
+    Safeguards:
+    - Aborts if discovered_urls is suspiciously small (failed crawl).
+    - Aborts if the delete ratio exceeds max_delete_ratio (site restructure / bug).
+    """
+    if len(discovered_urls) < min_discovered:
+        logger.warning(
+            "Job %s: skipping delete — only %d URLs discovered (min: %d)",
+            job.id, len(discovered_urls), min_discovered,
+        )
+        job.add_log(
+            "warning",
+            f"Auto-delete skipped: only {len(discovered_urls)} URLs discovered (min: {min_discovered})",
+        )
+        return 0
+
+    total_in_db = await db.scalar(
+        select(func.count()).where(Listing.source_partner == site_key)
+    )
+
+    if total_in_db and total_in_db > 0:
+        to_delete_count = await db.scalar(
+            select(func.count()).where(
+                Listing.source_partner == site_key,
+                Listing.source_url.notin_(discovered_urls),
+            )
+        )
+        ratio = (to_delete_count or 0) / total_in_db
+        if ratio > max_delete_ratio:
+            logger.error(
+                "Job %s: skipping delete — would delete %d/%d listings (%.0f%% > limit %.0f%%)",
+                job.id, to_delete_count, total_in_db, ratio * 100, max_delete_ratio * 100,
+            )
+            job.add_log(
+                "warning",
+                f"Auto-delete skipped: {to_delete_count}/{total_in_db} listings would be deleted "
+                f"({ratio:.0%} exceeds {max_delete_ratio:.0%} safety limit)",
+            )
+            return 0
+
+    result = await db.execute(
+        delete(Listing)
+        .where(
+            Listing.source_partner == site_key,
+            Listing.source_url.notin_(discovered_urls),
+        )
+        .returning(Listing.id)
+    )
+    deleted_ids = result.scalars().all()
+    deleted_count = len(deleted_ids)
+
+    if deleted_count:
+        logger.info(
+            "Job %s: hard deleted %d stale listings for partner '%s'",
+            job.id, deleted_count, site_key,
+        )
+        job.add_log(
+            "info",
+            f"Auto-deleted {deleted_count} listings no longer present on site",
+        )
+
+    return deleted_count
 
 async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
     """Marca o job como completo."""

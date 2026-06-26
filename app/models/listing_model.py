@@ -114,6 +114,7 @@ class Listing(Base):
         nullable=True,
         comment="Full-text search tsvector — managed by DB trigger",
     )
+    price_on_request: Mapped[bool] = mapped_column(Boolean, default=False, nullable=True)
 
     # Relationships
     media_assets: Mapped[list["MediaAsset"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="raise")

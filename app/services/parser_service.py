@@ -769,10 +769,11 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
     return ""
 
 
-def _assign_feature_matches(text: str, target: dict[str, Any]) -> None:
+def _assign_feature_matches(text: str, target: dict[str, Any], feature_map: dict[str, str]) -> None:
     """Assign every matching feature keyword instead of stopping at the first match."""
     normalized_text = text.lower()
-    for keyword, mapped_field in _get_feature_map().items():
+    
+    for keyword, mapped_field in feature_map.items():
         if keyword in normalized_text:
             target[mapped_field] = "Yes"
 
@@ -857,8 +858,9 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, A
         soup,
         ["[id*='div_imovel_descricao']", ".descricao", ".property-description"],
     )
+    feature_map = _get_feature_map()
     if description_value:
-        _assign_feature_matches(description_value, extracted)
+        _assign_feature_matches(description_value, extracted,feature_map)
         if not extracted.get("energy_certificate"):
             normalized_energy = _extract_energy_certificate_value(description_value)
             if normalized_energy:
@@ -872,7 +874,8 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, A
     if missing_features:
         full_page_text = soup.get_text(separator=" ", strip=True)
         partial: dict[str, Any] = {}
-        _assign_feature_matches(full_page_text, partial)
+        
+        _assign_feature_matches(full_page_text, partial,feature_map)
         for key, value in partial.items():
             if key in missing_features:
                 extracted[key] = value
@@ -986,11 +989,12 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
             data["advertiser"] = el.get_text(strip=True)
 
     # Features — bulk via feature map
+    feature_map = _get_feature_map()
     features_selector = selectors.get("features_selector")
     if features_selector:
         for el in soup.select(features_selector):
             text = el.get_text(strip=True).lower()
-            _assign_feature_matches(text, data)
+            _assign_feature_matches(text, data,feature_map)
 
     # Individual feature selectors
     # If the matched element contains a number (e.g. garage count "3"), store that
@@ -1136,25 +1140,36 @@ def _parse_seo(soup: BeautifulSoup) -> dict[str, Any]:
 
     return data
 
-
 def _extract_via_text_patterns(soup: BeautifulSoup, patterns: dict[str, str]) -> dict[str, Any]:
-    """Extract data using regex patterns applied to the full page text."""
+    """Extract data using regex patterns applied to the full page text or HTML as fallback."""
     data = {}
     full_text = soup.get_text(separator=" ", strip=True)
-    full_html = str(soup)
+    full_html: str | None = None  # Inicializado como None para "lazy loading"
 
     for field, pattern in patterns.items():
         try:
+            # 1. Tentar encontrar no texto limpo primeiro
             match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
+            
+            # 2. Se não encontrar, tentar no HTML completo (fallback)
             if not match:
+                if full_html is None:
+                    full_html = str(soup)  # Carregamento preguiçoso (lazy load) do HTML
                 match = re.search(pattern, full_html, re.IGNORECASE | re.DOTALL)
+
+            # 3. Extrair os dados se houver correspondência
             if match:
-                raw = match.group(1)
+                # Evita IndexError: tenta extrair o grupo 1; se não houver grupo definido na regex, pega o match inteiro (grupo 0)
+                raw = match.group(1) if match.groups() else match.group(0)
                 value = raw.strip() if raw is not None else ""
+                
                 if value:
                     data[field] = value
+
+        except IndexError:
+            logger.warning("A regex para '%s' não possui um grupo de captura: %s", field, pattern)
         except Exception as e:
-            logger.warning("Error applying pattern for %s: %s", field, str(e))
+            logger.warning("Erro ao aplicar o padrão para '%s': %s", field, str(e))
 
     return data
 

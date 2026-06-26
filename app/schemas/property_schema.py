@@ -82,6 +82,7 @@ class PropertySchema(BaseModel):
     # ── Pricing ───────────────────────────────────────────────────────────
     price: Money = Field(default_factory=Money, description="Asking price.")
     price_per_m2: Money | None = Field(None, description="Price per square metre.")
+    price_on_request: bool = False
 
     # ── Area ──────────────────────────────────────────────────────────────
     area_useful_m2: float | None = Field(None, ge=0, description="Useful / habitable area in m².")

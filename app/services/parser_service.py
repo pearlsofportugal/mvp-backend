@@ -25,6 +25,10 @@ from bs4 import BeautifulSoup, Tag
 
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.crawler.selector_suggester import (
+    _extract_json_ld_reference_values,
+    _extract_meta_reference_values,
+)
 
 logger = get_logger(__name__)
 
@@ -90,6 +94,7 @@ _DEFAULT_FIELD_MAP = {
     # Property type
     "property type": "property_type",
     "tipo de imóvel": "property_type",
+    "natureza": "property_type",
 
     # Location
     "district": "district",
@@ -309,7 +314,91 @@ def parse_listing_page(
     # Common extractions (both modes)
     data.update(_parse_images(soup, selectors, url))
     data.update(_parse_seo(soup))
+    _fill_missing_listing_fields_from_page(soup, data)
     return data
+
+
+# ═══════════════════════════════════════════════════════════
+# Fallbacks and post-processing
+
+def _fill_missing_listing_fields_from_page(
+    soup: BeautifulSoup,
+    data: dict[str, Any],
+) -> None:
+    """Fill missing listing fields from JSON-LD and meta reference values."""
+    jsonld_values = _extract_json_ld_reference_values(soup)
+    meta_values = _extract_meta_reference_values(soup)
+
+    # Prefer explicit extracted data, fall back to structured page metadata.
+    for field in (
+        "title",
+        "price",
+        "area",
+        "land_area",
+        "property_type",
+        "typology",
+        "condition",
+        "business_type",
+        "district",
+        "county",
+        "parish",
+    ):
+        if data.get(field):
+            continue
+
+        candidates = jsonld_values.get(field, []) + meta_values.get(field, [])
+        if candidates:
+            data[field] = candidates[0]
+
+    if not data.get("images"):
+        images = jsonld_values.get("images") or []
+        if images:
+            data["images"] = images
+
+    if not data.get("property_type") and data.get("title"):
+        inferred = _infer_property_type_from_title(data["title"])
+        if inferred:
+            data["property_type"] = inferred
+
+    if not data.get("raw_description"):
+        if data.get("meta_description"):
+            data["raw_description"] = data["meta_description"]
+
+    if not data.get("location"):
+        location_parts = [
+            data.get("district"),
+            data.get("county"),
+            data.get("parish"),
+        ]
+        location = ", ".join([part for part in location_parts if part])
+        if location:
+            data["location"] = location
+
+
+def _infer_property_type_from_title(title: str) -> str | None:
+    """Infer property_type from title text when direct selector fails."""
+    normalized = title.lower()
+    if re.search(r"\bmoradia\b", normalized):
+        return "Moradia"
+    if re.search(r"\bapartamento\b", normalized):
+        return "Apartamento"
+    if re.search(r"\bloja\b", normalized):
+        return "Loja"
+    if re.search(r"\bescrit[oó]rio\b", normalized):
+        return "Escritório"
+    if re.search(r"\barmaz[eé]m\b", normalized):
+        return "Armazém"
+    if re.search(r"\bterreno\b", normalized):
+        return "Terreno"
+    if re.search(r"\bgaragem\b", normalized):
+        return "Garagem"
+    if re.search(r"\bquintinha\b|\bquinta\b", normalized):
+        return "Quintinha"
+    if re.search(r"\bT\d+\b", normalized):
+        return "Apartamento"
+    if re.search(r"\bV\d+\b", normalized):
+        return "Moradia"
+    return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1087,23 +1176,21 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
     image_filter = selectors.get("image_filter")
     image_exclude_filter = selectors.get("image_exclude_filter")
 
+    def _normalize_image_url(img: Tag) -> str | None:
+        for attr in ("src", "data-src", "data-lazy-src", "data-imgthumb", "data-original"):
+            value = img.get(attr)
+            if value and not value.startswith("data:"):
+                return value.strip()
+        if img.name == "source":
+            value = img.get("srcset") or img.get("data-srcset")
+            if value:
+                return value.split(",")[0].strip().split(" ")[0]
+        return None
+
     for img in soup.select(image_selector):
-        # Skip data: URIs (lazy-load placeholders) to find the real CDN URL
-        src = next(
-            (
-                v for v in (
-                    img.get("src"),
-                    img.get("data-src"),
-                    img.get("data-lazy-src"),
-                    img.get("data-imgthumb"),
-                )
-                if v and not v.startswith("data:")
-            ),
-            None,
-        )
+        src = _normalize_image_url(img)
         if not src:
             continue
-
         absolute_url = urljoin(base_url, src)
 
         if image_filter and not re.search(image_filter, absolute_url):
@@ -1125,9 +1212,20 @@ def _parse_seo(soup: BeautifulSoup) -> dict[str, Any]:
     if title_tag:
         data["page_title"] = title_tag.get_text(strip=True)
 
-    meta_desc = soup.find("meta", attrs={"name": "description"})
-    if meta_desc and meta_desc.get("content"):
-        data["meta_description"] = meta_desc["content"]
+    # Prefer meta description, but fall back to Open Graph / Twitter meta when available.
+    for attr_name in ("name", "property"):
+        for meta_name in ("description", "og:description", "twitter:description"):
+            meta_tag = soup.find("meta", attrs={attr_name: meta_name})
+            if meta_tag and meta_tag.get("content"):
+                data["meta_description"] = meta_tag["content"]
+                break
+        if data.get("meta_description"):
+            break
+
+    if not data.get("page_title"):
+        og_title = soup.find("meta", attrs={"property": "og:title"})
+        if og_title and og_title.get("content"):
+            data["page_title"] = og_title["content"]
 
     headers = []
     for level in range(1, 7):

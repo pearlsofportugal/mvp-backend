@@ -3,8 +3,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, JSON, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -31,21 +31,21 @@ class ScrapeJob(Base):
         comment="pending, running, completed, failed, cancelled",
     )
     progress: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON,
+        JSONB,
         default=dict,
         comment='{"pages_visited": 0, "listings_found": 0, "listings_scraped": 0, "errors": 0}',
     )
     config: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON,
+        JSONB,
         comment="Runtime config: min_delay, max_delay, user_agent, etc.",
     )
     logs: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON,
+        JSONB,
         default=dict,
         comment='{"errors": [], "warnings": [], "info": []}',
     )
     urls: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON,
+        JSONB,
         default=dict,
         comment='{"found": [], "scraped": [], "failed": []}',
     )

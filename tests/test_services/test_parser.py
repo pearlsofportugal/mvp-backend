@@ -147,6 +147,23 @@ class TestParseListingPage:
         assert data["county"] == "Matosinhos"
         assert data["parish"] == "Sao Mamede"
 
+    def test_direct_mode_property_type_selector_can_match_detailitem_natureza(self):
+        html = """
+        <html><body>
+            <ul class="propertyDetails">
+                <li class="detailItem">
+                    <span class="label">Natureza</span>
+                    <h4><span class="value">Apartamento</span></h4>
+                </li>
+            </ul>
+        </body></html>
+        """
+        selectors = {
+            "property_type_selector": "li.detailItem:has(span.label:-soup-contains(\"Natureza\")) span.value",
+        }
+        data = parse_listing_page(html, "https://example.com/p/4", selectors, "direct")
+        assert data["property_type"] == "Apartamento"
+
     def test_direct_mode_extracts_summary_pairs_with_value_elements(self):
         html = """
         <html><body>

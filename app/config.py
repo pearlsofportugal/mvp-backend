@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     imodigi_sync_enabled: bool = False
     imodigi_sync_interval_minutes: int = 60
     imodigi_sync_limit: int = 50
+    imodigi_sync_source_partner: str | None = None
+    imodigi_sync_is_enriched: bool | None = None
     # AI / GenAI
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-3-flash-preview"

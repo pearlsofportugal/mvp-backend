@@ -337,7 +337,7 @@ class TestScrapeNormalized(BaseModel):
     """Normalized fields extracted from the listing page."""
 
     title: str | None = None
-    listing_type: str | None = None
+    business_type: str | None = None
     property_type: str | None = None
     typology: str | None = None
     bedrooms: int | None = None

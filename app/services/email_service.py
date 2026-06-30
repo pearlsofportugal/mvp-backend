@@ -39,6 +39,157 @@ def _send_smtp(subject: str, body_html: str) -> None:
         server.sendmail(settings.smtp_user, recipients, msg.as_string())
 
 
+async def send_imodigi_notification(
+    *,
+    job_id: str,
+    client_id: int | None,
+    status: str,
+    total: int,
+    success: int,
+    failed: int,
+    created: int = 0,
+    updated: int = 0,
+    errors: list[str] | None = None,
+    source_partner: str | None = None,
+    is_enriched: bool | None = None,
+    title: str = "Imodigi export",
+) -> None:
+    """Send an email summary for Imodigi bulk exports and scheduled syncs."""
+    if not settings.email_notifications_enabled:
+        return
+    if not settings.smtp_user or not settings.smtp_password or not settings.notify_emails:
+        logger.warning("Email notifications enabled but SMTP credentials are missing — skipping")
+        return
+
+    errors = errors or []
+    success_rate = f"{int(success / total * 100)}% ({success}/{total})" if total else "—"
+    status_label = "Completed" if status == "completed" else "Failed"
+    subject = f"[Pearls] {title} — {status_label}"
+
+    accent = "#18181b" if status == "completed" else "#dc2626"
+    accent_light = "#f4f4f5" if status == "completed" else "#fef2f2"
+    accent_text = "#3f3f46" if status == "completed" else "#991b1b"
+    status_dot = (
+        '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+        f'background:{accent};margin-right:6px;vertical-align:middle;></span>'
+    )
+
+    def stat_row(label: str, value: str, value_color: str = "#18181b") -> str:
+        return (
+            f'<tr>'
+            f'<td style="padding:10px 0;font-size:13px;color:#71717a;border-bottom:1px solid #f4f4f5;">{label}</td>'
+            f'<td style="padding:10px 0;font-size:13px;font-weight:500;color:{value_color};text-align:right;border-bottom:1px solid #f4f4f5;">{value}</td>'
+            f'</tr>'
+        )
+
+    filter_rows = ""
+    if source_partner is not None:
+        filter_rows += stat_row("Source partner", source_partner)
+    if is_enriched is not None:
+        filter_rows += stat_row("Enriched only", str(is_enriched))
+    filter_rows += stat_row("Client ID", str(client_id) if client_id is not None else "—")
+
+    error_block = ""
+    if errors:
+        error_lines = "".join(
+            f'<div style="margin-bottom:10px;font-family:monospace;font-size:12px;color:#3f3f46;line-height:1.4;">{e}</div>'
+            for e in errors[:20]
+        )
+        error_block = f"""
+        <tr>
+          <td style="padding:0 32px 24px;" colspan="2">
+            <div style="background:#fafafa;border:1px solid #e4e4e7;border-left:3px solid #dc2626;
+                        padding:14px 16px;border-radius:4px;color:#3f3f46;line-height:1.6;word-break:break-word;">
+              <strong style="display:block;margin-bottom:8px;">Errors</strong>
+              {error_lines}
+            </div>
+          </td>
+        </tr>"""
+
+    body_html = f"""<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body style="margin:0;padding:0;background:#fafafa;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#fafafa;padding:40px 16px;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e4e4e7;border-radius:6px;overflow:hidden;">
+
+        <tr>
+          <td style="background:{accent};height:3px;font-size:0;line-height:0;">&nbsp;</td>
+        </tr>
+
+        <tr>
+          <td style="padding:28px 32px 20px;">
+            <p style="margin:0 0 4px;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#a1a1aa;">Pearls of Portugal</p>
+            <p style="margin:0;font-size:22px;font-weight:600;color:#18181b;letter-spacing:-0.02em;">{title.title()}</p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:0 32px 20px;">
+            <table cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="background:{accent_light};border-radius:4px;padding:5px 10px;">
+                  {status_dot}
+                  <span style="font-size:12px;font-weight:600;color:{accent_text};letter-spacing:0.02em;">{status_label.upper()}</span>
+                </td>
+                <td style="padding-left:10px;font-size:13px;color:#71717a;">
+                  <span style="color:#a1a1aa;">Imodigi /</span>
+                  <strong style="color:#3f3f46;">{title}</strong>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:0 32px;">
+            <div style="height:1px;background:#f4f4f5;"></div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:8px 32px 24px;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+              {filter_rows}
+              {stat_row('Total listings', str(total))}
+              {stat_row('Success', str(success), '#16a34a')}
+              {stat_row('Failed', str(failed), '#dc2626')}
+              {stat_row('Created', str(created))}
+              {stat_row('Updated', str(updated))}
+              {stat_row('Success rate', success_rate)}
+            </table>
+          </td>
+        </tr>
+
+        {error_block}
+
+        <tr>
+          <td style="padding:16px 32px;background:#fafafa;border-top:1px solid #f4f4f5;">
+            <p style="margin:0;font-size:11px;color:#a1a1aa;line-height:1.6;">
+              Job ID: <span style="font-family:monospace;color:#71717a;">{job_id}</span>
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+
+</body>
+</html>"""
+
+    try:
+        await asyncio.to_thread(_send_smtp, subject, body_html)
+        logger.info("Imodigi notification email sent for client_id=%s status=%s", client_id, status)
+    except Exception as exc:
+        logger.warning("Failed to send Imodigi notification email: %s", exc)
+
+
 async def send_job_notification(
     *,
     site_key: str,

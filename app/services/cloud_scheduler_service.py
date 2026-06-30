@@ -183,39 +183,34 @@ class CloudSchedulerService:
         job = client.get_job(request=scheduler_v1.GetJobRequest(name=job_name))
         # schedule_time is a google.protobuf.Timestamp → auto-converted to datetime by the SDK
         return job.schedule_time or None  # type: ignore[return-value]
+
     def schedule_imodigi_sync(
-    self,
-    *,
-    interval_minutes: int = 60,
-    limit: int = 50,
-) -> None:
+        self,
+        *,
+        interval_minutes: int = 60,
+        limit: int = 50,
+    ) -> None:
         """Cria ou actualiza o Cloud Scheduler job para o sync Imodigi."""
         from app.config import settings
-    
+
         if not settings.google_cloud_project:
             logger.debug(
                 "GOOGLE_CLOUD_PROJECT não definido — a ignorar Cloud Scheduler para Imodigi sync"
             )
             return
-    
+
         try:
-            self._upsert_imodigi_job(interval_minutes=interval_minutes, limit=limit)
+            client_id = settings.imodigi_client_id
+            source_partner = settings.imodigi_sync_source_partner
+            self._upsert_imodigi_job(
+                interval_minutes=interval_minutes,
+                limit=limit,
+                client_id=client_id,
+                source_partner=source_partner,
+                is_enriched=settings.imodigi_sync_is_enriched,
+            )
         except Exception as exc:
             logger.error("Falha ao registar Cloud Scheduler job para Imodigi sync: %s", exc)
-
-
-    def unschedule_imodigi_sync(self) -> None:
-        """Remove o Cloud Scheduler job do Imodigi sync."""
-        from app.config import settings
-
-        if not settings.google_cloud_project:
-            return
-
-        try:
-            self._delete_imodigi_job()
-        except Exception as exc:
-            if "NOT_FOUND" not in str(exc) and "404" not in str(exc):
-                logger.error("Falha ao remover Cloud Scheduler job Imodigi: %s", exc)
 
 
     def _upsert_imodigi_job(
@@ -223,6 +218,9 @@ class CloudSchedulerService:
         *,
         interval_minutes: int,
         limit: int,
+        client_id: int | None,
+        source_partner: str | None,
+        is_enriched: bool | None,
     ) -> None:
         from google.cloud import scheduler_v1
         from app.config import settings
@@ -230,6 +228,17 @@ class CloudSchedulerService:
         project = settings.google_cloud_project
         location = settings.google_cloud_scheduler_location
         backend_url = settings.backend_url.rstrip("/")
+
+        params = [f"limit={limit}"]
+        if client_id is not None:
+            params.append(f"client_id={client_id}")
+        if source_partner:
+            params.append(f"source_partner={source_partner}")
+        if is_enriched is not None:
+            params.append(f"is_enriched={str(is_enriched).lower()}")
+
+        query_string = "&".join(params)
+        uri = f"{backend_url}/api/v1/imodigi/trigger/sync?{query_string}"
 
         client = self._client()
         parent = f"projects/{project}/locations/{location}"
@@ -239,7 +248,7 @@ class CloudSchedulerService:
         job = scheduler_v1.Job(
             name=job_name,
             http_target=scheduler_v1.HttpTarget(
-                uri=f"{backend_url}/api/v1/imodigi/trigger/sync?limit={limit}",
+                uri=uri,
                 http_method=scheduler_v1.HttpMethod.POST,
                 headers={
                     "X-API-Key": settings.api_key,

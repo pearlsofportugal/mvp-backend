@@ -69,7 +69,7 @@ def make_listing_payload(**overrides) -> dict:
     defaults = {
         "source_partner": "pearls",
         "title": "Test Apartment T2 in Lisbon",
-        "listing_type": "sale",
+        "business_type": "sale",
         "property_type": "apartment",
         "typology": "T2",
         "bedrooms": 2,

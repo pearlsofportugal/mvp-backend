@@ -38,7 +38,7 @@ class Listing(Base):
 
     # Basic info
     title: Mapped[str | None] = mapped_column(String(500))
-    listing_type: Mapped[str | None] = mapped_column(String(20), comment="sale, rent")
+    business_type: Mapped[str | None] = mapped_column(String(20), comment="sale, rent")
     property_type: Mapped[str | None] = mapped_column(String(50), comment="apartment, house, land, etc.")
     typology: Mapped[str | None] = mapped_column(String(10), comment="T0, T1, T2, T3, etc.")
     bedrooms: Mapped[int | None] = mapped_column(Integer)

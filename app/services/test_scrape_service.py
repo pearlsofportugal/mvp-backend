@@ -105,7 +105,7 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
 
     normalized = TestScrapeNormalized(
         title=schema.title,
-        listing_type=schema.listing_type,
+        business_type=schema.business_type,
         property_type=schema.property_type,
         typology=schema.typology,
         bedrooms=schema.bedrooms,

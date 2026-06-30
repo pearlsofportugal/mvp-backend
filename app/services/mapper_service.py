@@ -74,7 +74,7 @@ _LISTING_STRING_LIMITS = {
     "source_partner": 50,
     "source_url": 2048,
     "title": 500,
-    "listing_type": 20,
+    "business_type": 20,
     "property_type": 50,
     "typology": 10,
     "floor": 20,
@@ -434,13 +434,13 @@ def partner_normalizer(key: str) -> Callable:
 
 _NOT_SET = object()  # sentinel — distinguishes "not provided" from None
 
-_LISTING_TYPE_RENT_KEYWORDS = ("arrend", "arrendar", "arrendamento", "rent", "rental", "aluguer")
+_BUSINESS_TYPE_RENT_KEYWORDS = ("arrend", "arrendar", "arrendamento", "rent", "rental", "aluguer")
 
 
-def _infer_listing_type(raw: dict[str, Any], *, url_hint: str | None = None) -> str:
+def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) -> str:
     """Infer 'rent' or 'sale' from raw payload fields or an optional URL hint."""
     val = (raw.get("business_type") or raw.get("business_state") or "").lower()
-    if any(w in val for w in _LISTING_TYPE_RENT_KEYWORDS):
+    if any(w in val for w in _BUSINESS_TYPE_RENT_KEYWORDS):
         return "rent"
     if url_hint and "/Arrendamento/" in url_hint:
         return "rent"
@@ -478,7 +478,7 @@ def _build_base_schema(
     raw: dict[str, Any],
     *,
     source_partner: str,
-    listing_type: str,
+    business_type: str,
     property_type: str | None,
     partner_id: str | None,
     address: Address,
@@ -498,7 +498,7 @@ def _build_base_schema(
 ) -> PropertySchema:
     """Build a PropertySchema from pre-processed partner-specific values.
 
-    All partner-specific parsing (address, listing_type, property_type, …) must be
+    All partner-specific parsing (address, business_type, property_type, …) must be
     resolved before calling this. This function owns only the logic that is identical
     across all partners.
     """
@@ -524,7 +524,7 @@ def _build_base_schema(
         source_partner=source_partner,
         source_url=raw.get("url"),
         title=title,  # type: ignore[arg-type]
-        listing_type=listing_type,
+        business_type=business_type,
         property_type=property_type,
         typology=raw.get("typology"),
         bedrooms=bedrooms,  # type: ignore[arg-type]
@@ -653,7 +653,7 @@ def normalize_ego_platform_payload(raw: dict[str, Any], source_partner: str) -> 
     return _build_base_schema(
         raw,
         source_partner=source_partner,
-        listing_type=_infer_listing_type(raw),
+        business_type=_infer_business_type(raw),
         property_type=property_type,
         partner_id=partner_id,
         address=address,
@@ -675,7 +675,7 @@ def normalize_pearls_payload(raw: dict[str, Any]) -> PropertySchema:
     return _build_base_schema(
         raw,
         source_partner="pearls",
-        listing_type=_infer_listing_type(raw),
+        business_type=_infer_business_type(raw),
         property_type=raw.get("property_type"),
         partner_id=raw.get("property_id") or raw.get("reference"),
         address=Address(
@@ -718,7 +718,7 @@ def normalize_habinedita_payload(raw: dict[str, Any]) -> PropertySchema:
     return _build_base_schema(
         raw,
         source_partner="habinedita",
-        listing_type=_infer_listing_type(raw),
+        business_type=_infer_business_type(raw),
         property_type=(
             raw.get("property_type")
             or _infer_property_type_from_title(raw.get("title"), _HABINEDITA_PROPERTY_TYPES)
@@ -792,7 +792,7 @@ def normalize_habita_payload(raw: dict[str, Any]) -> PropertySchema:
     return _build_base_schema(
         raw,
         source_partner="habita",
-        listing_type=_infer_listing_type(raw),
+        business_type=_infer_business_type(raw),
         property_type=(
             raw.get("property_type")
             or _infer_property_type_from_title(raw.get("title"), _HABITA_PROPERTY_TYPES, startswith=False)
@@ -894,7 +894,7 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
             typology = typ_match.group(1).upper()
 
     # Location: prefer URL path (most reliable) then fall back to location field
-    # URL pattern: /Imovel/{listing_type}/{property_type}/{district}/{county}/{parish}/{id}
+    # URL pattern: /Imovel/{business_type}/{property_type}/{district}/{county}/{parish}/{id}
     region: str | None = None
     city: str | None = None
     area_parish: str | None = None
@@ -917,7 +917,7 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
     return _build_base_schema(
         raw,
         source_partner="realkey",
-        listing_type=_infer_listing_type(raw, url_hint=source_url),
+        business_type=_infer_business_type(raw, url_hint=source_url),
         property_type=raw.get("property_type"),
         partner_id=partner_id,
         address=Address(
@@ -955,7 +955,7 @@ def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
     return _build_base_schema(
         raw,
         source_partner="mysquare",
-        listing_type=_infer_listing_type(raw),
+        business_type=_infer_business_type(raw),
         property_type=(
             raw.get("property_type")
             or _infer_property_type_from_title(raw.get("title"), _HABINEDITA_PROPERTY_TYPES)
@@ -996,7 +996,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "source_partner": schema.source_partner,
         "source_url": str(schema.source_url) if schema.source_url else None,
         "title": schema.title,
-        "listing_type": schema.listing_type,
+        "business_type": schema.business_type,
         "property_type": schema.property_type,
         "typology": schema.typology,
         "bedrooms": schema.bedrooms,

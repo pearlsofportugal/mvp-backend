@@ -71,7 +71,7 @@ class ListingBase(BaseModel):
     """
 
     # ── Classification ────────────────────────────────────────────────────
-    listing_type: Literal["sale", "rent"] | None = Field(None, description="Listing transaction type.")
+    business_type: Literal["sale", "rent"] | None = Field(None, description="Listing transaction type.")
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house').")
     typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
 
@@ -150,7 +150,7 @@ class ListingUpdate(BaseModel):
     Only supplied fields are applied.
     """
 
-    listing_type: Literal["sale", "rent"] | None = None
+    business_type: Literal["sale", "rent"] | None = None
     property_type: str | None = None
     typology: str | None = None
     title: str | None = None
@@ -246,7 +246,7 @@ class ListingListRead(BaseModel):
     enriched_translations: dict | None = Field(None, exclude=True)
     title: str | None = None
     source_partner: str
-    listing_type: Literal["sale", "rent"] | None = None
+    business_type: Literal["sale", "rent"] | None = None
     property_type: str | None = None
     typology: str | None = None
     price_amount: Decimal | None = None

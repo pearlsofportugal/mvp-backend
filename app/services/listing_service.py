@@ -95,7 +95,7 @@ class ListingService:
                     county=listing.county,
                     price_amount=listing.price_amount,
                     price_currency=listing.price_currency,
-                    listing_type=listing.listing_type,
+                    business_type=listing.business_type,
                     thumbnail_url=thumbnail_url,
                     is_enriched=bool(listing.enriched_translations),
                 )

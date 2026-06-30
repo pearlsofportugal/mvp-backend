@@ -104,9 +104,9 @@ _DEFAULT_FIELD_MAP = {
     "referência": "property_id",
     "ref": "property_id",
     # Self-labeling listing-type keys (label IS the value)
-    "venda": "listing_type",
-    "arrendamento": "listing_type",
-    "trespasse": "listing_type",
+    "venda": "business_type",
+    "arrendamento": "business_type",
+    "trespasse": "business_type",
 }
 
 _DEFAULT_FEATURE_MAP = {
@@ -146,9 +146,9 @@ _SUMMARY_FIELD_MAP = {
     "freguesia": "parish",
     "zona": "zone",
     # Self-labeling: the label itself is the value (e.g. "Venda" row has price as .value)
-    "venda": "listing_type",
-    "arrendamento": "listing_type",
-    "trespasse": "listing_type",
+    "venda": "business_type",
+    "arrendamento": "business_type",
+    "trespasse": "business_type",
 }
 
 # Keys where the HTML label IS the value (not the .value child element).

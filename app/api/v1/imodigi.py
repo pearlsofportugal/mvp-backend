@@ -29,6 +29,7 @@ from app.schemas.imodigi_schema import (
     ImodigiSyncReport,
 )
 from app.services.bulk_job_store import create_job, get_job
+from app.services.email_service import send_imodigi_notification
 from app.services.imodigi_service import (
     export_listing_to_crm,
     get_catalog_values,
@@ -215,9 +216,22 @@ async def bulk_publish(
         raise ImodigiError(
             "IMODIGI_CLIENT_ID is not configured. Provide it in the request body or set the environment variable."
         )
-    listing_ids = await get_listing_ids_for_bulk_imodigi(db, payload.listing_ids, payload.limit)
+    listing_ids = await get_listing_ids_for_bulk_imodigi(
+        db,
+        payload.listing_ids,
+        payload.limit,
+        source_partner=payload.source_partner,
+        is_enriched=payload.is_enriched,
+    )
     job = create_job("imodigi_export", total=len(listing_ids))
-    background_tasks.add_task(run_bulk_imodigi_job, job.id, listing_ids, client_id)
+    background_tasks.add_task(
+        run_bulk_imodigi_job,
+        job.id,
+        listing_ids,
+        client_id,
+        payload.source_partner,
+        payload.is_enriched,
+    )
     return ok(
         BulkJobAccepted(
             job_id=job.id,
@@ -445,6 +459,20 @@ async def trigger_imodigi_sync(
     request: Request,
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
+    client_id: int | None = Query(
+        None,
+        description="Imodigi store ID. Overrides IMODIGI_CLIENT_ID for this sync.",
+    ),
+    source_partner: str | None = Query(
+        None,
+        description="Only sync listings from this source partner.",
+    ),
+    is_enriched: bool | None = Query(
+        None,
+        description="Only sync enriched listings (true) or non-enriched listings (false).",
+    ),
+    force: bool = Query(False, description="Re-exportar listings já exportados para o Imodigi."),
+
     _: str = Security(verify_api_key),
 ):
     """Chamado pelo Cloud Scheduler — exporta listings pendentes para o Imodigi.
@@ -452,16 +480,37 @@ async def trigger_imodigi_sync(
     Bloqueia até conclusão para que o Cloud Run mantenha CPU activo.
     Igual ao padrão de trigger_scheduled_job em scrape_jobs.py.
     """
-    client_id = settings.imodigi_client_id
+    client_id = client_id or settings.imodigi_client_id
     if not client_id:
         raise ImodigiError(
             "IMODIGI_CLIENT_ID não configurado. "
             "Define a variável de ambiente antes de activar o sync."
         )
 
-    listing_ids = await get_listing_ids_for_bulk_imodigi(db, [], limit)
+    listing_ids = await get_listing_ids_for_bulk_imodigi(
+        db,
+        [],
+        limit,
+        source_partner=source_partner,
+        is_enriched=is_enriched,
+        force=force,
+    )
 
     if not listing_ids:
+        await send_imodigi_notification(
+            job_id="imodigi-sync",
+            client_id=client_id,
+            status="completed",
+            total=0,
+            success=0,
+            failed=0,
+            created=0,
+            updated=0,
+            errors=[],
+            source_partner=source_partner,
+            is_enriched=is_enriched,
+            title="Imodigi scheduled sync",
+        )
         return ok(
             {"total": 0, "success": 0, "failed": 0},
             "Nenhum listing pendente para exportar",
@@ -471,15 +520,37 @@ async def trigger_imodigi_sync(
     success = 0
     failed = 0
     errors: list[str] = []
+    created = 0
+    updated = 0
 
     for lid in listing_ids:
         try:
-            await export_listing_to_crm(db, lid, client_id)
+            _, action = await export_listing_to_crm(db, lid, client_id)
             success += 1
+            if action == "created":
+                created += 1
+            elif action == "updated":
+                updated += 1
         except Exception as exc:
             logger.warning("Imodigi trigger sync falhou para %s: %s", lid, exc)
             failed += 1
             errors.append(f"{lid}: {exc}")
+
+    status = "failed" if success == 0 and failed > 0 else "completed"
+    await send_imodigi_notification(
+        job_id="imodigi-sync",
+        client_id=client_id,
+        status=status,
+        total=len(listing_ids),
+        success=success,
+        failed=failed,
+        created=created,
+        updated=updated,
+        errors=errors,
+        source_partner=source_partner,
+        is_enriched=is_enriched,
+        title="Imodigi scheduled sync",
+    )
 
     return ok(
         {

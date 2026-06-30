@@ -32,12 +32,14 @@ from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 from app.repositories.imodigi_repository import ImodigiRepository
 from app.schemas.imodigi_schema import ImodigiSyncReport
+from app.services.email_service import send_imodigi_notification
+from app.utils._filters import apply_listing_filters
 
 logger = get_logger(__name__)
 
 # ─────────────────────────── Type mappings ──────────────────────────────
 
-_LISTING_TYPE_MAP: dict[str, str] = {
+_BUSINESS_TYPE_MAP: dict[str, str] = {
     "sale": "To Buy",
     "rent": "To Rent",
 }
@@ -85,7 +87,7 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
 
     Only non-None fields are included so partial PATCH calls stay minimal.
     """
-    business_type = _LISTING_TYPE_MAP.get(listing.listing_type or "", "To Buy")
+    business_type = _BUSINESS_TYPE_MAP.get(listing.business_type or "", "To Buy")
     property_type = _map_property_type(listing.property_type)
 
     payload: dict[str, Any] = {
@@ -391,22 +393,22 @@ async def get_listing_ids_for_bulk_imodigi(
     db: AsyncSession,
     listing_ids: list[UUID],
     limit: int,
+    source_partner: str | None = None,
+    is_enriched: bool | None = None,
+    force: bool = False,
+
 ) -> list[UUID]:
     if listing_ids:
         return list(listing_ids)
 
-    published_export = (
-        select(ImodigiExport.listing_id)
-        .where(ImodigiExport.status.in_(["published", "updated"]))
-        .correlate(Listing)
-        .exists()
-    )
-    stmt = (
-        select(Listing.id)
-        .where(~published_export)
-        .order_by(Listing.created_at.asc())
-        .limit(limit)
-    )
+    filters: dict[str, object | None] = {
+        "is_exported_to_imodigi": False if not force else None,
+        "source_partner": source_partner,
+        "is_enriched": is_enriched,
+    }
+
+    stmt = apply_listing_filters(select(Listing.id), filters)
+    stmt = stmt.order_by(Listing.created_at.asc()).limit(limit)
     rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
 
@@ -416,7 +418,13 @@ async def get_listing_ids_for_bulk_imodigi(
 # ---------------------------------------------------------------------------
 
 
-async def run_bulk_imodigi_job(job_id: UUID, listing_ids: list[UUID], client_id: int) -> None:
+async def run_bulk_imodigi_job(
+    job_id: UUID,
+    listing_ids: list[UUID],
+    client_id: int,
+    source_partner: str | None = None,
+    is_enriched: bool | None = None,
+) -> None:
     """Background task: export listings to Imodigi and update job progress in-store."""
     from datetime import datetime, timezone
 
@@ -451,14 +459,42 @@ async def run_bulk_imodigi_job(job_id: UUID, listing_ids: list[UUID], client_id:
             job.errors.append(f"{lid}: {exc}")
             results.append({"listing_id": str(lid), "status": "failed", "error": str(exc)})
 
-    job.result = {"total": len(listing_ids), "done": done, "failed": failed, "results": results}
-    job.status = STATUS_FAILED if done == 0 and failed > 0 else STATUS_COMPLETED
+    created = sum(1 for item in results if item.get("action") == "created")
+    updated = sum(1 for item in results if item.get("action") == "updated")
+    status = STATUS_FAILED if done == 0 and failed > 0 else STATUS_COMPLETED
+
+    job.result = {
+        "total": len(listing_ids),
+        "done": done,
+        "failed": failed,
+        "created": created,
+        "updated": updated,
+        "results": results,
+    }
+    job.status = status
     job.finished_at = datetime.now(timezone.utc)
     logger.info(
-        "Bulk Imodigi export job %s finished: done=%s failed=%s",
+        "Bulk Imodigi export job %s finished: done=%s failed=%s created=%s updated=%s",
         job_id,
         done,
         failed,
+        created,
+        updated,
+    )
+
+    await send_imodigi_notification(
+        job_id=str(job_id),
+        client_id=client_id,
+        status="completed" if status == STATUS_COMPLETED else "failed",
+        total=len(listing_ids),
+        success=done,
+        failed=failed,
+        created=created,
+        updated=updated,
+        errors=job.errors,
+        source_partner=source_partner,
+        is_enriched=is_enriched,
+        title="Bulk Imodigi export",
     )
 
 

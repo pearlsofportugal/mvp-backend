@@ -74,6 +74,14 @@ class ImodigiBulkExportRequest(BaseModel):
         None,
         description="Imodigi store ID. Overrides the IMODIGI_CLIENT_ID setting when provided.",
     )
+    source_partner: str | None = Field(
+        None,
+        description="Only export listings from this source partner.",
+    )
+    is_enriched: bool | None = Field(
+        None,
+        description="Only export listings that are enriched (true) or not enriched (false).",
+    )
     limit: int = Field(
         50,
         ge=1,

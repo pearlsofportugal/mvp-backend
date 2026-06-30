@@ -20,7 +20,7 @@ def _listing_to_dict(listing: Listing) -> dict:
         "source_partner": listing.source_partner,
         "source_url": listing.source_url,
         "title": listing.title,
-        "listing_type": listing.listing_type,
+        "business_type": listing.business_type,
         "property_type": listing.property_type,
         "typology": listing.typology,
         "bedrooms": listing.bedrooms,

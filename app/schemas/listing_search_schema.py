@@ -32,7 +32,7 @@ class ListingSearchItem(BaseModel):
     county: str | None = None
 
     # ── Financial ─────────────────────────────────────────────────────────
-    listing_type: Literal["sale", "rent"] | None = None
+    business_type: Literal["sale", "rent"] | None = None
     price_amount: Decimal | None = Field(None, ge=0)
     price_currency: str | None = Field(None, min_length=3, max_length=3, description="ISO 4217 currency code.")
 

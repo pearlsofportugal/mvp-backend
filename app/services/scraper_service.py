@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, engine, func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +34,7 @@ from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory
 from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
+from app.repositories.listings_repository import ListingRepository
 from app.services.email_service import send_job_notification
 from app.services.ethics_service import EthicalScraper
 from app.services.playwright_scraper import PlaywrightScraper
@@ -130,7 +131,17 @@ async def run_scrape_job(job_id: str) -> None:
 
             job.mark_running()
             await db.commit()
+            logger.warning(
+    "SITE_CONFIG image_filter = %r (%s)",
+    site_config.image_filter,
+    type(site_config.image_filter),
+)
 
+            logger.warning(
+    "SITE_CONFIG image_exclude_filter = %r (%s)",
+    site_config.image_exclude_filter,
+    type(site_config.image_exclude_filter),
+)
             await _run_scrape_async(
                 db=db,
                 job_id=str(job.id),
@@ -231,7 +242,15 @@ async def _run_scrape_async(
             full_selectors["image_filter"] = image_filter
         if image_exclude_filter:
             full_selectors["image_exclude_filter"] = image_exclude_filter
-
+        logger.warning(
+            "FULL_SELECTORS id=%s image_filter=%r",
+            id(full_selectors),
+            full_selectors.get("image_filter"),
+        )
+        logger.warning(
+        "FULL_SELECTORS image_exclude_filter = %r",
+        full_selectors.get("image_exclude_filter"),
+    )
         current_url = start_url
         pages_visited = 0
         listings_found = 0
@@ -326,7 +345,11 @@ async def _run_scrape_async(
             for link in new_links:
                 if await _check_job_cancelled(db, job_id):
                     break
-
+                logger.warning(
+    "BEFORE CALL id=%s filter=%r",
+    id(full_selectors),
+    full_selectors.get("image_filter"),
+)    
                 scraped, errored, warned, is_new = await _process_listing_url(
                     db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
                 )
@@ -530,7 +553,7 @@ async def _process_listing_url(
     link: str,
     full_selectors: dict[str, Any],
     extraction_mode: str,
-) -> tuple[bool, bool, bool]:
+) -> tuple[bool, bool, bool, bool]:
     """Fetch, parse e persist um único URL de listing.
 
     Returns (scraped, errored, warned, is_new):
@@ -538,8 +561,16 @@ async def _process_listing_url(
     - errored=True  → excepção durante o processamento (parsing, DB, etc.).
     - warned=True   → HTML não disponível (fetch devolveu None — 404, timeout, bloqueio).
 
+    Listings detetados como vendidos/reservados são ignorados (skip) e, se já
+    existirem na DB de uma scrape anterior, são removidos.
+
     O caller é responsável por chamar job.update_progress() com os contadores actualizados.
     """
+    logger.warning(
+    "INSIDE CALL id=%s filter=%r",
+    id(full_selectors),
+    full_selectors.get("image_filter"),
+)
     try:
         detail_html = await _fetch_html(scraper, link)
         if not detail_html:
@@ -548,8 +579,27 @@ async def _process_listing_url(
             job.touch_heartbeat()
             await db.commit()
             return False, False, True, False
+        logger.warning(
+            "PROCESS selectors image_filter = %r",
+            full_selectors.get("image_filter"),
+        )
 
         raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
+
+        # ── Skip listings vendidos/reservados ──────────────────────────────
+        if raw_data.get("is_sold"):
+            logger.info("Listing detected as sold/reserved — skipping: %s", link)
+            job.add_log("info", "Listing marked as sold/reserved — skipped", link)
+
+            existing = await ListingRepository.get_by_source_url(db, link)
+            if existing:
+                await db.delete(existing)
+                logger.info("Removed existing listing (now sold): %s", link)
+
+            job.touch_heartbeat()
+            await db.commit()
+            return False, False, False, False
+        # ─────────────────────────────────────────────────────────────────
 
         missing_fields = _missing_critical_parser_fields(raw_data)
         if missing_fields:
@@ -634,7 +684,7 @@ async def _persist_listing_with_postgres_upsert(
 
         if inserted_id is not None:
             await _replace_media_assets(db, inserted_id, schema)
-            await db.commit()
+            # await db.commit()  <--- ELIMINAT: Permet que ho controli el cridador
             return True
 
         logger.info("Listing insert raced for %s; reloading winner", source_url)
@@ -678,7 +728,7 @@ async def _persist_listing_with_postgres_upsert(
     existing.scrape_job_id = UUID(job_id)
 
     await _replace_media_assets(db, existing.id, schema)
-    await db.commit()
+    # await db.commit()  <--- ELIMINAT: Centralitzat a la funció principal
     return False
 
 
@@ -724,33 +774,46 @@ async def _persist_listing_legacy(
         existing.updated_at = datetime.now(timezone.utc)
         existing.scrape_job_id = UUID(job_id)
         await _replace_media_assets(db, existing.id, schema)
-        await db.commit()
+        # await db.commit()  <--- ELIMINAT
         return False
 
     else:
         listing = Listing(**listing_data)
         db.add(listing)
-        await db.flush()  # flush para obter o ID antes de adicionar media assets
+        await db.flush()  # Flush necessari per obtenir l'ID abans d'afegir fitxers multimèdia
 
         await _replace_media_assets(db, listing.id, schema)
-        await db.commit()
+        # await db.commit()  <--- ELIMINAT
         return True
 
 
 async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> None:
     """Replace listing media atomically so retries and upserts do not duplicate assets."""
+    # 1. Clear out any old assets
+    logger.warning("media assets found in schema : %s", schema.media)
     await db.execute(delete(MediaAsset).where(MediaAsset.listing_id == listing_id))
 
-    for media in schema.media:
+    # 2. Extract media safely (handling potential fallback names like 'images')
+    media_list = getattr(schema, "media", None) or getattr(schema, "images", [])
+    
+    if not media_list:
+        logger.warning("No media assets found in schema for listing ID: %s", listing_id)
+        return
+
+    for media in media_list:
         db.add(
             MediaAsset(
                 listing_id=listing_id,
                 url=str(media.url),
-                alt_text=media.alt_text,
-                type=media.type or "photo",
-                position=media.position,
+                alt_text=getattr(media, "alt_text", None),
+                type=getattr(media, "type", "photo") or "photo",
+                position=getattr(media, "position", 0),
             )
         )
+    
+    # 3. Force an immediate flush of the added media assets to the database transaction
+    await db.flush()
+    logger.info("Successfully flushed %d media assets for listing %s", len(media_list), listing_id)
 async def _delete_missing_listings(
     db: AsyncSession,
     job: ScrapeJob,

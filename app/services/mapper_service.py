@@ -16,6 +16,7 @@ CONFIGURATION:
 Expandable per partner — dispatcher pattern.
 """
 import asyncio
+from itertools import zip_longest
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -542,10 +543,11 @@ def _build_base_schema(
         area_gross_m2=area_gross,
         area_land_m2=area_land,
         address=address,
-        media=[
-            MediaAsset(url=url, alt_text=alt, type="photo")
-            for url, alt in zip(raw.get("images", []), raw.get("alt_texts", []))
-        ],
+media=[
+    MediaAsset(url=url, alt_text=alt, type="photo")
+    for url, alt in zip_longest(raw.get("images", []), raw.get("alt_texts", []), fillvalue=None)
+    if url
+],
         features=ListingFlags(
             has_garage=parse_bool(raw.get("garage")),
             has_elevator=parse_bool(raw.get("elevator")),

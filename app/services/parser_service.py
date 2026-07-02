@@ -150,11 +150,15 @@ _SUMMARY_FIELD_MAP = {
     "concelho": "county",
     "freguesia": "parish",
     "zona": "zone",
-    # Self-labeling: the label itself is the value (e.g. "Venda" row has price as .value)
     "venda": "business_type",
     "arrendamento": "business_type",
     "trespasse": "business_type",
 }
+_DEFAULT_SOLD_KEYWORDS = (
+    "vendido", "vendida", "imóvel vendido", "já vendido",
+    "reservado", "reservada", "sold", "under offer", "sale agreed",
+    "negócio fechado",
+)
 
 # Keys where the HTML label IS the value (not the .value child element).
 # E.g. Brightmangroup has a row with label "Venda" and price in .value —
@@ -312,9 +316,19 @@ def parse_listing_page(
         data.update(_parse_direct_selectors(soup, selectors))
 
     # Common extractions (both modes)
+    f = selectors.get("image_filter")
+    
+    logger.warning("FILTER str  = %s", f)
+    logger.warning("FILTER repr = %r", f)
+    logger.warning("FILTER len  = %d", len(f))
+    logger.warning("FILTER list = %s", list(f))
     data.update(_parse_images(soup, selectors, url))
     data.update(_parse_seo(soup))
     _fill_missing_listing_fields_from_page(soup, data)
+
+    # Sold/reserved detection — reuses fields already extracted above
+    data["is_sold"] = _detect_sold_status(data, selectors)
+
     return data
 
 
@@ -353,7 +367,11 @@ def _fill_missing_listing_fields_from_page(
     if not data.get("images"):
         images = jsonld_values.get("images") or []
         if images:
+            logger.info("Images filled via JSON-LD fallback (direct selector found none): %d images", len(images))
             data["images"] = images
+            # ← FIX: manter alt_texts com o mesmo tamanho de images
+
+            data["alt_texts"] = [""] * len(images)
 
     if not data.get("property_type") and data.get("title"):
         inferred = _infer_property_type_from_title(data["title"])
@@ -1172,37 +1190,88 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
     """Extract images from the listing page."""
     data: dict[str, Any] = {"images": [], "alt_texts": []}
 
-    image_selector = selectors.get("image_selector", "img")
+    # ── FIX: aceitar tanto "image_selector" como "images_selector" (alias) ──
+    image_selector = selectors.get("image_selector") or selectors.get("images_selector", "img")
     image_filter = selectors.get("image_filter")
     image_exclude_filter = selectors.get("image_exclude_filter")
 
+    logger.warning("Selector = %s", image_selector)
+
+    elements = soup.select(image_selector)
+
+    logger.warning("Found %d elements", len(elements))
+    for img in elements:
+        logger.warning(img)
+
     def _normalize_image_url(img: Tag) -> str | None:
+        # ── FIX: suportar padrão de galeria em âncoras <a href="full.jpg"><img src="thumb.jpg"></a> ──
+        if img.name == "a":
+            href = img.get("href")
+            if href and not href.startswith(("javascript:", "#")):
+                return href.strip()
+            nested_img = img.select_one("img")
+            return _normalize_image_url(nested_img) if nested_img else None
+
         for attr in ("src", "data-src", "data-lazy-src", "data-imgthumb", "data-original"):
             value = img.get(attr)
             if value and not value.startswith("data:"):
                 return value.strip()
+
         if img.name == "source":
             value = img.get("srcset") or img.get("data-srcset")
             if value:
                 return value.split(",")[0].strip().split(" ")[0]
+
         return None
 
     for img in soup.select(image_selector):
         src = _normalize_image_url(img)
         if not src:
+            logger.warning("SKIP: sem src -> %s", img)
             continue
+
         absolute_url = urljoin(base_url, src)
 
-        if image_filter and not re.search(image_filter, absolute_url):
-            continue
-        if image_exclude_filter and re.search(image_exclude_filter, absolute_url):
-            continue
+        logger.warning("SRC = %s", src)
+        logger.warning("ABS = %s", absolute_url)
+
+        if image_filter:
+            match = re.search(image_filter, absolute_url)
+            logger.warning(
+                "IMAGE FILTER = %r | MATCH = %s",
+                image_filter,
+                bool(match),
+            )
+            if not match:
+                logger.warning("SKIP: image_filter rejeitou %s", absolute_url)
+                continue
+
+        if image_exclude_filter:
+            excluded = re.search(image_exclude_filter, absolute_url)
+            logger.warning(
+                "IMAGE EXCLUDE FILTER = %r | MATCH = %s",
+                image_exclude_filter,
+                bool(excluded),
+            )
+            if excluded:
+                logger.warning("SKIP: image_exclude_filter rejeitou %s", absolute_url)
+                continue
+
+        logger.warning("ADDING IMAGE = %s", absolute_url)
 
         data["images"].append(absolute_url)
-        data["alt_texts"].append(img.get("alt", ""))
+
+        alt = (
+            img.get("alt", "")
+            if img.name != "a"
+            else (img.select_one("img").get("alt", "") if img.select_one("img") else "")
+        )
+        data["alt_texts"].append(alt)
+
+    logger.warning("FINAL IMAGES = %d", len(data["images"]))
+    logger.warning("IMAGES = %s", data["images"])
 
     return data
-
 
 def _parse_seo(soup: BeautifulSoup) -> dict[str, Any]:
     """Extract SEO-relevant elements from the page."""
@@ -1293,3 +1362,23 @@ def parse_listing_card(
                 data[field] = el.get_text(strip=True)
 
     return data
+
+
+
+def _detect_sold_status(data: dict[str, Any], selectors: dict[str, Any]) -> bool:
+    """Detect sold/reserved status from fields already extracted by the parser
+    (condition, business_state, title, page_title) — no dedicated selector needed.
+
+    `sold_keywords` can be overridden per site via SiteConfig.selectors, either
+    as a list or a comma-separated string.
+    """
+    keywords = selectors.get("sold_keywords") or _DEFAULT_SOLD_KEYWORDS
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+
+    haystack = " ".join(
+        str(data.get(field) or "")
+        for field in ("condition", "business_state", "title", "page_title")
+    ).lower()
+
+    return any(kw.lower() in haystack for kw in keywords)

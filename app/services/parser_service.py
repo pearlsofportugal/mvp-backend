@@ -157,7 +157,7 @@ _SUMMARY_FIELD_MAP = {
 _DEFAULT_SOLD_KEYWORDS = (
     "vendido", "vendida", "imóvel vendido", "já vendido",
     "reservado", "reservada", "sold", "under offer", "sale agreed",
-    "negócio fechado",
+    "negócio fechado", "Arrendado", "Arrendada",
 )
 
 # Keys where the HTML label IS the value (not the .value child element).
@@ -316,12 +316,6 @@ def parse_listing_page(
         data.update(_parse_direct_selectors(soup, selectors))
 
     # Common extractions (both modes)
-    f = selectors.get("image_filter")
-    
-    logger.warning("FILTER str  = %s", f)
-    logger.warning("FILTER repr = %r", f)
-    logger.warning("FILTER len  = %d", len(f))
-    logger.warning("FILTER list = %s", list(f))
     data.update(_parse_images(soup, selectors, url))
     data.update(_parse_seo(soup))
     _fill_missing_listing_fields_from_page(soup, data)
@@ -993,7 +987,6 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, A
 # ═══════════════════════════════════════════════════════════
 # Direct Selector Parsing
 # ═══════════════════════════════════════════════════════════
-
 def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> dict[str, Any]:
     """Parse using direct CSS selectors for each field."""
     data: dict[str, Any] = {}
@@ -1022,41 +1015,64 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
         "land_area_selector": "land_area",
     }
 
+    # 1. LOOP PRINCIPAL - AGORA COM SUPORTE A VÍRGULAS E @ATRIBUTOS
     for selector_key, field in simple_fields.items():
-        selector = selectors.get(selector_key)
-        if not selector:
+        selector_str = selectors.get(selector_key)
+        if not selector_str:
             _print_selector_debug(soup, debug_enabled, field, selector_key, None, "selector missing from site config")
             continue
 
+        extracted_value = None
+        matched_el = None
+
         try:
-            el = soup.select_one(selector)
+            # Separa seletores separados por vírgula
+            individual_selectors = [s.strip() for s in selector_str.split(",") if s.strip()]
+            
+            for full_selector in individual_selectors:
+                attr_target = None
+                css_selector = full_selector
+                
+                # Isola o seletor CSS do atributo caso exista o símbolo '@'
+                if "@" in full_selector:
+                    css_selector, attr_target = full_selector.rsplit("@", 1)
+                
+                el = soup.select_one(css_selector)
+                
+                if el:
+                    # Se há um atributo explícito (@data-image, @href), forçamos a extração desse atributo
+                    if attr_target:
+                        val = el.get(attr_target)
+                        if val:
+                            extracted_value = val if isinstance(val, str) else "".join(val)
+                            matched_el = el
+                            break
+                    else:
+                        # Se não há '@', passamos pela tua função normal
+                        val = _extract_element_value(el, field=field)
+                        if val:
+                            extracted_value = val
+                            matched_el = el
+                            break
+
         except Exception as exc:
-            _print_selector_debug(soup, debug_enabled, field, selector_key, selector, f"invalid selector: {exc}")
+            _print_selector_debug(soup, debug_enabled, field, selector_key, selector_str, f"invalid selector: {exc}")
             continue
 
-        if not el:
-            _print_selector_debug(soup, debug_enabled, field, selector_key, selector, "no HTML match for selector")
-            continue
-
-        value = _extract_element_value(el, field=field)
-        if not value:
+        if not extracted_value:
             _print_selector_debug(
-                soup,
-                debug_enabled,
-                field,
-                selector_key,
-                selector,
-                "selector matched element but extracted text is empty",
-                matched_element=el,
+                soup, debug_enabled, field, selector_key, selector_str, 
+                "no HTML match or extracted text is empty", matched_element=matched_el
             )
             continue
 
         if debug_enabled:
             print("[selector-debug] matched field:", field, flush=True)
             print("[selector-debug] selector_key:", selector_key, flush=True)
-            print("[selector-debug] selector:", selector, flush=True)
-            print("[selector-debug] value:", value, flush=True)
-        data[field] = value
+            print("[selector-debug] selector:", selector_str, flush=True)
+            print("[selector-debug] value:", extracted_value, flush=True)
+            
+        data[field] = extracted_value
 
     if debug_enabled:
         print("[selector-debug] final simple field data:", data, flush=True)
@@ -1101,12 +1117,9 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
     if features_selector:
         for el in soup.select(features_selector):
             text = el.get_text(strip=True).lower()
-            _assign_feature_matches(text, data,feature_map)
+            _assign_feature_matches(text, data, feature_map)
 
-    # Individual feature selectors
-    # If the matched element contains a number (e.g. garage count "3"), store that
-    # value so the mapper can both set has_garage=True and preserve the count.
-    # Otherwise fall back to "Yes" (presence-only feature).
+    # 2. CARACTERÍSTICAS INDIVIDUAIS - AGORA COM SUPORTE A VÍRGULAS E PREVENÇÃO DO '@'
     individual_features = {
         "garage_selector": "garage",
         "elevator_selector": "elevator",
@@ -1116,12 +1129,20 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
         "garden_selector": "garden",
     }
     for selector_key, field in individual_features.items():
-        selector = selectors.get(selector_key)
-        if selector:
-            el = soup.select_one(selector)
-            if el:
-                value = _extract_element_value(el, field=field)
-                data[field] = value if value else "Yes"
+        selector_str = selectors.get(selector_key)
+        if selector_str:
+            individual_selectors = [s.strip() for s in selector_str.split(",") if s.strip()]
+            for full_selector in individual_selectors:
+                # Removemos preventivamente o @ para garantir que o soup não rebenta ao procurar badges booleanos
+                css_selector = full_selector.split("@")[0].strip()
+                try:
+                    el = soup.select_one(css_selector)
+                    if el:
+                        value = _extract_element_value(el, field=field)
+                        data[field] = value if value else "Yes"
+                        break
+                except Exception:
+                    continue
 
     # Text patterns
     text_patterns = selectors.get("text_patterns", {})
@@ -1168,8 +1189,7 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
         if not data.get(field):
             data[field] = value
 
-    # Universal feature fallback — runs regardless of site, catches any feature
-    # keywords that direct selectors / habinedita fallback may have missed.
+    # Universal feature fallback
     feature_map = _get_feature_map()
     missing_feature_fields = {v for v in feature_map.values() if not data.get(v)}
     if missing_feature_fields:
@@ -1178,9 +1198,43 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
             if field in missing_feature_fields and keyword in full_text:
                 data[field] = "Yes"
                 missing_feature_fields.discard(field)
-
+    # ═══════════════════════════════════════════════════════════
+    # AUTO-REPARAÇÃO NATIVA PARA PLATAFORMA EGO REALESTATE
+    # ═══════════════════════════════════════════════════════════
+    # Se o core falhou em campos chave, mas detetamos a estrutura clássica
+    # de listas da EGO, extraímos os dados inspecionando o texto das labels humanas.
+    if not data.get("property_type") or not data.get("district") or not data.get("typology"):
+        detail_items = soup.select(".detailItem")
+        if detail_items:
+            logger.info("Auto-reparação EGO ativada: analisando elementos .detailItem por texto estruturado.")
+            
+            for item in detail_items:
+                label_el = item.select_one(".label")
+                value_el = item.select_one(".value")
+                
+                if label_el and value_el:
+                    label_text = label_el.get_text(strip=True).lower()
+                    value_text = value_el.get_text(strip=True)
+                    
+                    if not value_text:
+                        continue
+                        
+                    # Mapeamento direto agnóstico a classes CSS dinâmicas
+                    if "natureza" in label_text and not data.get("property_type"):
+                        data["property_type"] = value_text
+                    elif "distrito" in label_text and not data.get("district"):
+                        data["district"] = value_text
+                    elif "concelho" in label_text and not data.get("county"):
+                        data["county"] = value_text
+                    elif "freguesia" in label_text and not data.get("parish"):
+                        data["parish"] = value_text
+                    elif "tipologia" in label_text and not data.get("typology"):
+                        data["typology"] = value_text
+                    elif "referência" in label_text and not data.get("property_id"):
+                        data["property_id"] = value_text
+                    elif "estado" in label_text and not data.get("condition"):
+                        data["condition"] = value_text
     return data
-
 
 # ═══════════════════════════════════════════════════════════
 # Common Extractions
@@ -1194,8 +1248,6 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
     image_selector = selectors.get("image_selector") or selectors.get("images_selector", "img")
     image_filter = selectors.get("image_filter")
     image_exclude_filter = selectors.get("image_exclude_filter")
-
-    logger.warning("Selector = %s", image_selector)
 
     elements = soup.select(image_selector)
 
@@ -1216,12 +1268,10 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
             value = img.get(attr)
             if value and not value.startswith("data:"):
                 return value.strip()
-
         if img.name == "source":
             value = img.get("srcset") or img.get("data-srcset")
             if value:
                 return value.split(",")[0].strip().split(" ")[0]
-
         return None
 
     for img in soup.select(image_selector):
@@ -1232,32 +1282,18 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
 
         absolute_url = urljoin(base_url, src)
 
-        logger.warning("SRC = %s", src)
-        logger.warning("ABS = %s", absolute_url)
-
         if image_filter:
             match = re.search(image_filter, absolute_url)
-            logger.warning(
-                "IMAGE FILTER = %r | MATCH = %s",
-                image_filter,
-                bool(match),
-            )
+
             if not match:
                 logger.warning("SKIP: image_filter rejeitou %s", absolute_url)
                 continue
 
         if image_exclude_filter:
             excluded = re.search(image_exclude_filter, absolute_url)
-            logger.warning(
-                "IMAGE EXCLUDE FILTER = %r | MATCH = %s",
-                image_exclude_filter,
-                bool(excluded),
-            )
             if excluded:
                 logger.warning("SKIP: image_exclude_filter rejeitou %s", absolute_url)
                 continue
-
-        logger.warning("ADDING IMAGE = %s", absolute_url)
 
         data["images"].append(absolute_url)
 
@@ -1267,9 +1303,6 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
             else (img.select_one("img").get("alt", "") if img.select_one("img") else "")
         )
         data["alt_texts"].append(alt)
-
-    logger.warning("FINAL IMAGES = %d", len(data["images"]))
-    logger.warning("IMAGES = %s", data["images"])
 
     return data
 

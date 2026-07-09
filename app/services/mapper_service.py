@@ -590,24 +590,45 @@ def _normalize_ego_address(raw: dict[str, Any]) -> tuple[Address, str | None]:
         (Address, region_fallback) where region_fallback equals city when no
         explicit district is available (EGO often omits the district level).
     """
+    # 1. Extração base obtida dos seletores específicos do parser (Ex: o HTML do EscolhaCerta)
     region = _truncate_text(raw.get("district") or None, 100)
     city = _truncate_text(raw.get("county") or None, 100)
     area_parish = _truncate_text(raw.get("parish") or None, 100)
     location_raw = _normalize_whitespace(raw.get("location") or "") or ""
 
-    if not city and location_raw:
-        parts = [p.strip() for p in location_raw.split(">")]
-        if len(parts) >= 3:
-            region = _truncate_text(parts[0] or None, 100)
-            city = _truncate_text(parts[1] or None, 100)
-            if not area_parish:
-                area_parish = _truncate_text(parts[-1] or None, 100)
+    # Se a extração direta falhar mas tivermos uma string de localização unificada
+    if location_raw:
+        if ">" in location_raw:
+            # Fluxo padrão EGO: Separação por ">"
+            parts = [p.strip() for p in location_raw.split(">") if p.strip()]
+            if len(parts) >= 3:
+                region = region or _truncate_text(parts[0], 100)
+                city = city or _truncate_text(parts[1], 100)
+                if not area_parish:
+                    area_parish = _truncate_text(parts[-1], 100)
+            else:
+                city = city or _truncate_text(parts[0], 100)
+                if len(parts) > 1 and not area_parish:
+                    area_parish = _truncate_text(parts[-1], 100)
         else:
-            city = _truncate_text(parts[0] or None, 100)
-            if len(parts) > 1 and not area_parish:
-                area_parish = _truncate_text(parts[-1] or None, 100)
+            # 2. ALGORITMO FALLBACK: Para padrões com vírgulas comuns em Portugal: "Freguesia, Concelho, Distrito"
+            parts = [p.strip() for p in location_raw.split(",") if p.strip()]
+            
+            if len(parts) >= 3:
+                # Se tiver 3 ou mais partes, assume de trás para a frente: [..., Freguesia, Concelho, Distrito]
+                region = region or _truncate_text(parts[-1], 100)
+                city = city or _truncate_text(parts[-2], 100)
+                area_parish = area_parish or _truncate_text(parts[-3], 100)
+            elif len(parts) == 2:
+                # Se tiver apenas 2 partes, assume: [Concelho, Distrito]
+                region = region or _truncate_text(parts[-1], 100)
+                city = city or _truncate_text(parts[-2], 100)
+            elif len(parts) == 1:
+                # Se for texto único isolado, assume-se como distrito e concelho temporários
+                region = region or _truncate_text(parts[0], 100)
+                city = city or _truncate_text(parts[0], 100)
 
-    # EGO often omits the district — fall back to city level as region
+    # EGO frequentemente omite o distrito — fall back para o nível de concelho (city) como região se necessário
     region_for_schema = region or city
 
     return Address(
@@ -618,33 +639,30 @@ def _normalize_ego_address(raw: dict[str, Any]) -> tuple[Address, str | None]:
         full_address=_truncate_text(location_raw, 500) or None,
     ), region_for_schema
 
-
 def normalize_ego_platform_payload(raw: dict[str, Any], source_partner: str) -> PropertySchema:
     """Normalize an EGO RealEstate platform payload into canonical PropertySchema.
 
-    Shared by all EGO-based partners (t2mais1, imobiliariaprp, …).
-    To register a new EGO partner add one line to the Partner Normalizers section:
-
-        @partner_normalizer("new_partner")
-        def normalize_new_partner_payload(raw: dict[str, Any]) -> PropertySchema:
-            return normalize_ego_platform_payload(raw, "new_partner")
+    Shared by all EGO-based partners (t2mais1, imobiliariaprp, escolhacerta, ...).
     """
     useful_area = parse_area(raw.get("area") or raw.get("useful_area"))
     gross_area = parse_area(raw.get("gross_area"))
 
-    # EGO injects a "Ref. " text prefix — strip it
+    # EGO injeta um prefixo de texto "Ref. " — removemos aqui
     partner_id: str | None = raw.get("property_id") or raw.get("reference")
     if partner_id and isinstance(partner_id, str):
         partner_id = _EGO_REF_PATTERN.sub("", partner_id).strip() or None
-        # partner_id = _EGO_REF_PATTERN.search(partner_id).strip() or None   
-    # Infer property type from title when not explicitly scraped
-    title = raw.get("title") or ""
-    property_type = (
-        raw.get("property_type")
-        or _infer_property_type_from_title(title, _EGO_PROPERTY_TYPES)
-    )
-    # Fallback: typology codes in title → Apartamento / Moradia
+         
+    raw_property_type = raw.get("property_type") or raw.get("natureza")
+    property_type = _normalize_whitespace(raw_property_type) if raw_property_type else None
+         
+    # 2. O FALLBACK SÓ ENTRA EM AÇÃO SE O CORE REALMENTE FALHAR (ex: se o HTML não tiver a tabela de detalhes)
     if not property_type:
+        title = raw.get("title") or ""
+        property_type = _infer_property_type_from_title(title, _EGO_PROPERTY_TYPES)
+    
+    # Fallback secundário baseado em tokens de tipologia (T3/V4) no título
+    if not property_type:
+        title = raw.get("title") or ""
         if re.search(r"\bT\d+\b", title, re.IGNORECASE):
             property_type = "Apartamento"
         elif re.search(r"\bV\d+\b", title, re.IGNORECASE):
@@ -665,7 +683,6 @@ def normalize_ego_platform_payload(raw: dict[str, Any], source_partner: str) -> 
         floor=raw.get("floor"),
         construction_year=parse_int(raw.get("construction_year")),
     )
-
 
 # ═══════════════════════════════════════════════════════════
 # Partner Normalizers

@@ -71,7 +71,7 @@ class Listing(Base):
     has_pool: Mapped[bool | None] = mapped_column(Boolean)
 
     # Building info
-    energy_certificate: Mapped[str | None] = mapped_column(String(20), comment="A+, A, B, B-, C, D, E, F, Isento")
+    energy_certificate: Mapped[str | None] = mapped_column(String(50), comment="A+, A, B, B-, C, D, E, F, Isento")
     construction_year: Mapped[int | None] = mapped_column(Integer)
 
     # Contact

@@ -81,7 +81,7 @@ class ListingBase(BaseModel):
     bathrooms: int | None = Field(None, ge=0)
     floor: str | None = Field(None, description="Floor label (e.g. '3', 'R/C', 'último').")
     construction_year: int | None = Field(None, ge=1800, description="Year of construction.")
-    energy_certificate: str | None = Field(None, max_length=20, description="Energy certificate rating (e.g. A+, A, B, C, Isento).")
+    energy_certificate: str | None = Field(None, max_length=50, description="Energy certificate rating (e.g. A+, A, B, C, Isento).")
 
     # ── Pricing ───────────────────────────────────────────────────────────
     price_amount: Decimal | None = Field(None, ge=0)

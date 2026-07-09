@@ -131,17 +131,7 @@ async def run_scrape_job(job_id: str) -> None:
 
             job.mark_running()
             await db.commit()
-            logger.warning(
-    "SITE_CONFIG image_filter = %r (%s)",
-    site_config.image_filter,
-    type(site_config.image_filter),
-)
 
-            logger.warning(
-    "SITE_CONFIG image_exclude_filter = %r (%s)",
-    site_config.image_exclude_filter,
-    type(site_config.image_exclude_filter),
-)
             await _run_scrape_async(
                 db=db,
                 job_id=str(job.id),
@@ -242,15 +232,7 @@ async def _run_scrape_async(
             full_selectors["image_filter"] = image_filter
         if image_exclude_filter:
             full_selectors["image_exclude_filter"] = image_exclude_filter
-        logger.warning(
-            "FULL_SELECTORS id=%s image_filter=%r",
-            id(full_selectors),
-            full_selectors.get("image_filter"),
-        )
-        logger.warning(
-        "FULL_SELECTORS image_exclude_filter = %r",
-        full_selectors.get("image_exclude_filter"),
-    )
+
         current_url = start_url
         pages_visited = 0
         listings_found = 0
@@ -345,11 +327,7 @@ async def _run_scrape_async(
             for link in new_links:
                 if await _check_job_cancelled(db, job_id):
                     break
-                logger.warning(
-    "BEFORE CALL id=%s filter=%r",
-    id(full_selectors),
-    full_selectors.get("image_filter"),
-)    
+
                 scraped, errored, warned, is_new = await _process_listing_url(
                     db, job, job_id, site_key, scraper, link, full_selectors, extraction_mode
                 )
@@ -566,11 +544,6 @@ async def _process_listing_url(
 
     O caller é responsável por chamar job.update_progress() com os contadores actualizados.
     """
-    logger.warning(
-    "INSIDE CALL id=%s filter=%r",
-    id(full_selectors),
-    full_selectors.get("image_filter"),
-)
     try:
         detail_html = await _fetch_html(scraper, link)
         if not detail_html:
@@ -579,10 +552,6 @@ async def _process_listing_url(
             job.touch_heartbeat()
             await db.commit()
             return False, False, True, False
-        logger.warning(
-            "PROCESS selectors image_filter = %r",
-            full_selectors.get("image_filter"),
-        )
 
         raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
 
@@ -684,7 +653,7 @@ async def _persist_listing_with_postgres_upsert(
 
         if inserted_id is not None:
             await _replace_media_assets(db, inserted_id, schema)
-            # await db.commit()  <--- ELIMINAT: Permet que ho controli el cridador
+
             return True
 
         logger.info("Listing insert raced for %s; reloading winner", source_url)
@@ -728,7 +697,7 @@ async def _persist_listing_with_postgres_upsert(
     existing.scrape_job_id = UUID(job_id)
 
     await _replace_media_assets(db, existing.id, schema)
-    # await db.commit()  <--- ELIMINAT: Centralitzat a la funció principal
+
     return False
 
 
@@ -774,7 +743,6 @@ async def _persist_listing_legacy(
         existing.updated_at = datetime.now(timezone.utc)
         existing.scrape_job_id = UUID(job_id)
         await _replace_media_assets(db, existing.id, schema)
-        # await db.commit()  <--- ELIMINAT
         return False
 
     else:
@@ -783,7 +751,6 @@ async def _persist_listing_legacy(
         await db.flush()  # Flush necessari per obtenir l'ID abans d'afegir fitxers multimèdia
 
         await _replace_media_assets(db, listing.id, schema)
-        # await db.commit()  <--- ELIMINAT
         return True
 
 
@@ -821,7 +788,7 @@ async def _delete_missing_listings(
     discovered_urls: set[str],
     *,
     min_discovered: int = 10,
-    max_delete_ratio: float = 0.30,
+    max_delete_ratio: float = 0.40,
 ) -> int:
     """Hard delete listings for this partner that were not seen in this crawl.
 

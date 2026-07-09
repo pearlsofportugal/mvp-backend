@@ -31,6 +31,7 @@ from app.schemas.imodigi_schema import (
 from app.services.bulk_job_store import create_job, get_job
 from app.services.email_service import send_imodigi_notification
 from app.services.imodigi_service import (
+    build_crm_reference_lookup,
     export_listing_to_crm,
     get_catalog_values,
     get_export_record,
@@ -309,6 +310,11 @@ async def publish_listing(
 
     Uses settings.imodigi_client_id by default; pass `client_id` in the body
     to override per-request.
+
+    NOTE: this manual single-listing endpoint intentionally does NOT perform
+    CRM reconciliation (see build_crm_reference_lookup) — that check is only
+    applied to the automated Cloud Scheduler sync path (trigger_imodigi_sync)
+    and the bulk export job, to keep this endpoint fast for interactive use.
     """
     client_id = payload.client_id or settings.imodigi_client_id
     if not client_id:
@@ -371,6 +377,11 @@ async def reset_publications(
 
     - Pass ``listing_ids`` to reset specific listings.
     - Pass an **empty list** to reset **all** export records.
+
+    NOTE: after a reset, the next automated Cloud Scheduler sync run will still
+    catch listings that actually still exist in the CRM under the same
+    partner_id, thanks to the reconciliation lookup in trigger_imodigi_sync —
+    it will PATCH instead of creating a duplicate.
     """
     count = await reset_export_records(db, payload.listing_ids)
     scope = f"{len(payload.listing_ids)} listing(s)" if payload.listing_ids else "all listings"
@@ -477,6 +488,13 @@ async def trigger_imodigi_sync(
 ):
     """Chamado pelo Cloud Scheduler — exporta listings pendentes para o Imodigi.
 
+    Antes de exportar, sincroniza o estado actual do CRM com UMA única chamada
+    a GET /crm-properties.php (ver build_crm_reference_lookup) e usa esse
+    lookup para reconciliar listings que já existem no CRM mas não têm ligação
+    local em imodigi_exports (nunca foram exportados por este sistema, ou o
+    registo foi apagado via /publications/reset). Sem isto, o sistema criaria
+    um duplicado no CRM em vez de actualizar o imóvel existente.
+
     Bloqueia até conclusão para que o Cloud Run mantenha CPU activo.
     Igual ao padrão de trigger_scheduled_job em scrape_jobs.py.
     """
@@ -517,6 +535,16 @@ async def trigger_imodigi_sync(
             request,
         )
 
+    # ── Reconciliação CRM — uma única chamada para toda a corrida ──────────
+    # Evita criar propriedades duplicadas quando um imóvel já existe no CRM
+    # (ex: criado directamente lá, ou o registo local foi resetado) mas o
+    # crawler também o descobriu de forma independente.
+    crm_lookup = await build_crm_reference_lookup(client_id)
+    logger.info(
+        "Imodigi sync: %d propriedades no CRM indexadas para reconciliação (client_id=%s)",
+        len(crm_lookup), client_id,
+    )
+
     success = 0
     failed = 0
     errors: list[str] = []
@@ -525,7 +553,9 @@ async def trigger_imodigi_sync(
 
     for lid in listing_ids:
         try:
-            _, action = await export_listing_to_crm(db, lid, client_id)
+            _, action = await export_listing_to_crm(
+                db, lid, client_id, crm_lookup=crm_lookup
+            )
             success += 1
             if action == "created":
                 created += 1

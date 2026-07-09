@@ -227,32 +227,46 @@ async def search_locations(
     )
 
 
-# async def create_property(
-#     client_id: int,
-#     property_payload: dict[str, Any],
-#     *,
-#     images: list[str] | None = None,
-#     translations: dict[str, Any] | None = None,
-# ) -> dict[str, Any]:
-#     """POST /crm-properties.php — create a new property. Returns full response body."""
-#     return await imodigi_adapter.create_property(client_id, property_payload, images=images, translations=translations)
-
-
-# async def update_property(
-#     client_id: int,
-#     imodigi_property_id: int,
-#     property_payload: dict[str, Any],
-#     *,
-#     images: list[str] | None = None,
-#     translations: dict[str, Any] | None = None,
-# ) -> dict[str, Any]:
-#     """PATCH /crm-properties.php — update an existing property."""
-#     return await imodigi_adapter.update_property(client_id, imodigi_property_id, property_payload, images=images, translations=translations)
-
 async def get_property(client_id: int) -> list[dict[str, Any]]:
     """GET /crm-properties.php — list all properties published for a given client."""
 
     return await imodigi_adapter.get_property(client_id)
+
+
+# ─────────────────────────── CRM reconciliation ──────────────────────────
+
+async def build_crm_reference_lookup(client_id: int) -> dict[str, int]:
+    """Fetch all CRM properties for client_id, indexed by reference (= partner_id).
+
+    Used by the automated Cloud Scheduler sync to reconcile listings that exist
+    both in the CRM and locally but have no local imodigi_exports link (never
+    exported via this system, or the export record was reset). Without this
+    check, export_listing_to_crm would blindly POST a new property and create
+    a duplicate in the CRM.
+
+    Only ONE call is made per sync run — the resulting dict is reused across
+    every listing in the batch, so this does not add per-listing API overhead.
+
+    Returns an empty dict on failure — callers fall back to the previous
+    create-without-check behaviour rather than aborting the whole sync run
+    because the reconciliation lookup could not be fetched.
+    """
+    try:
+        properties = await imodigi_adapter.get_property(client_id)
+    except ImodigiError as exc:
+        logger.warning(
+            "Could not fetch CRM properties for reconciliation (client_id=%s): %s. "
+            "Falling back to create-without-check for this run.",
+            client_id, exc,
+        )
+        return {}
+
+    return {
+        p["reference"]: p["property_id"]
+        for p in properties
+        if p.get("reference") and p.get("property_id") is not None
+    }
+
 
 async def export_listing(listing, *, client_id, existing_imodigi_id):
     payload = build_property_payload(listing)
@@ -280,12 +294,21 @@ async def export_listing_to_crm(
     db: AsyncSession,
     listing_id: UUID,
     client_id: int,
+    *,
+    crm_lookup: dict[str, int] | None = None,
 ) -> tuple[ImodigiExport, str]:
     """Full export workflow: fetch listing, call Imodigi API, persist record.
 
     Returns (export_record, action) where action is 'created' or 'updated'.
     Raises NotFoundError if the listing does not exist.
     On ImodigiError, persists the failure record before re-raising.
+
+    When crm_lookup is provided (see build_crm_reference_lookup), a listing
+    without a local export link is checked against it before deciding to
+    create: if its partner_id already exists in the CRM, this is treated as
+    an update instead of blindly creating a duplicate property. This is used
+    by the automated Cloud Scheduler sync path only — the manual single-listing
+    publish endpoint does not pass crm_lookup and keeps its original behaviour.
     """
     listing = (
         await db.execute(
@@ -300,6 +323,19 @@ async def export_listing_to_crm(
     existing = await ImodigiRepository.get_export_by_listing_id(db, listing_id)
     existing_imodigi_id = existing.imodigi_property_id if existing else None
 
+    # ── Reconciliation guard ────────────────────────────────────────────
+    # No local link, but the CRM already has this partner_id? Don't create
+    # a duplicate — treat it as the same property and update it instead.
+    if existing_imodigi_id is None and crm_lookup and listing.partner_id:
+        crm_property_id = crm_lookup.get(listing.partner_id)
+        if crm_property_id is not None:
+            existing_imodigi_id = crm_property_id
+            logger.info(
+                "Imodigi reconciliation: listing %s (partner_id=%s) already exists "
+                "in CRM as property_id=%s — updating instead of creating",
+                listing_id, listing.partner_id, crm_property_id,
+            )
+
     try:
         imodigi_id, imodigi_ref, action = await export_listing(
             listing,
@@ -311,11 +347,15 @@ async def export_listing_to_crm(
             db,
             listing_id=listing_id,
             imodigi_property_id=imodigi_id,
-            imodigi_reference=imodigi_ref or (existing.imodigi_reference if existing else None),
+            imodigi_reference=(
+                imodigi_ref
+                or (existing.imodigi_reference if existing else None)
+                or listing.partner_id
+            ),
             imodigi_client_id=client_id,
             status=status,
             last_error=None,
-            partner_id=listing.partner_id,   # ✅
+            partner_id=listing.partner_id,
         )
         await db.commit()
         await db.refresh(export_record)
@@ -330,7 +370,7 @@ async def export_listing_to_crm(
             imodigi_client_id=client_id,
             status="failed",
             last_error=str(exc),
-            partner_id=listing.partner_id,   # ✅ também no path de falha
+            partner_id=listing.partner_id,
         )
         await db.commit()
         raise
@@ -425,7 +465,13 @@ async def run_bulk_imodigi_job(
     source_partner: str | None = None,
     is_enriched: bool | None = None,
 ) -> None:
-    """Background task: export listings to Imodigi and update job progress in-store."""
+    """Background task: export listings to Imodigi and update job progress in-store.
+
+    Fetches the CRM property list ONCE at the start of the batch and reuses it
+    for every listing (see build_crm_reference_lookup) to avoid creating
+    duplicate CRM properties for listings that already exist there but lack
+    a local imodigi_exports link.
+    """
     from datetime import datetime, timezone
 
     from app.database import async_session_factory
@@ -436,6 +482,13 @@ async def run_bulk_imodigi_job(
         logger.error("run_bulk_imodigi_job: job %s not found in store", job_id)
         return
 
+    # Fetch CRM state ONCE for the whole batch — avoids N extra API calls.
+    crm_lookup = await build_crm_reference_lookup(client_id)
+    logger.info(
+        "run_bulk_imodigi_job %s: %d propriedades no CRM indexadas para reconciliação (client_id=%s)",
+        job_id, len(crm_lookup), client_id,
+    )
+
     done = 0
     failed = 0
     results = []
@@ -443,7 +496,9 @@ async def run_bulk_imodigi_job(
     for lid in listing_ids:
         try:
             async with async_session_factory() as db:
-                export_record, action = await export_listing_to_crm(db, lid, client_id)
+                export_record, action = await export_listing_to_crm(
+                    db, lid, client_id, crm_lookup=crm_lookup
+                )
             job.done += 1
             done += 1
             results.append({

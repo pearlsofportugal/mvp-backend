@@ -166,7 +166,16 @@ _DEFAULT_SOLD_KEYWORDS = (
 _SELF_LABELING_KEYS: frozenset[str] = frozenset({
     "venda", "arrendamento", "trespasse", "sale", "rent",
 })
-
+_ENERGY_CERT_EXEMPT_PATTERN = re.compile(
+    r"^\s*(?:n/?a\.?|isento|n\.?d\.?|não\s+aplic[aá]vel|nao\s+aplicavel|"
+    r"não\s+dispon[ií]vel|nao\s+disponivel|not\s+applicable|exempt|--?)\s*$",
+    re.IGNORECASE,
+)
+_ENERGY_CERT_CONTEXT_PATTERN = re.compile(
+    r"(?:certificado|certifica(?:\u00e7\u00e3o|cao)|classe)\s+energ(?:\u00e9tico|etico|\u00e9tica|etica)|"
+    r"energy\s+(?:certificate|class)",
+    re.IGNORECASE,
+)
 
 def _get_summary_field_map() -> dict[str, str]:
     """Return the summary field map, preferring DB-loaded mappings when available."""
@@ -177,7 +186,15 @@ def _get_summary_field_map() -> dict[str, str]:
     # Merge: DB map wins; static summary map fills in keys absent from DB
     merged = {**_SUMMARY_FIELD_MAP, **db_map}
     return merged
-
+def _is_energy_cert_exempt(value: str | None, classes: list[str] | None = None) -> bool:
+    """True quando o valor ou elemento HTML representa 'sem certificado' ou 'isento'."""
+    if classes:
+        class_set = {c.lower() for c in classes}
+        if class_set & {"na", "not-applicable", "noenergyclass", "no-energy"}:
+            return True
+    if value and _ENERGY_CERT_EXEMPT_PATTERN.match(value.strip()):
+        return True
+    return False
 
 async def _load_field_mappings() -> None:
     """Load field mappings from DB with caching."""
@@ -803,22 +820,38 @@ def _print_selector_debug(
 
 def _extract_energy_certificate_value(raw_value: str) -> str | None:
     """Normalize energy certificate text to the expected rating token."""
-    match = re.search(r"\b([A-G])\b", raw_value, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
+    stripped = raw_value.strip()
 
-    compact = raw_value.strip().upper()
+    # Interceciona "N/A", "Isento", etc. antes que o regex extraia a letra "A"
+    if _is_energy_cert_exempt(stripped):
+        return None
+
+    compact = re.sub(r"\s+", "", stripped.upper())
     if compact in {"A+", "A", "B", "B-", "C", "D", "E", "F", "G"}:
         return compact
+
+    # A description may mention an energy class, but an arbitrary isolated
+    # letter is not evidence of one (e.g. Portuguese "a" in normal prose).
+    if not _ENERGY_CERT_CONTEXT_PATTERN.search(stripped):
+        return None
+
+    match = re.search(r"\b([A-G](?:[+-])?)(?![A-Z0-9])", stripped, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
 
     return None
 
 
 def _extract_element_value(el: Tag, field: str | None = None) -> str:
     """Extract a meaningful value from text, attributes, or nested images."""
+    if field == "energy_certificate" and _is_energy_cert_exempt(None, el.get("class")):
+        return "Unavailable"
+
     text = el.get_text(" ", strip=True)
     if text:
         if field == "energy_certificate":
+            if _is_energy_cert_exempt(text):
+                return text
             normalized = _extract_energy_certificate_value(text)
             if normalized:
                 return normalized
@@ -829,6 +862,8 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
         if value and str(value).strip():
             normalized_value = str(value).strip()
             if field == "energy_certificate":
+                if _is_energy_cert_exempt(normalized_value):
+                    return normalized_value
                 normalized = _extract_energy_certificate_value(normalized_value)
                 return normalized or normalized_value
             return normalized_value
@@ -842,6 +877,8 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
 
             normalized_value = str(value).strip()
             if field == "energy_certificate":
+                if _is_energy_cert_exempt(normalized_value):
+                    return normalized_value
                 normalized = _extract_energy_certificate_value(normalized_value)
                 if normalized:
                     return normalized
@@ -853,7 +890,6 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
             return normalized_value
 
     # EgoRealEstate: energy class encoded as CSS class on <i> tag
-    # e.g. <i class="energyClass APlus"> → "A+",  <i class="energyClass C"> → "C"
     if field == "energy_certificate":
         target = el if el.name == "i" else el.select_one("i[class*='energyClass']")
         if target:

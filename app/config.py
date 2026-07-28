@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     request_timeout: int = 120
     playwright_timeout: int = 60
     scrape_job_stale_after_seconds: int = 300
+    job_dispatch_mode: Literal["local", "cloud_tasks"] = "local"
+    cloud_tasks_project: str = ""
+    cloud_tasks_location: str = "europe-west1"
+    cloud_tasks_queue: str = "scrape-jobs"
+    worker_dispatch_url: str = ""
+    worker_dispatch_token: str = ""
+    worker_dispatch_service_account: str = ""
+    cloud_run_scrape_job_name: str = ""
     export_max_rows: int = 5000
 
     # Imodigi CRM integration

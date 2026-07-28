@@ -16,6 +16,23 @@ from app.services.mapper_service import (
 )
 
 
+from app.core.normalizer import normalize_energy_certificate
+
+
+class TestNormalizeEnergyCertificate:
+    @pytest.mark.parametrize(("raw_value", "property_type", "expected"), [
+        (None, "Terreno", "Exempted"),
+        (None, "Lote de terreno", "Exempted"),
+        ("A+", "Apartamento", "A+"),
+        ("B -", "Moradia", "B-"),
+        ("Isento", "Moradia", "Exempted"),
+        ("N/A", "Moradia", "Unavailable"),
+        (None, "Moradia", "Unavailable"),
+    ])
+    def test_normalizes_ratings_and_missing_certificates(self, raw_value, property_type, expected):
+        assert normalize_energy_certificate(raw_value, property_type) == expected
+
+
 class TestParsePrice:
     def test_standard_euro(self):
         amount, currency = parse_price("250 000 €")
@@ -35,7 +52,7 @@ class TestParsePrice:
         assert parse_price(None) == (None, None)
 
     def test_no_number(self):
-        assert parse_price("Price on request") == (None, None)
+        assert parse_price("Price on request") == (Decimal("-1"), None)
 
     def test_usd(self):
         amount, currency = parse_price("$500,000")

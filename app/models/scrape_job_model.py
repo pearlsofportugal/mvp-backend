@@ -50,6 +50,11 @@ class ScrapeJob(Base):
         comment='{"found": [], "scraped": [], "failed": []}',
     )
     error_message: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True)
+    execution_id: Mapped[str | None] = mapped_column(String(512))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Timestamps
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -74,6 +79,7 @@ class ScrapeJob(Base):
         self.error_message = None
         self.cancel_requested_at = None
         self.last_heartbeat_at = now
+        self.attempt_count += 1
         self.progress = {
             "pages_visited": 0,
             "listings_found": 0,

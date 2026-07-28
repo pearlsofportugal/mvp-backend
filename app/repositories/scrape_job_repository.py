@@ -16,6 +16,12 @@ class ScrapeJobRepository:
         ).scalar_one_or_none()
 
     @staticmethod
+    async def get_by_idempotency_key(db: AsyncSession, key: str) -> ScrapeJob | None:
+        return (
+            await db.execute(select(ScrapeJob).where(ScrapeJob.idempotency_key == key))
+        ).scalar_one_or_none()
+
+    @staticmethod
     async def has_active_job(db: AsyncSession, site_key: str) -> bool:
         """Return True if there is a running or pending job for the given site_key."""
         result = await db.execute(

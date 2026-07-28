@@ -24,7 +24,8 @@ from app.schemas.base_schema import ApiResponse
 from app.schemas.scrape_job_schema import JobCreate, JobListRead, JobRead
 from app.repositories.site_config_repository import SiteConfigRepository
 from app.services.scrape_job_service import ScrapeJobService
-from app.services.scraper_service import run_scrape_job
+from app.services.job_dispatcher_service import dispatch_scrape_job
+from app.services.scrape_job_event_service import list_events
 
 router = APIRouter()
 
@@ -47,7 +48,7 @@ async def create_job(
 ):
     """Launch a new scrape job. Runs in background (MVP: one job at a time per worker)."""
     job = await ScrapeJobService.create_job(db, payload)
-    background_tasks.add_task(run_scrape_job, str(job.id))
+    await dispatch_scrape_job(db, job, background_tasks)
     return ok(JobRead.model_validate(job), "Job created successfully", request)
 
 
@@ -115,9 +116,35 @@ async def trigger_scheduled_job(
     payload = JobCreate(site_key=site_key, start_url=start_url, max_pages=max_pages)
     job = await ScrapeJobService.create_job(db, payload)
     
-    await run_scrape_job(str(job.id))
+    await dispatch_scrape_job(db, job)
 
-    return ok(JobRead.model_validate(job), "Scheduled job executed and completed successfully", request)
+    return ok(JobRead.model_validate(job), "Scheduled job dispatched successfully", request)
+
+
+@router.get("/{job_id}/events", response_model=ApiResponse[list[dict]], responses=ERROR_RESPONSES)
+async def get_job_events(
+    job_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+):
+    """Return append-only operational events for a scrape job."""
+    await ScrapeJobService.get_job(db, job_id)
+    events, total = await list_events(db, job_id, page, page_size)
+    return ok(
+        [
+            {
+                "id": str(event.id), "type": event.event_type, "level": event.level,
+                "message": event.message, "url": event.url, "data": event.data,
+                "created_at": event.created_at.isoformat(),
+            }
+            for event in events
+        ],
+        "Job events retrieved",
+        request,
+        meta={"page": page, "page_size": page_size, "total": total},
+    )
 
 # ---------------------------------------------------------------------------
 # SSE — Server-Sent Events

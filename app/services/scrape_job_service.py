@@ -16,6 +16,11 @@ class ScrapeJobService:
 
     @staticmethod
     async def create_job(db: AsyncSession, payload: JobCreate) -> ScrapeJob:
+        if payload.idempotency_key:
+            existing = await ScrapeJobRepository.get_by_idempotency_key(db, payload.idempotency_key)
+            if existing:
+                return existing
+
         if await ScrapeJobRepository.has_active_job(db, payload.site_key):
             raise JobAlreadyRunningError(
                 f"A scrape job for site '{payload.site_key}' is already running or pending."
@@ -32,6 +37,7 @@ class ScrapeJobService:
             max_pages=payload.max_pages,
             status="pending",
             config=payload.config.model_dump() if payload.config else None,
+            idempotency_key=payload.idempotency_key,
             progress={"pages_visited": 0, "listings_found": 0, "listings_scraped": 0, "errors": 0},
         )
         return await ScrapeJobRepository.create(db, job)

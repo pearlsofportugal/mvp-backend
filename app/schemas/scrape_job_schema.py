@@ -52,6 +52,10 @@ class JobCreate(BaseModel):
     start_url: str = Field(..., description="URL to begin scraping from.", json_schema_extra={"format": "uri"})
     max_pages: int = Field(10, ge=1, le=500, description="Maximum number of listing pages to scrape.")
     config: JobConfig | None = Field(None, description="Optional runtime configuration overrides.")
+    idempotency_key: str | None = Field(
+        None, min_length=1, max_length=128,
+        description="Optional client key. Retried requests with the same key return the original job.",
+    )
 
     @field_validator("start_url")
     @classmethod
@@ -160,6 +164,10 @@ class JobRead(BaseModel):
                 flat.append({**entry, "level": level})
         return flat
     error_message: str | None = Field(None, description="Terminal error message when status='failed'.")
+    execution_id: str | None = None
+    attempt_count: int = 0
+    dispatch_attempts: int = 0
+    dispatched_at: datetime | None = None
     started_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
     cancel_requested_at: datetime | None = None
@@ -181,6 +189,8 @@ class JobListRead(BaseModel):
     site_key: str
     status: JobStatus
     progress: JobProgress | None = None
+    attempt_count: int = 0
+    dispatch_attempts: int = 0
     started_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
     cancel_requested_at: datetime | None = None

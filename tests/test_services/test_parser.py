@@ -7,7 +7,26 @@ from app.services.parser_service import (
     parse_listing_page,
     _parse_images,
     _parse_seo,
+    _extract_energy_certificate_value,
 )
+
+
+class TestEnergyCertificateExtraction:
+    def test_does_not_infer_a_rating_from_arbitrary_description_text(self):
+        assert _extract_energy_certificate_value(
+            "Terreno com acesso a estrada e boa exposição solar."
+        ) is None
+
+    @pytest.mark.parametrize(("raw_value", "expected"), [
+        ("A+", "A+"),
+        ("B-", "B-"),
+        ("Certificado energético: A+", "A+"),
+        ("Classe energética B-", "B-"),
+        ("Isento", None),
+        ("N/A", None),
+    ])
+    def test_extracts_only_explicit_or_standalone_ratings(self, raw_value, expected):
+        assert _extract_energy_certificate_value(raw_value) == expected
 
 
 class TestParseListingLinks:

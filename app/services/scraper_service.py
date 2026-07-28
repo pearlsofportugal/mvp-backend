@@ -41,6 +41,7 @@ from app.services.playwright_scraper import PlaywrightScraper
 from app.services.mapper_service import normalize_partner_payload, schema_to_listing_dict
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
 from app.services.sitemap_service import fetch_sitemap_urls
+from app.services.scrape_job_event_service import record_event
 
 logger = get_logger(__name__)
 
@@ -69,7 +70,7 @@ async def recover_stale_jobs(db: AsyncSession) -> int:
     A job with a recent heartbeat is alive on another instance — leave it alone.
     A job with no heartbeat at all (never started) is always considered stale.
     """
-    STALE_THRESHOLD_SECONDS = 120
+    STALE_THRESHOLD_SECONDS = settings.scrape_job_stale_after_seconds
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_THRESHOLD_SECONDS)
 
     stale_jobs = (
@@ -130,6 +131,7 @@ async def run_scrape_job(job_id: str) -> None:
                 return
 
             job.mark_running()
+            await record_event(db, job.id, "started", "Scrape worker started")
             await db.commit()
 
             await _run_scrape_async(
@@ -159,6 +161,7 @@ async def run_scrape_job(job_id: str) -> None:
                 job = result.scalar_one_or_none()
                 if job and job.status == "running":
                     job.mark_failed(str(e))
+                    await record_event(db, job.id, "failed", str(e), level="error")
                     await db.commit()
             except Exception:
                 logger.exception("Failed to mark job %s as failed during recovery", job_id)
@@ -859,10 +862,12 @@ async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
     if job and job.status == "running":
         if job.cancel_requested_at is not None:
             job.mark_cancelled()
+            await record_event(db, job.id, "cancelled", "Scrape job cancelled")
             logger.info("Job %s cancelled successfully", job.id)
         else:
             await _update_site_confidence_scores(db, job.site_key, job.id)
             job.mark_completed()
+            await record_event(db, job.id, "completed", "Scrape job completed", data=job.progress)
             logger.info("Job %s completed successfully", job.id)
             await send_job_notification(
                 site_key=job.site_key,
@@ -917,6 +922,7 @@ async def _fail_job(db: AsyncSession, job: ScrapeJob, error: str) -> None:
         await db.refresh(job)
         if job.status == "running":
             job.mark_failed(error)
+            await record_event(db, job.id, "failed", error, level="error")
             await db.commit()
             logger.error("Job %s failed: %s", job.id, error)
             await send_job_notification(

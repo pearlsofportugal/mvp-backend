@@ -24,6 +24,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
 from app.schemas.property_schema import (
@@ -561,7 +562,10 @@ media=[
             "pt": _normalize_description_text(raw_description),
         }.items() if v},
         seo=seo or None,
-        energy_certificate=raw.get("energy_certificate"),
+        energy_certificate=normalize_energy_certificate(
+            raw.get("energy_certificate"),
+            property_type,
+        ),
         advertiser=advertiser,
         contacts=contacts,
         raw_partner_payload=raw_partner_payload if raw_partner_payload is not None else raw,

@@ -17,6 +17,7 @@ from app.api.v1.imodigi import router as imodigi_router
 from app.api.v1.listings import router as listings_router
 from app.api.v1.scrape_jobs import router as jobs_router
 from app.api.v1.sites import router as sites_router
+from app.api.internal import router as internal_router
 from app.config import settings
 from app.core.exceptions import (
     AppException,
@@ -272,6 +273,7 @@ def create_app() -> FastAPI:
         tags=["dashboard"],
         dependencies=auth_dependencies,
     )
+    application.include_router(internal_router, prefix="/internal", tags=["internal"])
 
     # ── Public endpoints ───────────────────────────────────────────────────
 

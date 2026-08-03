@@ -3,6 +3,7 @@
 Services interact only with GeminiAdapter; no service imports google.genai directly.
 """
 import json
+import time
 from threading import Lock
 from typing import Any
 
@@ -14,6 +15,9 @@ logger = get_logger(__name__)
 
 _client: Any = None
 _client_lock = Lock()
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 
 
 def _get_client() -> Any:
@@ -75,22 +79,37 @@ class GeminiAdapter:
         """
         client = _get_client()
         temp = temperature if temperature is not None else settings.google_genai_temperature
-        try:
-            response = client.models.generate_content(
-                model=settings.google_genai_model,
-                config={
-                    "system_instruction": system_instruction,
-                    "temperature": temp,
-                    "response_mime_type": "application/json",
-                },
-                contents=prompt,
-            )
-            return _extract_json(str(response.text))
-        except EnrichmentError:
-            raise
-        except Exception as exc:
-            logger.exception("Gemini generate_content failed")
-            raise EnrichmentError("Failed to generate AI output", detail=str(exc)) from exc
+
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = client.models.generate_content(
+                    model=settings.google_genai_model,
+                    config={
+                        "system_instruction": system_instruction,
+                        "temperature": temp,
+                        "response_mime_type": "application/json",
+                    },
+                    contents=prompt,
+                )
+                # A malformed/non-JSON response is also worth retrying — the
+                # model is non-deterministic, so a fresh attempt may well
+                # produce valid JSON even though nothing else changed.
+                return _extract_json(str(response.text))
+            except EnrichmentError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    delay = _RETRY_BACKOFF_SECONDS[attempt]
+                    logger.warning(
+                        "Gemini generate_content failed (attempt %d/%d): %s — retrying in %.1fs",
+                        attempt + 1, _MAX_RETRIES, exc, delay,
+                    )
+                    time.sleep(delay)
+
+        logger.exception("Gemini generate_content failed after %d attempts", _MAX_RETRIES, exc_info=last_exc)
+        raise EnrichmentError("Failed to generate AI output", detail=str(last_exc)) from last_exc
 
 
 # Module-level singleton — services import this directly.

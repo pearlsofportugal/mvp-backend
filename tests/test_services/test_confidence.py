@@ -92,7 +92,14 @@ async def test_complete_job_persists_site_confidence_scores(db_session: AsyncSes
     ).scalar_one()
 
     assert persisted_job.status == "completed"
-    assert persisted_site.confidence_scores == {
+    # _update_site_confidence_scores always adds a `_meta` key alongside the
+    # per-field scores (job_id, sample_count, updated_at) — stripped out in
+    # SiteConfigRead and exposed separately as `confidence_meta`.
+    scores = dict(persisted_site.confidence_scores)
+    meta = scores.pop("_meta")
+    assert meta["job_id"] == str(job_id)
+    assert meta["sample_count"] == 1
+    assert scores == {
         "price": 1.0,
         "title": 1.0,
         "area": 1.0,

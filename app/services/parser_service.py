@@ -130,11 +130,14 @@ _DEFAULT_FEATURE_MAP = {
     "marquise": "balcony",
     "air conditioning": "air_conditioning",
     "ar condicionado": "air_conditioning",
+    "ar-condicionado": "air_conditioning",
     "a/c": "air_conditioning",
     "climatização": "air_conditioning",
     "pool": "swimming_pool",
     "piscina": "swimming_pool",
     "swimming": "swimming_pool",
+    "jardim": "garden",
+    "garden": "garden",
 }
 
 _SUMMARY_FIELD_MAP = {
@@ -180,8 +183,10 @@ _ENERGY_CERT_CONTEXT_PATTERN = re.compile(
 def _get_summary_field_map() -> dict[str, str]:
     """Return the summary field map, preferring DB-loaded mappings when available."""
     db_map = _get_field_map()
-    if db_map is _DEFAULT_FIELD_MAP:
-        # DB map not yet loaded or fallback — use the static summary map as-is
+    if db_map == _DEFAULT_FIELD_MAP:
+        # DB map not yet loaded or fallback (including the `.copy()` made on a
+        # DB-load failure, which is a distinct object but equal in value) —
+        # use the static summary map as-is.
         return _SUMMARY_FIELD_MAP
     # Merge: DB map wins; static summary map fills in keys absent from DB
     merged = {**_SUMMARY_FIELD_MAP, **db_map}
@@ -271,31 +276,53 @@ def invalidate_parser_cache():
 # Public Parsing Functions
 # ═══════════════════════════════════════════════════════════
 
+def extract_listing_links(
+    html: str,
+    base_url: str,
+    selectors: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Extract listing URLs and split them into matched vs rejected by the configured pattern."""
+    soup = BeautifulSoup(html, "lxml")
+    link_selector = selectors.get("listing_link_selector", "a")
+    link_pattern = selectors.get("listing_link_pattern")
+
+    matched: list[str] = []
+    rejected: list[str] = []
+    seen: set[str] = set()
+
+    for element in soup.select(link_selector):
+        href = element.get("href")
+        if not href:
+            onclick = element.get("onclick") or ""
+            match = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", onclick)
+            if match:
+                href = match.group(1)
+
+        if not href:
+            continue
+
+        absolute_url = urljoin(base_url, href)
+        if absolute_url in seen:
+            continue
+        seen.add(absolute_url)
+
+        if link_pattern and not re.search(link_pattern, absolute_url):
+            rejected.append(absolute_url)
+        else:
+            matched.append(absolute_url)
+
+    logger.info("Found %d matched listing links on page; %d rejected", len(matched), len(rejected))
+    return matched, rejected
+
+
 def parse_listing_links(
     html: str,
     base_url: str,
     selectors: dict[str, Any],
 ) -> list[str]:
     """Extract listing page URLs from a listing/search results page."""
-    soup = BeautifulSoup(html, "lxml")
-    link_selector = selectors.get("listing_link_selector", "a")
-    link_pattern = selectors.get("listing_link_pattern")
-
-    links = []
-    for a_tag in soup.select(link_selector):
-        href = a_tag.get("href")
-        if not href:
-            continue
-        absolute_url = urljoin(base_url, href)
-
-        if link_pattern and not re.search(link_pattern, absolute_url):
-            continue
-
-        if absolute_url not in links:
-            links.append(absolute_url)
-
-    logger.info("Found %d listing links on page", len(links))
-    return links
+    matched, _ = extract_listing_links(html, base_url, selectors)
+    return matched
 
 
 def parse_next_page(
@@ -315,8 +342,9 @@ def parse_next_page(
         return urljoin(base_url, next_link["href"])
 
     return None
-
-
+def _set_if_missing(data:Any,key: str, value: Any):
+        if value and not data.get(key):
+            data[key] = value
 def parse_listing_page(
     html: str,
     url: str,
@@ -327,17 +355,23 @@ def parse_listing_page(
     soup = BeautifulSoup(html, "lxml")
     data: dict[str, Any] = {"url": url}
 
-    if extraction_mode == "section":
-        data.update(_parse_section_based(soup, selectors))
-    else:
-        data.update(_parse_direct_selectors(soup, selectors))
+    # Base
+    direct_data = _parse_direct_selectors(soup, selectors)
+    data.update(direct_data)
+   
+    # Complementar apenas o que faltar
+    if extraction_mode == "section" or selectors.get("details_section"):
+        section_data = _parse_section_based(soup, selectors)
 
-    # Common extractions (both modes)
+        for key, value in section_data.items():
+            _set_if_missing(data, key, value)
+
+    # Common extractions
     data.update(_parse_images(soup, selectors, url))
     data.update(_parse_seo(soup))
     _fill_missing_listing_fields_from_page(soup, data)
 
-    # Sold/reserved detection — reuses fields already extracted above
+    # Sold/reserved detection
     data["is_sold"] = _detect_sold_status(data, selectors)
 
     return data
@@ -423,9 +457,9 @@ def _infer_property_type_from_title(title: str) -> str | None:
         return "Garagem"
     if re.search(r"\bquintinha\b|\bquinta\b", normalized):
         return "Quintinha"
-    if re.search(r"\bT\d+\b", normalized):
+    if re.search(r"\bt\d+\b", normalized):
         return "Apartamento"
-    if re.search(r"\bV\d+\b", normalized):
+    if re.search(r"\bv\d+\b", normalized):
         return "Moradia"
     return None
 
@@ -437,30 +471,36 @@ def _infer_property_type_from_title(title: str) -> str | None:
 def _parse_section_based(soup: BeautifulSoup, selectors: dict[str, Any]) -> dict[str, Any]:
     """Parse using section-based extraction (name/value pairs)."""
     data: dict[str, Any] = {}
+    if data is None:
+        data = {}
+
+    def _set_if_missing(key: str, value: Any):
+        if value and not data.get(key):
+            data[key] = value
     # Title
     title_selector = selectors.get("title_selector")
     if title_selector:
         title_el = soup.select_one(title_selector)
         if title_el:
-            data["title"] = title_el.get_text(strip=True)
+            _set_if_missing("title", title_el.get_text(strip=True))
 
     # Location
     location_selector = selectors.get("location_selector")
     if location_selector:
         loc_el = soup.select_one(location_selector)
         if loc_el:
-            data["location"] = loc_el.get_text(strip=True)
+            _set_if_missing("location", loc_el.get_text(strip=True))
 
     # Condition
     condition_selector = selectors.get("condition_selector")
     if condition_selector:
         cond_el = soup.select_one(condition_selector)
         if cond_el:
-            data["condition"] = cond_el.get_text(strip=True)
+            _set_if_missing("condition", cond_el.get_text(strip=True))
 
     # Description
     desc_selector = selectors.get("description_selector")
-    if desc_selector:
+    if desc_selector and not data.get("raw_description"):
         for selector in desc_selector.split(","):
             desc_el = soup.select_one(selector.strip())
             if desc_el:
@@ -472,7 +512,9 @@ def _parse_section_based(soup: BeautifulSoup, selectors: dict[str, Any]) -> dict
     # Text pattern extraction
     text_patterns = selectors.get("text_patterns", {})
     if text_patterns:
-        data.update(_extract_via_text_patterns(soup, text_patterns))
+        extracted = _extract_via_text_patterns(soup, text_patterns)
+        for k, v in extracted.items():
+            _set_if_missing(k, v)
 
     summary_section = selectors.get("summary_section")
     if summary_section:
@@ -480,63 +522,64 @@ def _parse_section_based(soup: BeautifulSoup, selectors: dict[str, Any]) -> dict
         if section:
             extracted = _extract_summary_pairs(section, selectors)
             for k, v in extracted.items():
-                if k not in data:
-                    data[k] = v
+                _set_if_missing(k, v)
 
     # Details section (price, type, district, energy cert…)
     details_section = selectors.get("details_section")
     if details_section and details_section != "body":
-        section = soup.select_one(details_section)
+        section = _safe_select_one(soup, details_section)
         if section:
             extracted = _extract_name_value_pairs(section, selectors)
             logger.debug("Extracted %d fields from details section", len(extracted))
             for k, v in extracted.items():
-                if k not in data:
-                    data[k] = v
+                _set_if_missing(k, v)
 
     # Areas section
     areas_section = selectors.get("areas_section")
     if areas_section:
-        section = soup.select_one(areas_section)
+        section = _safe_select_one(soup, areas_section)
         if section:
             extracted = _extract_area_pairs(section, selectors)
             for k, v in extracted.items():
-                if k not in data:
-                    data[k] = v
+                _set_if_missing(k, v)
 
     # ── FIX: Divisions section (bedrooms / bathrooms / living rooms) ──────────
     # Some sites (e.g. Pearls of Portugal) put bedrooms/bathrooms in a separate
     # section#divisions with icon + .name + .value layout, not in section#details.
     divisions_section = selectors.get("divisions_section")
     if divisions_section:
-        section = soup.select_one(divisions_section)
+        section = _safe_select_one(soup, divisions_section)
         if section:
             extracted = _extract_divisions(section, selectors)
             for k, v in extracted.items():
-                if k not in data:
-                    data[k] = v
+                _set_if_missing(k, v)
 
     # Characteristics / features section
     chars_section = selectors.get("characteristics_section")
     if chars_section:
-        # soupsieve doesn't reliably support :last-of-type with ID selectors.
-        # Try the selector directly; if it fails, fall back to selecting all
-        # matching elements and taking the last one.
         section = _safe_select_one(soup, chars_section)
         if section:
-            data.update(_extract_characteristics(section, selectors))
+            extracted = _extract_characteristics(section, selectors)
+            for k, v in extracted.items():
+                _set_if_missing(k, v)
 
     # Nearby / Proximities section
     nearby_section = selectors.get("nearby_section")
-    if nearby_section:
+    if nearby_section and not data.get("nearby"):
         section = _safe_select_one(soup, nearby_section)
         if section:
             nearby_items = []
-            item_selector = selectors.get("nearby_item_selector", ".name")
+
+            item_selector = selectors.get(
+                "nearby_item_selector",
+                ".name",
+            )
+
             for item in section.select(item_selector):
                 text = item.get_text(strip=True)
                 if text:
                     nearby_items.append(text)
+
             if nearby_items:
                 data["nearby"] = nearby_items
 
@@ -636,6 +679,25 @@ def _safe_select_one(soup: BeautifulSoup, selector: str) -> Tag | None:
 # Section Helpers
 # ═══════════════════════════════════════════════════════════
 
+def _match_field_key(name: str, field_map: dict[str, str]) -> str | None:
+    """Match a lowercased label against a field map's keys.
+
+    Tries an exact match first, then falls back to the *longest* key that is
+    a substring of the label. Without this, dict iteration order decides the
+    winner on substring matches — e.g. a generic "tipo" entry (→ typology)
+    would shadow the more specific "tipo de imóvel" (→ property_type) key
+    whenever it happens to come first, and "valor" (→ price) would match any
+    label containing that word, such as "Valor do Condomínio".
+    """
+    if name in field_map:
+        return name
+    best_key: str | None = None
+    for key in field_map:
+        if key in name and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+    return best_key
+
+
 def _extract_name_value_pairs(section: Tag, selectors: dict[str, Any]) -> dict[str, Any]:
     """Extract name/value pairs from a details section.
 
@@ -686,15 +748,15 @@ def _extract_name_value_pairs(section: Tag, selectors: dict[str, Any]) -> dict[s
             continue
 
         # Map field name to canonical key
-        for key, field in field_map.items():
-            if key in name:
-                # Self-labeling: the label IS the value (e.g. "Venda" row — its
-                # .value child contains the price, not the listing type string).
-                if key in _SELF_LABELING_KEYS:
-                    data[field] = key.capitalize()
-                else:
-                    data[field] = value
-                break
+        matched_key = _match_field_key(name, field_map)
+        if matched_key:
+            field = field_map[matched_key]
+            # Self-labeling: the label IS the value (e.g. "Venda" row — its
+            # .value child contains the price, not the listing type string).
+            if matched_key in _SELF_LABELING_KEYS:
+                data[field] = matched_key.capitalize()
+            else:
+                data[field] = value
 
     return data
 
@@ -729,10 +791,9 @@ def _extract_divisions(section: Tag, selectors: dict[str, Any]) -> dict[str, Any
         if not value:
             continue
 
-        for key, field in field_map.items():
-            if key in name:
-                data[field] = value
-                break
+        matched_key = _match_field_key(name, field_map)
+        if matched_key:
+            data[field_map[matched_key]] = value
 
     return data
 
@@ -763,16 +824,12 @@ def _extract_area_pairs(section: Tag, selectors: dict[str, Any]) -> dict[str, An
 
 def _extract_characteristics(section: Tag, selectors: dict[str, Any]) -> dict[str, Any]:
     """Extract boolean characteristics/amenities from a features section."""
-    data = {}
+    data: dict[str, Any] = {}
     items = section.select(selectors.get("char_item_selector", ".name"))
     feature_map = _get_feature_map()
 
     for item in items:
-        text = item.get_text(strip=True).lower()
-        for keyword, field in feature_map.items():
-            if keyword in text:
-                data[field] = "Yes"
-                break
+        _assign_feature_matches(item.get_text(strip=True), data, feature_map)
 
     return data
 
@@ -906,13 +963,100 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
     return ""
 
 
+_CHROME_TAGS = ("nav", "header", "footer", "script", "style", "noscript", "aside")
+
+
+def _extract_body_text_without_chrome(soup: BeautifulSoup) -> str:
+    """Page text with navigation/script/style chrome stripped.
+
+    Keyword-based feature fallbacks scan arbitrarily large chunks of page
+    text; matching against raw nav/footer/script content produces false
+    positives (e.g. a generic "Lift" menu link marking has_elevator=True on
+    a listing that has no elevator at all). Re-parses a copy rather than
+    mutating the caller's soup, since callers keep extracting other fields
+    from it afterwards.
+    """
+    clean = BeautifulSoup(str(soup), "lxml")
+    for tag_name in _CHROME_TAGS:
+        for el in clean.find_all(tag_name):
+            el.decompose()
+    return clean.get_text(separator=" ", strip=True)
+
+
+def _keyword_pattern(keyword: str) -> str:
+    """Build a regex pattern for `keyword` with word boundaries on alphanumeric
+    edges — prevents a short keyword like "box" or "a/c" matching inside an
+    unrelated longer word (e.g. "toolbox")."""
+    pattern = re.escape(keyword)
+    if keyword[0].isalnum():
+        pattern = r"\b" + pattern
+    if keyword[-1].isalnum():
+        pattern = pattern + r"\b"
+    return pattern
+
+
+def _keyword_present(keyword: str, normalized_text: str) -> bool:
+    return re.search(_keyword_pattern(keyword), normalized_text, re.IGNORECASE) is not None
+
+
+# Negation markers checked immediately before a feature keyword — e.g. "sem
+# garagem" (without garage) or "não possui elevador" (does not have an
+# elevator). Deliberately excludes bare "no": in Portuguese "no" is also the
+# contraction "em o" ("no jardim" = "in the garden"), so treating it as a
+# negation would misfire constantly on PT-language listings.
+_NEGATION_PATTERN = re.compile(
+    r"\b(?:sem|n[aã]o\s+(?:tem|possui|inclui|disp(?:o|õ)e\s+de)|nenhum[a]?|without)\b",
+    re.IGNORECASE,
+)
+_NEGATION_WINDOW_WORDS = 3
+_SENTENCE_BOUNDARY_PATTERN = re.compile(r"[.!?;\n]")
+
+
+def _keyword_sentiment(keyword: str, text: str) -> str | None:
+    """Classify every mention of `keyword` in `text` as affirmed or negated.
+
+    Returns "yes" if at least one mention has no negation word immediately
+    before it (an affirmative mention anywhere wins), "no" if every mention is
+    negated (e.g. "sem garagem"), or None if the keyword never appears.
+
+    Scoped to the current sentence/clause, and within it to the
+    `_NEGATION_WINDOW_WORDS` words immediately preceding each match — this
+    keeps the check local, so a negation earlier in the text doesn't bleed
+    onto an unrelated, clearly-affirmed feature stated later, whether that's
+    later in the same sentence ("Sem elevador, mas tem garagem e piscina.":
+    "elevador" is negated, "garagem"/"piscina" are not) or in the next one
+    ("Sem garagem. Tem elevador e piscina.": the period resets the clause, so
+    "elevador" isn't negated by "sem" two sentences back).
+    """
+    saw_negated = False
+    for match in re.finditer(_keyword_pattern(keyword), text, re.IGNORECASE):
+        prefix = text[:match.start()]
+        last_boundary = None
+        for boundary in _SENTENCE_BOUNDARY_PATTERN.finditer(prefix):
+            last_boundary = boundary.end()
+        clause = prefix[last_boundary:] if last_boundary is not None else prefix
+        preceding_words = re.findall(r"\S+", clause)[-_NEGATION_WINDOW_WORDS:]
+        if _NEGATION_PATTERN.search(" ".join(preceding_words)):
+            saw_negated = True
+        else:
+            return "yes"
+    return "no" if saw_negated else None
+
+
 def _assign_feature_matches(text: str, target: dict[str, Any], feature_map: dict[str, str]) -> None:
-    """Assign every matching feature keyword instead of stopping at the first match."""
-    normalized_text = text.lower()
-    
+    """Assign every matching feature keyword instead of stopping at the first match.
+
+    A negated mention ("sem garagem") sets the field to "No" instead of "Yes"
+    — parse_bool already maps "No" to False. An affirmative match always wins
+    over a prior "No" from an earlier call (e.g. a different section of the
+    same page), since presence trumps absence when sources disagree.
+    """
     for keyword, mapped_field in feature_map.items():
-        if keyword in normalized_text:
+        sentiment = _keyword_sentiment(keyword, text)
+        if sentiment == "yes":
             target[mapped_field] = "Yes"
+        elif sentiment == "no" and target.get(mapped_field) != "Yes":
+            target[mapped_field] = "No"
 
 
 def _first_selector_value(
@@ -1009,10 +1153,10 @@ def _extract_habinedita_fallbacks(soup: BeautifulSoup, current_data: dict[str, A
     _FEATURE_KEYS = frozenset(_get_feature_map().values())
     missing_features = {k for k in _FEATURE_KEYS if not extracted.get(k) and not current_data.get(k)}
     if missing_features:
-        full_page_text = soup.get_text(separator=" ", strip=True)
+        full_page_text = _extract_body_text_without_chrome(soup)
         partial: dict[str, Any] = {}
-        
-        _assign_feature_matches(full_page_text, partial,feature_map)
+
+        _assign_feature_matches(full_page_text, partial, feature_map)
         for key, value in partial.items():
             if key in missing_features:
                 extracted[key] = value
@@ -1229,10 +1373,16 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
     feature_map = _get_feature_map()
     missing_feature_fields = {v for v in feature_map.values() if not data.get(v)}
     if missing_feature_fields:
-        full_text = soup.get_text(separator=" ", strip=True).lower()
+        full_text = _extract_body_text_without_chrome(soup)
         for keyword, field in feature_map.items():
-            if field in missing_feature_fields and keyword in full_text:
+            if field not in missing_feature_fields:
+                continue
+            sentiment = _keyword_sentiment(keyword, full_text)
+            if sentiment == "yes":
                 data[field] = "Yes"
+                missing_feature_fields.discard(field)
+            elif sentiment == "no":
+                data[field] = "No"
                 missing_feature_fields.discard(field)
     # ═══════════════════════════════════════════════════════════
     # AUTO-REPARAÇÃO NATIVA PARA PLATAFORMA EGO REALESTATE
@@ -1434,9 +1584,21 @@ def parse_listing_card(
 
 
 
+_DEFAULT_SOLD_STATUS_FIELDS = ("condition", "business_state", "title")
+
+
 def _detect_sold_status(data: dict[str, Any], selectors: dict[str, Any]) -> bool:
     """Detect sold/reserved status from fields already extracted by the parser
-    (condition, business_state, title, page_title) — no dedicated selector needed.
+    (condition, business_state, title) — no dedicated selector needed.
+
+    A positive match here causes the listing to be skipped and, if it already
+    exists in the DB, hard-deleted (see scraper_service._process_listing_url) —
+    so the default field set deliberately excludes `page_title`. That field is
+    the raw <title> tag, which often carries site branding or breadcrumb/category
+    text (e.g. "... | Imóveis Vendidos | Site X") unrelated to this specific
+    listing, and would false-positive-delete an active listing. Sites where
+    page_title reliably reflects listing status can opt in via
+    `sold_status_fields` in SiteConfig.selectors.
 
     `sold_keywords` can be overridden per site via SiteConfig.selectors, either
     as a list or a comma-separated string.
@@ -1445,9 +1607,13 @@ def _detect_sold_status(data: dict[str, Any], selectors: dict[str, Any]) -> bool
     if isinstance(keywords, str):
         keywords = [k.strip() for k in keywords.split(",") if k.strip()]
 
+    fields = selectors.get("sold_status_fields") or _DEFAULT_SOLD_STATUS_FIELDS
+    if isinstance(fields, str):
+        fields = [f.strip() for f in fields.split(",") if f.strip()]
+
     haystack = " ".join(
         str(data.get(field) or "")
-        for field in ("condition", "business_state", "title", "page_title")
+        for field in fields
     ).lower()
 
     return any(kw.lower() in haystack for kw in keywords)

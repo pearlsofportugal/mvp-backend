@@ -43,6 +43,7 @@ def _listing_to_dict(listing: Listing) -> dict:
         "has_balcony": listing.has_balcony,
         "has_air_conditioning": listing.has_air_conditioning,
         "has_pool": listing.has_pool,
+        "has_garden": listing.has_garden,
         "energy_certificate": listing.energy_certificate,
         "construction_year": listing.construction_year,
         "advertiser": listing.advertiser,

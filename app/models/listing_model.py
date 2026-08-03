@@ -38,7 +38,7 @@ class Listing(Base):
 
     # Basic info
     title: Mapped[str | None] = mapped_column(String(500))
-    business_type: Mapped[str | None] = mapped_column(String(20), comment="sale, rent")
+    business_type: Mapped[str | None] = mapped_column(String(20), comment="sale, rent, trespasse")
     property_type: Mapped[str | None] = mapped_column(String(50), comment="apartment, house, land, etc.")
     typology: Mapped[str | None] = mapped_column(String(10), comment="T0, T1, T2, T3, etc.")
     bedrooms: Mapped[int | None] = mapped_column(Integer)
@@ -69,6 +69,7 @@ class Listing(Base):
     has_balcony: Mapped[bool | None] = mapped_column(Boolean)
     has_air_conditioning: Mapped[bool | None] = mapped_column(Boolean)
     has_pool: Mapped[bool | None] = mapped_column(Boolean)
+    has_garden: Mapped[bool | None] = mapped_column(Boolean)
 
     # Building info
     energy_certificate: Mapped[str | None] = mapped_column(String(50), comment="A+, A, B, B-, C, D, E, F, Isento")
@@ -82,7 +83,7 @@ class Listing(Base):
     raw_description: Mapped[str | None] = mapped_column(Text, comment="Original unmodified description")
     description: Mapped[str | None] = mapped_column(Text, comment="Cleaned description")
     enriched_translations: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON,
+        JSON(none_as_null=True),
         nullable=True,
         comment="AI-generated SEO content per locale: {pt: {title, description, meta_description}, en: {...}, ...}",
     )
@@ -91,10 +92,10 @@ class Listing(Base):
 
     # SEO
     page_title: Mapped[str | None] = mapped_column(String(500))
-    headers: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="Structured headers as JSON array")
+    headers: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), comment="Structured headers as JSON array")
 
     # Raw payload
-    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="Complete original payload")
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), comment="Complete original payload")
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -386,10 +386,13 @@ async def enrich_translations_and_persist(
 # Background runners — called via FastAPI BackgroundTasks
 # ---------------------------------------------------------------------------
 
+_JOB_PERSIST_EVERY = 5
+
+
 async def run_bulk_enrich_job(job_id: UUID, listing_ids: list[UUID], payload: BulkEnrichmentRequest) -> None:
     """Background task: enrich a list of listings and update job progress in-store."""
     from app.database import async_session_factory
-    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job
+    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job, persist_snapshot
 
     job = get_job(job_id)
     if job is None:
@@ -401,7 +404,7 @@ async def run_bulk_enrich_job(job_id: UUID, listing_ids: list[UUID], payload: Bu
     failed = 0
     results = []
 
-    for lid in listing_ids:
+    for processed, lid in enumerate(listing_ids, start=1):
         try:
             async with async_session_factory() as db:
                 listing = await ListingRepository.get_listing_by_id(db, lid)
@@ -450,6 +453,9 @@ async def run_bulk_enrich_job(job_id: UUID, listing_ids: list[UUID], payload: Bu
             job.errors.append(f"{lid}: {exc}")
             results.append({"listing_id": str(lid), "status": "error", "error": str(exc)})
 
+        if processed % _JOB_PERSIST_EVERY == 0:
+            await persist_snapshot(job)
+
     from datetime import datetime, timezone
 
     job.result = {
@@ -461,6 +467,7 @@ async def run_bulk_enrich_job(job_id: UUID, listing_ids: list[UUID], payload: Bu
     }
     job.status = STATUS_FAILED if failed == len(listing_ids) and enriched == 0 else STATUS_COMPLETED
     job.finished_at = datetime.now(timezone.utc)
+    await persist_snapshot(job)
     logger.info(
         "Bulk enrichment job %s finished: enriched=%s skipped=%s failed=%s",
         job_id,
@@ -473,7 +480,7 @@ async def run_bulk_enrich_job(job_id: UUID, listing_ids: list[UUID], payload: Bu
 async def run_single_enrich_job(job_id: UUID, listing_id: UUID, payload: ListingTranslationRequest) -> None:
     """Background task: enrich a single listing and store the response in the job."""
     from app.database import async_session_factory
-    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job
+    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job, persist_snapshot
 
     job = get_job(job_id)
     if job is None:
@@ -495,3 +502,4 @@ async def run_single_enrich_job(job_id: UUID, listing_id: UUID, payload: Listing
         job.status = STATUS_FAILED
     finally:
         job.finished_at = datetime.now(timezone.utc)
+        await persist_snapshot(job)

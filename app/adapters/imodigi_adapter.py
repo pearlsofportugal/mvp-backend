@@ -2,6 +2,7 @@
 
 Services interact only with ImodigiAdapter; no service imports httpx directly.
 """
+import asyncio
 import json
 from typing import Any
 
@@ -12,6 +13,45 @@ from app.core.exceptions import ImodigiError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+async def _request_with_retry(
+    client: httpx.AsyncClient, method: str, url: str, **kwargs: Any
+) -> httpx.Response:
+    """Perform an HTTP request with retry/backoff on transient failures.
+
+    A single Imodigi timeout or 5xx blip must not fail an export outright when
+    the next attempt would likely succeed — the caller only sees the final
+    response (or a raised error after every attempt is exhausted).
+    """
+    last_exc: Exception | None = None
+    response: httpx.Response | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = await client.request(method, url, **kwargs)
+        except httpx.TransportError as exc:
+            last_exc = exc
+            response = None
+
+        if response is not None and response.status_code not in _RETRYABLE_STATUS:
+            return response
+
+        if attempt < _MAX_RETRIES - 1:
+            delay = _RETRY_BACKOFF_SECONDS[attempt]
+            reason = f"HTTP {response.status_code}" if response is not None else str(last_exc)
+            logger.warning(
+                "Imodigi %s %s failed (attempt %d/%d): %s — retrying in %.1fs",
+                method, url, attempt + 1, _MAX_RETRIES, reason, delay,
+            )
+            await asyncio.sleep(delay)
+
+    if response is not None:
+        return response
+    raise ImodigiError(f"Imodigi request failed after {_MAX_RETRIES} attempts: {last_exc}") from last_exc
 
 
 def _headers() -> dict[str, str]:
@@ -67,8 +107,8 @@ class ImodigiAdapter:
 
     async def get_stores(self) -> list[dict[str, Any]]:
         """GET /crm-stores.php — return list of active stores."""
-        resp = await self._get_client().get(
-            f"{self._base_url}/crm-stores.php",
+        resp = await _request_with_retry(
+            self._get_client(), "GET", f"{self._base_url}/crm-stores.php",
             headers=_headers(),
         )
         body = _raise_if_error(resp)
@@ -76,8 +116,8 @@ class ImodigiAdapter:
 
     async def get_catalog_values(self) -> dict[str, Any]:
         """GET /crm-property-values.php — return allowed catalog values."""
-        resp = await self._get_client().get(
-            f"{self._base_url}/crm-property-values.php",
+        resp = await _request_with_retry(
+            self._get_client(), "GET", f"{self._base_url}/crm-property-values.php",
             headers=_headers(),
         )
         body = _raise_if_error(resp)
@@ -107,8 +147,8 @@ class ImodigiAdapter:
         if q:
             params["q"] = q
 
-        resp = await self._get_client().get(
-            f"{self._base_url}/crm-locations.php",
+        resp = await _request_with_retry(
+            self._get_client(), "GET", f"{self._base_url}/crm-locations.php",
             headers=_headers(),
             params=params,
         )
@@ -131,8 +171,8 @@ class ImodigiAdapter:
             request_body["translations"] = translations
         if settings.debug:
             logger.debug("Imodigi CREATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
-        resp = await self._get_client().post(
-            f"{self._base_url}/crm-properties.php",
+        resp = await _request_with_retry(
+            self._get_client(), "POST", f"{self._base_url}/crm-properties.php",
             headers=_headers(),
             json=request_body,
         )
@@ -159,16 +199,16 @@ class ImodigiAdapter:
             request_body["translations"] = translations
         if settings.debug:
             logger.debug("Imodigi UPDATE payload:\n%s", json.dumps(request_body, indent=2, default=str))
-        resp = await self._get_client().patch(
-            f"{self._base_url}/crm-properties.php",
+        resp = await _request_with_retry(
+            self._get_client(), "PATCH", f"{self._base_url}/crm-properties.php",
             headers=_headers(),
             json=request_body,
         )
         return _raise_if_error(resp)
-    # ✅ Depois
+
     async def get_property(self, client_id: int) -> list[dict[str, Any]]:
-        resp = await self._get_client().get(
-            f"{self._base_url}/crm-properties.php",
+        resp = await _request_with_retry(
+            self._get_client(), "GET", f"{self._base_url}/crm-properties.php",
             headers=_headers(),
             params={"client": client_id},
         )

@@ -2,12 +2,18 @@
 import pytest
 
 from app.services.parser_service import (
+    extract_listing_links,
     parse_listing_links,
     parse_next_page,
     parse_listing_page,
     _parse_images,
     _parse_seo,
     _extract_energy_certificate_value,
+    _infer_property_type_from_title,
+    _match_field_key,
+    _keyword_sentiment,
+    _assign_feature_matches,
+    _get_feature_map,
 )
 
 
@@ -27,6 +33,124 @@ class TestEnergyCertificateExtraction:
     ])
     def test_extracts_only_explicit_or_standalone_ratings(self, raw_value, expected):
         assert _extract_energy_certificate_value(raw_value) == expected
+
+
+class TestMatchFieldKey:
+    """A specific label (e.g. 'tipo de imóvel') must win over a shorter,
+    more generic one (e.g. 'tipo') that happens to be a substring of it —
+    dict iteration order must not decide the outcome."""
+
+    def test_prefers_longest_substring_match(self):
+        field_map = {"tipo": "typology", "tipo de imóvel": "property_type"}
+        assert _match_field_key("tipo de imóvel", field_map) == "tipo de imóvel"
+
+    def test_exact_match_wins_even_if_a_substring_key_exists(self):
+        field_map = {"tipo": "typology", "tipologia do imóvel": "typology"}
+        assert _match_field_key("tipo", field_map) == "tipo"
+
+    def test_generic_value_keyword_does_not_swallow_unrelated_label(self):
+        field_map = {"valor": "price", "valor do condomínio": "condo_fee"}
+        assert _match_field_key("valor do condomínio", field_map) == "valor do condomínio"
+
+    def test_no_match_returns_none(self):
+        assert _match_field_key("something else", {"tipo": "typology"}) is None
+
+
+class TestInferPropertyTypeFromTitle:
+    def test_matches_typology_token_case_insensitively(self):
+        assert _infer_property_type_from_title("Vendo T3 remodelado") == "Apartamento"
+        assert _infer_property_type_from_title("V4 com jardim") == "Moradia"
+
+    def test_matches_named_property_types(self):
+        assert _infer_property_type_from_title("Moradia isolada com piscina") == "Moradia"
+
+
+class TestFeatureNegation:
+    """'Sem garagem' must not set has_garage=True — and a genuine mention
+    elsewhere must still win over an unrelated negation in the same text."""
+
+    def test_negated_mention_returns_no(self):
+        assert _keyword_sentiment("garagem", "Apartamento sem garagem, ótima localização.") == "no"
+
+    def test_affirmed_mention_returns_yes(self):
+        assert _keyword_sentiment("garagem", "Apartamento com garagem fechada.") == "yes"
+
+    def test_absent_keyword_returns_none(self):
+        assert _keyword_sentiment("garagem", "Apartamento moderno no centro.") is None
+
+    def test_negation_does_not_bleed_onto_a_later_affirmed_feature(self):
+        # "sem" negates "elevador" only — "garagem" is still affirmed further
+        # along in the same sentence.
+        text = "Sem elevador, mas tem garagem e piscina."
+        assert _keyword_sentiment("elevador", text) == "no"
+        assert _keyword_sentiment("garagem", text) == "yes"
+        assert _keyword_sentiment("piscina", text) == "yes"
+
+    def test_assign_feature_matches_sets_no_for_negated_and_yes_for_affirmed(self):
+        data: dict = {}
+        _assign_feature_matches(
+            "Sem garagem. Tem elevador e piscina privada.", data, _get_feature_map()
+        )
+        assert data["garage"] == "No"
+        assert data["elevator"] == "Yes"
+        assert data["swimming_pool"] == "Yes"
+
+    def test_affirmed_mention_from_a_later_call_overrides_earlier_negation(self):
+        feature_map = _get_feature_map()
+        data: dict = {}
+        _assign_feature_matches("Sem garagem.", data, feature_map)
+        assert data["garage"] == "No"
+        _assign_feature_matches("Dispõe de garagem fechada para 2 carros.", data, feature_map)
+        assert data["garage"] == "Yes"
+
+
+class TestFeatureFallbackIgnoresChrome:
+    """The full-page keyword fallback must not pick up nav/footer/script
+    chrome — only content that plausibly describes the listing itself."""
+
+    def test_nav_link_does_not_set_unrelated_feature_flag(self):
+        html = """
+        <html><body>
+            <nav><a href="/lift">Lift</a></nav>
+            <h1>Terreno rústico na Calheta</h1>
+            <p>Terreno agrícola sem quaisquer comodidades.</p>
+        </body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/terreno", {"title_selector": "h1"}, "direct")
+        assert data.get("elevator") is None
+
+    def test_script_content_does_not_set_feature_flag(self):
+        html = """
+        <html><body>
+            <script>var config = {"tracking": "garage-door-analytics"};</script>
+            <h1>Apartamento simples</h1>
+            <p>Apartamento moderno no centro da cidade, perto de tudo.</p>
+        </body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/apt", {"title_selector": "h1"}, "direct")
+        assert data.get("garage") is None
+
+
+class TestGardenFeatureExtraction:
+    def test_jardim_keyword_sets_garden_field(self):
+        html = """
+        <html><body>
+            <h1>Moradia com jardim</h1>
+            <p>Moradia V3 com amplo jardim privativo e churrasqueira.</p>
+        </body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/moradia", {"title_selector": "h1"}, "direct")
+        assert data.get("garden") == "Yes"
+
+    def test_negated_jardim_sets_no(self):
+        html = """
+        <html><body>
+            <h1>Apartamento T2</h1>
+            <p>Apartamento T2 sem jardim, com garagem incluída.</p>
+        </body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/apt2", {"title_selector": "h1"}, "direct")
+        assert data.get("garden") == "No"
 
 
 class TestParseListingLinks:
@@ -70,6 +194,33 @@ class TestParseListingLinks:
         selectors = {"listing_link_selector": "a.link"}
         links = parse_listing_links(html, "https://example.com", selectors)
         assert len(links) == 1
+
+    def test_extracts_links_from_onclick_window_location(self):
+        html = """
+        <html><body>
+            <div class="card-wrapper pointer" onclick="window.location.href='property/1'"></div>
+            <div class="card-wrapper pointer" onclick="window.location.href='/property/2'"></div>
+        </body></html>
+        """
+        selectors = {"listing_link_selector": ".card-wrapper.pointer"}
+        links = parse_listing_links(html, "https://example.com", selectors)
+        assert links == ["https://example.com/property/1", "https://example.com/property/2"]
+
+    def test_extracts_matched_and_rejected_links_from_onclick_window_location(self):
+        html = """
+        <html><body>
+            <div class="card-wrapper pointer" onclick="window.location.href='property/1'"></div>
+            <div class="card-wrapper pointer" onclick="window.location.href='/property/2'"></div>
+            <div class="card-wrapper pointer" onclick="window.location.href='/other/3'"></div>
+        </body></html>
+        """
+        selectors = {
+            "listing_link_selector": ".card-wrapper.pointer",
+            "listing_link_pattern": r"/property/",
+        }
+        matched, rejected = extract_listing_links(html, "https://example.com", selectors)
+        assert matched == ["https://example.com/property/1", "https://example.com/property/2"]
+        assert rejected == ["https://example.com/other/3"]
 
 
 class TestParseNextPage:

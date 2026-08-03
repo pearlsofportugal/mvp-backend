@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, engine, func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +28,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.config import settings
 from app.core.logging import get_logger, set_correlation_id
 from app.crawler.confidence import calculate_confidence, log_low_confidence_scores
-from app.database import async_session_factory
+from app.database import async_session_factory, engine
 from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory
@@ -46,6 +46,15 @@ from app.services.scrape_job_event_service import record_event
 logger = get_logger(__name__)
 
 _CRITICAL_PARSER_FIELDS = ("title", "price", "property_type", "district")
+
+# Boolean amenity flags derived from keyword presence: absence of a match is
+# itself meaningful ("not found on this scrape"), unlike other scalar fields
+# where a None can just mean a flaky/partial extraction. These must always be
+# overwritten on update — otherwise a feature detected once (e.g. has_pool)
+# can never be cleared by a later scrape where the site no longer mentions it.
+_FEATURE_FLAG_FIELDS = frozenset({
+    "has_garage", "has_elevator", "has_balcony", "has_air_conditioning", "has_pool", "has_garden",
+})
 
 
 def _missing_critical_parser_fields(raw_data: dict[str, Any]) -> list[str]:
@@ -266,10 +275,13 @@ async def _run_scrape_async(
             return
         # ────────────────────────────────────────────────────────────────────
 
+        job_cancelled = False
+        pagination_incomplete = False
         for page_num in range(max_pages):
             # Re-read only status/cancel fields — lightweight scalar query
             if await _check_job_cancelled(db, job_id):
                 logger.info("Job %s was cancelled", job_id)
+                job_cancelled = True
                 break
 
             job.touch_heartbeat()
@@ -289,7 +301,6 @@ async def _run_scrape_async(
             html = await _fetch_html(scraper, current_url)
             if not html:
                 logger.warning("Failed to fetch page: %s", current_url)
-                job.add_log("error", f"Failed to fetch page: {current_url}", current_url)
                 errors += 1
                 job.update_progress(
                     pages_visited=pages_visited,
@@ -298,9 +309,33 @@ async def _run_scrape_async(
                     errors=errors,
                 )
                 job.touch_heartbeat()
+
+                if page_num == 0:
+                    # The very first page is unreachable — there is nothing to
+                    # salvage and no way to tell a misconfigured start_url from
+                    # a site that's fully down, so this is a genuine failure.
+                    job.add_log("error", f"Failed to fetch page: {current_url}", current_url)
+                    await db.commit()
+                    await _fail_job(db, job, f"Failed to fetch page: {current_url}")
+                    return
+
+                # A later page failing is a transient blip (timeout, momentary
+                # block), not proof the whole crawl is broken. Stop paginating
+                # here but still complete the job with whatever was already
+                # scraped, instead of discarding a mostly-successful run.
+                # seen_listing_urls is now an incomplete view of what's live on
+                # the site (we never reached the remaining pages), so the
+                # auto-delete safety net must be skipped — same reasoning as a
+                # cancelled job.
+                job.add_log(
+                    "warning",
+                    f"Failed to fetch page {page_num + 1} — stopping pagination early, "
+                    f"job will complete with partial results: {current_url}",
+                    current_url,
+                )
                 await db.commit()
-                await _fail_job(db, job, f"Failed to fetch page: {current_url}")
-                return
+                pagination_incomplete = True
+                break
 
             pages_visited += 1
 
@@ -329,6 +364,7 @@ async def _run_scrape_async(
 
             for link in new_links:
                 if await _check_job_cancelled(db, job_id):
+                    job_cancelled = True
                     break
 
                 scraped, errored, warned, is_new = await _process_listing_url(
@@ -376,12 +412,22 @@ async def _run_scrape_async(
                 logger.warning("Unknown pagination_type %s — stopping", pagination_type)
                 await _fail_job(db, job, f"Unknown pagination_type: {pagination_type}")
                 return
-        deleted_count = await _delete_missing_listings(
-            db=db,
-            job=job,
-            site_key=site_key,
-            discovered_urls=seen_listing_urls,
-        )
+        deleted_count = 0
+        if job_cancelled or pagination_incomplete:
+            reason = (
+                "job was cancelled"
+                if job_cancelled
+                else "pagination stopped early after a page fetch failure"
+            )
+            logger.info("Job %s: skipping auto-delete — %s", job_id, reason)
+            job.add_log("info", f"Auto-delete skipped: {reason} before the crawl finished")
+        else:
+            deleted_count = await _delete_missing_listings(
+                db=db,
+                job=job,
+                site_key=site_key,
+                discovered_urls=seen_listing_urls,
+            )
         # Sempre actualiza o progress final antes de completar o job —
         # independentemente de ter havido deletes ou não.
         # Garante que pages_visited reflecte as páginas realmente visitadas
@@ -473,9 +519,11 @@ async def _run_sitemap_scrape(
         job.touch_heartbeat()
         await db.commit()
 
+        job_cancelled = False
         for link in urls:
             if await _check_job_cancelled(db, job_id):
                 logger.info("Job %s was cancelled", job_id)
+                job_cancelled = True
                 break
 
             scraped, errored, warned, is_new = await _process_listing_url(
@@ -501,12 +549,23 @@ async def _run_sitemap_scrape(
                     new_listings=new_count,
                     updated_listings=updated_count,
                 )
-        deleted_count = await _delete_missing_listings(
-            db=db,
-            job=job,
-            site_key=site_key,
-            discovered_urls=set(urls),   # urls já é a lista completa do sitemap
-        )
+        deleted_count = 0
+        if job_cancelled:
+            logger.info(
+                "Job %s: skipping auto-delete — job was cancelled before the crawl finished",
+                job_id,
+            )
+            job.add_log(
+                "info",
+                "Auto-delete skipped: job was cancelled before the crawl finished",
+            )
+        else:
+            deleted_count = await _delete_missing_listings(
+                db=db,
+                job=job,
+                site_key=site_key,
+                discovered_urls=set(urls),   # urls já é a lista completa do sitemap
+            )
         if deleted_count:
             job.update_progress(
                 pages_visited=1,
@@ -557,7 +616,7 @@ async def _process_listing_url(
             return False, False, True, False
 
         raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
-
+        logger.error("RAW DATA = %s", raw_data)
         # ── Skip listings vendidos/reservados ──────────────────────────────
         if raw_data.get("is_sold"):
             logger.info("Listing detected as sold/reserved — skipping: %s", link)
@@ -589,13 +648,21 @@ async def _process_listing_url(
         return True, False, False, is_new
 
     except Exception as e:
-        logger.error("Error processing listing %s: %s", link, str(e))
+        logger.exception("Error processing listing %s", link)
+    
         await db.rollback()
         await db.refresh(job)
+    
         job.add_url("failed", link)
-        job.add_log("error", f"Error processing listing: {str(e)}", link)
+        job.add_log(
+            "error",
+            f"Error processing listing: {type(e).__name__}: {e}",
+            link,
+        )
+    
         job.touch_heartbeat()
         await db.commit()
+    
         return False, True, False, False
 
 
@@ -693,7 +760,9 @@ async def _persist_listing_with_postgres_upsert(
 
     logger.info("Updating existing listing: %s", source_url)
     for field, value in listing_data.items():
-        if field not in ("scrape_job_id",) and value is not None:
+        if field == "scrape_job_id":
+            continue
+        if value is not None or field in _FEATURE_FLAG_FIELDS:
             setattr(existing, field, value)
 
     existing.updated_at = datetime.now(timezone.utc)
@@ -741,7 +810,9 @@ async def _persist_listing_legacy(
             )
 
         for field, value in listing_data.items():
-            if field not in ("scrape_job_id",) and value is not None:
+            if field == "scrape_job_id":
+                continue
+            if value is not None or field in _FEATURE_FLAG_FIELDS:
                 setattr(existing, field, value)
         existing.updated_at = datetime.now(timezone.utc)
         existing.scrape_job_id = UUID(job_id)

@@ -45,7 +45,18 @@ async def list_listings(
     filter_kwargs = {**filters, "is_enriched": is_enriched, "is_exported_to_imodigi": is_exported_to_imodigi}
     paginated, meta = await ListingService.get_all_listings(db, filter_kwargs, sort_by, sort_order, page, page_size)
     return ok(paginated, "Listings listed successfully", request, meta=meta)
-
+@router.get(
+    "/source-partners",
+    response_model=ApiResponse[list[str]],
+    responses=ERROR_RESPONSES,
+    operation_id="list_source_partners",
+)
+async def list_source_partners(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    partners = await ListingService.get_source_partners(db)
+    return ok(partners, "Source partners listed successfully", request)
 
 @router.get(
     "/selector",

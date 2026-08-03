@@ -71,7 +71,7 @@ class ListingBase(BaseModel):
     """
 
     # ── Classification ────────────────────────────────────────────────────
-    business_type: Literal["sale", "rent"] | None = Field(None, description="Listing transaction type.")
+    business_type: Literal["sale", "rent", "trespasse"] | None = Field(None, description="Listing transaction type.")
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house').")
     typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
 
@@ -107,6 +107,7 @@ class ListingBase(BaseModel):
     has_balcony: bool | None = None
     has_air_conditioning: bool | None = None
     has_pool: bool | None = None
+    has_garden: bool | None = None
 
     # ── Contact / advertiser ──────────────────────────────────────────────
     advertiser: str | None = None
@@ -150,7 +151,7 @@ class ListingUpdate(BaseModel):
     Only supplied fields are applied.
     """
 
-    business_type: Literal["sale", "rent"] | None = None
+    business_type: Literal["sale", "rent", "trespasse"] | None = None
     property_type: str | None = None
     typology: str | None = None
     title: str | None = None
@@ -176,6 +177,7 @@ class ListingUpdate(BaseModel):
     has_balcony: bool | None = None
     has_air_conditioning: bool | None = None
     has_pool: bool | None = None
+    has_garden: bool | None = None
     advertiser: str | None = None
     contacts: str | None = None
     description: str | None = None
@@ -246,7 +248,7 @@ class ListingListRead(BaseModel):
     enriched_translations: dict | None = Field(None, exclude=True)
     title: str | None = None
     source_partner: str
-    business_type: Literal["sale", "rent"] | None = None
+    business_type: Literal["sale", "rent", "trespasse"] | None = None
     property_type: str | None = None
     typology: str | None = None
     price_amount: Decimal | None = None

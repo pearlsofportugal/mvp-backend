@@ -41,6 +41,7 @@ class ListingFilters(TypedDict, total=False):
     has_elevator: bool | None
     has_balcony: bool | None
     has_air_conditioning: bool | None
+    has_garden: bool | None
     created_after: datetime | None
     created_before: datetime | None
     search: str | None
@@ -108,6 +109,8 @@ def apply_listing_filters(query: Select, filters: ListingFilters) -> Select:
         conds.append(Listing.has_balcony == filters["has_balcony"])
     if filters.get("has_air_conditioning") is not None:
         conds.append(Listing.has_air_conditioning == filters["has_air_conditioning"])
+    if filters.get("has_garden") is not None:
+        conds.append(Listing.has_garden == filters["has_garden"])
  
     # Date filters
     if filters.get("created_after"):

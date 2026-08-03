@@ -49,6 +49,7 @@ class ListingFlags(BaseModel):
     has_balcony: bool | None = None
     has_air_conditioning: bool | None = None
     has_pool: bool | None = None
+    has_garden: bool | None = None
     is_new_construction: bool | None = None
 
 
@@ -67,7 +68,9 @@ class PropertySchema(BaseModel):
     source_url: str | None = Field(None, description="Canonical URL of the listing on the partner site.")
 
     # ── Classification ────────────────────────────────────────────────────
-    business_type: Literal["sale", "rent"] | None = Field(None, description="Whether the listing is for sale or rent.")
+    business_type: Literal["sale", "rent", "trespasse"] | None = Field(
+        None, description="Listing transaction type: sale, rent, or trespasse (Portuguese business/goodwill transfer)."
+    )
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house', 'office').")
     typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
 

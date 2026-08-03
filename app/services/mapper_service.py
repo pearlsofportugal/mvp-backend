@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════
 # Configuration Cache
 # ═══════════════════════════════════════════════════════════
-_TYPOLOGY_PATTERN = re.compile(r"[TtVv](\d+)")
+_TYPOLOGY_PATTERN = re.compile(r"\b[TtVv](\d+)\b")
 _EGO_REF_PATTERN = re.compile(r"^Ref\.\s*")
 _CLEAN_DESC_PREFIX_PATTERN = re.compile(r"^(descriç[aã]o|description)\s*[:\-]?\s*", re.IGNORECASE)
 _CLEAN_DESC_PUNCT_SPACES = re.compile(r"\s+([,.;:!?])")
@@ -139,34 +139,34 @@ async def _load_currency_map() -> dict[str, str]:
         ):
             return _CURRENCY_MAP_CACHE
 
-    try:
-        from sqlalchemy import select
-        from app.models.field_mapping_model import CharacterMapping
+        try:
+            from sqlalchemy import select
+            from app.models.field_mapping_model import CharacterMapping
 
-        async with async_session_factory() as db:
-            result = await db.execute(
-                select(CharacterMapping).where(
-                    CharacterMapping.category == "currency",
-                    CharacterMapping.is_active.is_(True),
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(CharacterMapping).where(
+                        CharacterMapping.category == "currency",
+                        CharacterMapping.is_active.is_(True),
+                    )
                 )
-            )
-            mappings = result.scalars().all()
+                mappings = result.scalars().all()
 
-            if mappings:
-                currency_map = {m.source_chars: m.target_chars for m in mappings}
-                # Add lowercase variants
-                extended_map = {}
-                for k, v in currency_map.items():
-                    extended_map[k] = v
-                    extended_map[k.lower()] = v
-                
-                _CURRENCY_MAP_CACHE = extended_map
-                _CACHE_TIMESTAMP = now
-                logger.debug("Loaded %d currency mappings from DB", len(currency_map))
-                return _CURRENCY_MAP_CACHE
+                if mappings:
+                    currency_map = {m.source_chars: m.target_chars for m in mappings}
+                    # Add lowercase variants
+                    extended_map = {}
+                    for k, v in currency_map.items():
+                        extended_map[k] = v
+                        extended_map[k.lower()] = v
 
-    except Exception as e:
-        logger.warning("Could not load currency map from DB: %s. Using defaults.", str(e))
+                    _CURRENCY_MAP_CACHE = extended_map
+                    _CACHE_TIMESTAMP = now
+                    logger.debug("Loaded %d currency mappings from DB", len(currency_map))
+                    return _CURRENCY_MAP_CACHE
+
+        except Exception as e:
+            logger.warning("Could not load currency map from DB: %s. Using defaults.", str(e))
 
     return _DEFAULT_CURRENCY_MAP
 
@@ -196,11 +196,25 @@ async def init_mapper_cache() -> None:
 
 
 
-def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
+_MIN_PLAUSIBLE_PRICE = {
+    "sale": Decimal("1000"),
+    "rent": Decimal("50"),
+}
+_DEFAULT_MIN_PLAUSIBLE_PRICE = Decimal("50")
+
+
+def parse_price(
+    raw: str | None,
+    business_type: str | None = None,
+) -> tuple[Decimal | None, str | None]:
     """Parse a price string like '250 000 €' into (Decimal(250000), 'EUR').
 
     Returns (Decimal('-1'), None) for 'price on request' strings.
     Returns (None, None) for empty input or unparseable strings.
+
+    `business_type` tunes the "suspiciously low" sanity floor — rent listings
+    are routinely priced well under 1000 (e.g. a room at 350 EUR/month), so
+    the sale-oriented floor must not reject them.
     """
     if not raw:
         return None, None
@@ -235,7 +249,8 @@ def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
         logger.warning("Failed to parse price amount from: '%s'", raw)
         return None, None
 
-    if amount < Decimal("1000"):
+    min_plausible = _MIN_PLAUSIBLE_PRICE.get(business_type or "", _DEFAULT_MIN_PLAUSIBLE_PRICE)
+    if amount < min_plausible:
         logger.warning("Suspiciously low price (%s) parsed from: '%s'", amount, raw)
         return None, None
 
@@ -269,16 +284,37 @@ def parse_area(raw: str | None) -> float | None:
         return None
 
     num_str = match.group(1).strip().replace(" ", "")
-    # Detect European thousands separator: digit(s) + dot + exactly 3 digits
-    # e.g. "2.408" → 2408.0  but "120.5" → 120.5
-    if re.match(r"^\d+\.\d{3}$", num_str):
-        num_str = num_str.replace(".", "")
-    else:
-        num_str = num_str.replace(",", ".")
+    num_str = _normalize_decimal_separators(num_str)
     try:
         return float(num_str)
     except ValueError:
         return None
+
+
+def _normalize_decimal_separators(num_str: str) -> str:
+    """Resolve mixed '.'/',' thousands vs. decimal separators into a plain float string.
+
+    Handles European (1.500,50), American (1,234.56), and thousands-only
+    (2.408 / 2,408) formats — same heuristic used by parse_price.
+    """
+    if "," in num_str and "." in num_str:
+        if num_str.rfind(",") > num_str.rfind("."):
+            # European: '.' is the thousands separator, ',' is decimal
+            return num_str.replace(".", "").replace(",", ".")
+        # American: ',' is the thousands separator, '.' is decimal
+        return num_str.replace(",", "")
+
+    if "," in num_str:
+        # A lone comma in an area string is always a decimal separator
+        # (areas are rarely written with a comma thousands separator).
+        return num_str.replace(",", ".")
+
+    if "." in num_str:
+        parts = num_str.split(".")
+        if all(len(p) == 3 for p in parts[1:]):
+            return num_str.replace(".", "")
+
+    return num_str
 
 
 # ───────── Integer Parsing ─────────
@@ -437,15 +473,26 @@ def partner_normalizer(key: str) -> Callable:
 _NOT_SET = object()  # sentinel — distinguishes "not provided" from None
 
 _BUSINESS_TYPE_RENT_KEYWORDS = ("arrend", "arrendar", "arrendamento", "rent", "rental", "aluguer")
+_BUSINESS_TYPE_TRESPASSE_KEYWORDS = ("trespasse", "trespass")
 
 
 def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) -> str:
-    """Infer 'rent' or 'sale' from raw payload fields or an optional URL hint."""
+    """Infer 'sale', 'rent', or 'trespasse' from raw payload fields or an optional URL hint.
+
+    Trespasse (business/goodwill transfer, distinct from selling the property
+    itself) is checked first: it's a business type in its own right and must
+    not fall through to 'sale' just because it isn't a rent keyword.
+    """
     val = (raw.get("business_type") or raw.get("business_state") or "").lower()
+    if any(w in val for w in _BUSINESS_TYPE_TRESPASSE_KEYWORDS):
+        return "trespasse"
     if any(w in val for w in _BUSINESS_TYPE_RENT_KEYWORDS):
         return "rent"
-    if url_hint and "/Arrendamento/" in url_hint:
-        return "rent"
+    if url_hint:
+        if "/Trespasse/" in url_hint:
+            return "trespasse"
+        if "/Arrendamento/" in url_hint:
+            return "rent"
     return "sale"
 
 
@@ -511,15 +558,13 @@ def _build_base_schema(
     if title is _NOT_SET:
         title = raw.get("title")
 
-    price_amount, price_currency = parse_price(raw.get("price"))
+    price_amount, price_currency = parse_price(raw.get("price"), business_type=business_type)
     price_per_m2_amount = None
 
     if price_amount is not None and price_amount != PRICE_ON_REQUEST:
         price_per_m2_amount = calculate_price_per_m2(price_amount, area_gross or area_useful)
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
-
-    # price_for_money = None if (is_on_request or price_amount is None) else float(price_amount)
 
     return PropertySchema(
         partner_id=partner_id,
@@ -533,9 +578,8 @@ def _build_base_schema(
         bathrooms=parse_int(raw.get("bathrooms")),
         floor=floor,
         construction_year=construction_year,
-        price=Money(    amount=_price_amount_to_money(price_amount),
-    currency=price_currency),
-
+        price=Money(amount=_price_amount_to_money(price_amount), currency=price_currency),
+        price_on_request=is_on_request,
         price_per_m2=Money(
             amount=float(price_per_m2_amount) if price_per_m2_amount else None,
             currency=price_currency,
@@ -555,6 +599,7 @@ media=[
             has_balcony=parse_bool(raw.get("balcony")),
             has_air_conditioning=parse_bool(raw.get("air_conditioning")),
             has_pool=parse_bool(raw.get("swimming_pool")),
+            has_garden=parse_bool(raw.get("garden")),
             **(extra_flags or {}),
         ),
         descriptions={k: v for k, v in {
@@ -864,6 +909,43 @@ def normalize_sottomayor_payload(raw: dict[str, Any]) -> PropertySchema:
     return normalize_ego_platform_payload(raw, "sottomayor")
 
 
+# ═══════════════════════════════════════════════════════════
+# Imo Atlântico Normalizer
+# ═══════════════════════════════════════════════════════════
+
+@partner_normalizer("imo_atlantico")
+def normalize_imo_atlantico_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a raw IMO Atlântico payload into the canonical PropertySchema."""
+    property_type = _normalize_whitespace(raw.get("property_type"))
+    title = _normalize_whitespace(raw.get("title"))
+    business_type = _infer_business_type(raw)
+
+    if not property_type and title:
+        property_type = _infer_property_type_from_title(title, ("Moradia", "Apartamento", "Terreno"), startswith=False)
+
+    address = Address(
+        country="Portugal",
+        region=_normalize_whitespace(raw.get("district")),
+        city=_normalize_whitespace(raw.get("county")),
+        area=_normalize_whitespace(raw.get("parish")),
+        full_address=_truncate_text(raw.get("location"), 500),
+    )
+
+    return _build_base_schema(
+        raw,
+        source_partner="imo_atlantico",
+        business_type=business_type,
+        property_type=property_type,
+        partner_id=_normalize_whitespace(raw.get("property_id")) or None,
+        address=address,
+        area_useful=parse_area(raw.get("useful_area")),
+        area_gross=parse_area(raw.get("gross_area")),
+        area_land=parse_area(raw.get("land_area")),
+        bedrooms=typology_to_bedrooms(raw.get("typology")) or parse_int(raw.get("bedrooms")),
+        title=title,
+        advertiser=_normalize_whitespace(raw.get("advertiser")) or None,
+        contacts=_normalize_whitespace(raw.get("contacts")) or None,
+    )
 @partner_normalizer("barcelcasa")
 def normalize_barcelcasa_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a Barcelcasa Imobiliária (EGO RealEstate platform) payload into canonical PropertySchema."""
@@ -1043,6 +1125,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "has_balcony": schema.features.has_balcony,
         "has_air_conditioning": schema.features.has_air_conditioning,
         "has_pool": schema.features.has_pool,
+        "has_garden": schema.features.has_garden,
         "energy_certificate": schema.energy_certificate,
         "construction_year": schema.construction_year,
         "advertiser": schema.advertiser,

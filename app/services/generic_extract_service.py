@@ -83,6 +83,12 @@ _TYPOLOGY_RE = re.compile(r"\b([TV]\d+(?:\+\d+)?)\b")
 _ENERGY_RE = re.compile(
     r"(?:certificad|classe)[^.]{0,30}?\b([A-G][+-]?)\b", re.IGNORECASE
 )
+# Bare label words that a mis-scored selector sometimes yields as a "value".
+_LABEL_VALUES = frozenset({
+    "preço", "preco", "price", "valor", "área", "area", "área útil", "area util",
+    "quartos", "quarto", "casas de banho", "wc", "wcs", "tipologia", "typology",
+    "distrito", "concelho", "freguesia", "estado", "condition", "n/d", "n/a", "-",
+})
 _GALLERY_SELECTORS = (
     "[class*='gallery'] img", "[class*='galeria'] img", "[class*='slider'] img",
     "[class*='carousel'] img", "[class*='foto'] img", "[class*='thumb'] img",
@@ -98,36 +104,53 @@ def _looks_like_challenge_page(html: str) -> bool:
     return len(html) < 1500
 
 
-async def _fetch(url: str) -> str:
-    """Fetch page HTML, EthicalScraper first, Playwright as JS fallback."""
+_CHROME_TITLE_MARKERS = (
+    "detalhes de imóvel", "detalhes de imovel", "ficha do imóvel", "ficha do imovel",
+    "property details", "::", " | ",
+)
+
+
+def _title_looks_like_chrome(title: str | None) -> bool:
+    if not title:
+        return True
+    low = title.lower()
+    return any(m in low for m in _CHROME_TITLE_MARKERS)
+
+
+async def _fetch_static(url: str) -> str | None:
     ethical = EthicalScraper(
         user_agent="RealEstateResearchBot/1.0 (+contact: scraper@pearlsofportugal.com)",
-        min_delay=0.0,
-        max_delay=0.5,
-        respect_robots=False,
+        min_delay=0.0, max_delay=0.5, respect_robots=False,
     )
     try:
         response = await asyncio.to_thread(ethical.get, url)
-        html = response.text if response is not None else None
-    except Exception as exc:  # noqa: BLE001 — surface as a clean error
+        return response.text if response is not None else None
+    except Exception as exc:  # noqa: BLE001
         logger.warning("generic fetch (ethical) failed for %s: %s", url, exc)
-        html = None
+        return None
     finally:
         ethical.close()
 
+
+async def _fetch_rendered(url: str) -> str | None:
+    pw = PlaywrightScraper(min_delay=0.0, max_delay=0.5, timeout=30, respect_robots=False)
+    try:
+        return await pw.get_html(url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("generic fetch (playwright) failed for %s: %s", url, exc)
+        return None
+    finally:
+        await pw.close()
+
+
+async def _fetch(url: str) -> str:
+    """Fetch page HTML: static first, Playwright when static is blocked or empty."""
+    html = await _fetch_static(url)
     if html and not _looks_like_challenge_page(html):
         return html
 
     logger.info("generic fetch: falling back to Playwright for %s", url)
-    pw = PlaywrightScraper(min_delay=0.0, max_delay=0.5, timeout=30, respect_robots=False)
-    try:
-        html = await pw.get_html(url)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("generic fetch (playwright) failed for %s: %s", url, exc)
-        html = None
-    finally:
-        await pw.close()
-
+    html = await _fetch_rendered(url)
     if not html:
         raise GenericExtractError("Could not fetch this page.")
     if _looks_like_challenge_page(html):
@@ -148,14 +171,36 @@ def _mapped_suggested_selectors(suggest_result: dict) -> dict[str, str]:
     return selectors
 
 
+def _strip_label_values(raw: dict) -> None:
+    """Null out fields whose value is just a bare label word (a mis-scored selector)."""
+    for key in ("price", "area", "useful_area", "gross_area", "typology", "condition",
+                "district", "county", "parish", "property_type", "bedrooms", "bathrooms"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip().lower() in _LABEL_VALUES:
+            raw.pop(key, None)
+
+
+def _plausible_price_text(candidate: str) -> bool:
+    """Reject regex price matches that are actually years or too small to be a price."""
+    digits = re.sub(r"[^\d]", "", candidate)
+    if not digits:
+        return False
+    value = int(digits)
+    if 1900 <= value <= 2100 and len(digits) == 4:  # a year, not a price
+        return False
+    return value >= 150  # cheapest plausible monthly rent
+
+
 def _text_heuristics(soup: BeautifulSoup, raw: dict) -> None:
     """Fill still-missing scalar fields from a regex sweep of the cleaned body text."""
+    _strip_label_values(raw)
     text = _extract_body_text_without_chrome(soup)
 
     if not raw.get("price"):
-        m = _PRICE_RE.search(text)
-        if m:
-            raw["price"] = m.group(0)
+        for m in _PRICE_RE.finditer(text):
+            if _plausible_price_text(m.group(1)):
+                raw["price"] = m.group(0)
+                break
     if not raw.get("area"):
         m = _AREA_RE.search(text)
         if m:
@@ -258,6 +303,30 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
                     _bump_provenance(provenance, key, "suggester")
     except Exception as exc:  # noqa: BLE001
         logger.warning("suggest_selectors failed for %s: %s", url, exc)
+
+    # Drop mis-scored selector values that are just a label word, and clear their
+    # (now wrong) provenance so the completeness report stays honest.
+    _strip_label_values(raw)
+    for f in _PROVENANCE_FIELDS:
+        if provenance.get(f) and not (raw.get(f) or raw.get("useful_area" if f == "area" else "")):
+            provenance[f] = None
+
+    # If the static HTML gave us essentially nothing (chrome-only title, no price),
+    # the page is probably JS-rendered — retry once with a real browser.
+    if _title_looks_like_chrome(raw.get("title")) and not raw.get("price"):
+        rendered = await _fetch_rendered(url)
+        if rendered and not _looks_like_challenge_page(rendered):
+            html, soup = rendered, BeautifulSoup(rendered, "lxml")
+            await html_cache.set(url, html)
+            r2 = parse_listing_page(html, url, selectors={}, extraction_mode="direct")
+            for key, value in r2.items():
+                overwrite = not raw.get(key)
+                if key == "title" and value and _title_looks_like_chrome(raw.get("title")):
+                    overwrite = not _title_looks_like_chrome(value)
+                if value and overwrite:
+                    raw[key] = value
+                    _bump_provenance(provenance, key, "structured_data")
+            _strip_label_values(raw)
 
     # Layer c — regex heuristics
     before = {f: raw.get(f) for f in _PROVENANCE_FIELDS}

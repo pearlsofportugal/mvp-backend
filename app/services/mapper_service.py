@@ -518,6 +518,12 @@ def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) ->
             return "trespasse"
         if "/Arrendamento/" in url_hint:
             return "rent"
+    # Last resort — many sites (no dedicated business_type field, no URL hint)
+    # only state it in the headline or description ("apartamento arrendado",
+    # "para arrendamento", "renda mensal").
+    text = " ".join(str(raw.get(k) or "") for k in ("title", "raw_description")).lower()
+    if any(w in text for w in ("arrendad", "para arrendamento", "renda mensal", "/mês", "/mes", " por mês")):
+        return "rent"
     return "sale"
 
 

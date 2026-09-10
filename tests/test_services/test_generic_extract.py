@@ -135,6 +135,46 @@ class TestImageHeuristic:
         assert raw["images"] == ["a", "b", "c"]
 
 
+class TestPriceGuard:
+    @pytest.mark.parametrize(("text", "ok"), [
+        ("250 000", True), ("1.300.000", True), ("600", True),
+        ("2026", False), ("1998", False), ("50", False),
+    ])
+    def test_rejects_years_and_tiny_numbers(self, text, ok):
+        assert ge._plausible_price_text(text) is ok
+
+
+class TestStripLabelValues:
+    def test_nulls_out_bare_labels(self):
+        raw = {"price": "Preço", "area": "Área útil", "typology": "T2", "condition": "Usado"}
+        ge._strip_label_values(raw)
+        assert "price" not in raw and "area" not in raw
+        assert raw["typology"] == "T2" and raw["condition"] == "Usado"
+
+
+class TestChromeTitle:
+    @pytest.mark.parametrize(("title", "chrome"), [
+        ("Detalhes de Imóvel LHA2000 :: Euro Estates", True),
+        ("Apartamento T3 | Imobiliária X", True),
+        (None, True),
+        ("Moradia T3 Exclusiva No Centro de Sintra", False),
+        ("Apartamento T1 - Meadela, Viana do Castelo", False),
+    ])
+    def test_detection(self, title, chrome):
+        assert ge._title_looks_like_chrome(title) is chrome
+
+
+class TestBusinessTypeFromText:
+    def test_infers_rent_from_description(self):
+        from app.services.mapper_service import _infer_business_type
+        raw = {"title": "Apartamento T1", "raw_description": "O apartamento é arrendado sem mobília."}
+        assert _infer_business_type(raw) == "rent"
+
+    def test_defaults_to_sale(self):
+        from app.services.mapper_service import _infer_business_type
+        assert _infer_business_type({"title": "Moradia T4", "raw_description": "Excelente moradia."}) == "sale"
+
+
 class TestTextHeuristics:
     def test_fills_missing_price_area_typology_energy(self):
         html = """

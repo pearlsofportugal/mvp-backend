@@ -51,12 +51,16 @@ class PlaywrightScraper:
         extra_headers: dict | None = None,
         wait_until: str = "domcontentloaded",
         content_ready_selector: str | None = None,
+        respect_robots: bool = True,
     ):
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.timeout = timeout * 1000  # Playwright uses ms
         self.extra_headers = extra_headers or {}
         self.wait_until = wait_until
+        # See EthicalScraper.respect_robots — same purpose: only the on-demand
+        # single-URL /ingest path sets this False.
+        self.respect_robots = respect_robots
         # CSS selector that signals the page's real content has rendered (many
         # sites load listing details via a post-load XHR, so domcontentloaded
         # fires on an empty shell). When set, get_html() waits for it directly
@@ -178,10 +182,16 @@ class PlaywrightScraper:
         domain = self._get_domain(url)
         parser, loaded = await self._load_robots(domain)
         if not loaded:
+            if not self.respect_robots:
+                logger.info("robots.txt not loaded for %s — allowing anyway (respect_robots=False)", url)
+                return True
             logger.warning("Blocking %s — robots.txt not loaded (fail-closed)", url)
             return False
         allowed = parser.can_fetch(_DEFAULT_BROWSER_UA, url)
         if not allowed:
+            if not self.respect_robots:
+                logger.info("robots.txt disallows %s — allowing anyway (respect_robots=False)", url)
+                return True
             logger.info("Blocked by robots.txt: %s", url)
         return allowed
 

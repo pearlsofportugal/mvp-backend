@@ -624,12 +624,15 @@ media=[
     if url
 ],
         features=ListingFlags(
-            has_garage=parse_bool(raw.get("garage")),
-            has_elevator=parse_bool(raw.get("elevator")),
-            has_balcony=parse_bool(raw.get("balcony")),
-            has_air_conditioning=parse_bool(raw.get("air_conditioning")),
-            has_pool=parse_bool(raw.get("swimming_pool")),
-            has_garden=parse_bool(raw.get("garden")),
+            # Parsers are inconsistent about the key prefix — the feature keyword
+            # scan emits "garage", but some site parsers emit "has_garage". Accept
+            # both so a feature is never silently dropped in normalization.
+            has_garage=parse_bool(raw.get("garage") or raw.get("has_garage")),
+            has_elevator=parse_bool(raw.get("elevator") or raw.get("has_elevator")),
+            has_balcony=parse_bool(raw.get("balcony") or raw.get("has_balcony")),
+            has_air_conditioning=parse_bool(raw.get("air_conditioning") or raw.get("has_air_conditioning")),
+            has_pool=parse_bool(raw.get("swimming_pool") or raw.get("has_pool") or raw.get("pool")),
+            has_garden=parse_bool(raw.get("garden") or raw.get("has_garden")),
             **(extra_flags or {}),
         ),
         descriptions={k: v for k, v in {
@@ -1194,6 +1197,96 @@ def normalize_partner_payload(raw: dict[str, Any], partner: str) -> PropertySche
     if not normalizer:
         raise ValueError(f"No normalizer registered for partner: '{partner}'")
     return normalizer(raw)
+
+
+# ═══════════════════════════════════════════════════════════
+# Generic normalizer — for sites with no dedicated partner config
+# ═══════════════════════════════════════════════════════════
+
+_GENERIC_PROPERTY_TYPES = (
+    "Moradia Geminada", "Moradia", "Apartamento", "Loja", "Escritório",
+    "Armazém", "Terreno", "Garagem", "Quintinha", "Quinta", "Prédio",
+    "Lote", "Duplex", "Estúdio", "Penthouse", "Villa", "House", "Apartment",
+)
+
+
+def _generic_address_from_raw(raw: dict[str, Any]) -> Address:
+    """Best-effort Address for a site without a dedicated normalizer.
+
+    Prefers explicit district/county/parish keys (from JSON-LD address parts or
+    the selector suggester); otherwise splits a free-form `location` string,
+    assuming a "parish, county, district" or "county, district" ordering as is
+    common on Portuguese sites.
+    """
+    region = _truncate_text(raw.get("district"), 100)
+    city = _truncate_text(raw.get("county"), 100)
+    parish = _truncate_text(raw.get("parish"), 100)
+
+    location_raw = _normalize_whitespace(raw.get("location") or "") or ""
+    if location_raw and not (region and city):
+        parts = [p.strip() for p in re.split(r"[>,]", location_raw) if p.strip()]
+        if len(parts) >= 3:
+            region = region or _truncate_text(parts[-1], 100)
+            city = city or _truncate_text(parts[-2], 100)
+            parish = parish or _truncate_text(parts[-3], 100)
+        elif len(parts) == 2:
+            region = region or _truncate_text(parts[-1], 100)
+            city = city or _truncate_text(parts[-2], 100)
+        elif len(parts) == 1:
+            city = city or _truncate_text(parts[0], 100)
+
+    return Address(
+        country="Portugal",
+        region=region or city,  # many sites omit the district level
+        city=city,
+        area=parish,
+        full_address=_truncate_text(location_raw, 500) or None,
+    )
+
+
+def normalize_generic_payload(raw: dict[str, Any], source_partner: str) -> PropertySchema:
+    """Normalize a raw payload from an unconfigured site into canonical PropertySchema.
+
+    Used by the /ingest endpoint's generic path. Leans entirely on the shared
+    `_build_base_schema` core plus best-effort address/property_type resolution —
+    no site-specific quirks. `source_partner` must already be a valid slug
+    (e.g. 'generic_realkey_pt').
+    """
+    title = _normalize_whitespace(raw.get("title"))
+    property_type = _normalize_whitespace(raw.get("property_type"))
+    if not property_type and title:
+        property_type = _infer_property_type_from_title(
+            title, _GENERIC_PROPERTY_TYPES, startswith=False
+        )
+
+    # Infer typology (T3 / V4) from the title when not scraped — many sites put it
+    # only in the headline. _build_base_schema then derives bedrooms from it.
+    if not raw.get("typology") and title:
+        typ_match = _TYPOLOGY_PATTERN.search(title)
+        if typ_match:
+            raw = {**raw, "typology": typ_match.group(0).upper()}
+
+    partner_id = _normalize_whitespace(raw.get("property_id") or raw.get("reference"))
+    if partner_id:
+        partner_id = re.sub(r"^[^:]+:\s*", "", partner_id).strip() or None
+
+    return _build_base_schema(
+        raw,
+        source_partner=source_partner,
+        business_type=_infer_business_type(raw, url_hint=raw.get("url")),
+        property_type=property_type,
+        partner_id=partner_id,
+        address=_generic_address_from_raw(raw),
+        area_useful=parse_area(raw.get("area") or raw.get("useful_area")),
+        area_gross=parse_area(raw.get("gross_area")),
+        area_land=parse_area(raw.get("land_area")),
+        title=title,
+        condition=_normalize_whitespace(raw.get("condition")),
+        floor=raw.get("floor"),
+        construction_year=parse_int(raw.get("construction_year")),
+        advertiser=_normalize_whitespace(raw.get("advertiser")) or None,
+        contacts=_normalize_whitespace(raw.get("contacts")) or None,
+    )
 
 
 # ───────── PropertySchema → DB model fields ─────────

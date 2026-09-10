@@ -153,7 +153,7 @@ backend/
 Use this process before activating a new partner in production:
 
 1. Create the `SiteConfig` and use `POST /api/v1/sites/preview/selector-suggestions` to bootstrap candidate selectors for the detail page.
-2. Validate individual selectors with `POST /api/v1/sites/preview/selector` until critical fields such as `title`, `price`, `property_type`, and `district` are extracted.
+2. Validate individual selectors with `POST /api/v1/sites/preview/selector` until critical fields such as `title`, `price`, `property_type`, and `district` are extracted. Note: `property_type`/`district` don't always need a selector — a partner may derive them in its mapper normalizer instead (from the URL, or a fixed constant when the site has no such field at all). In that case, validate coverage via the normalized dry-run preview (`run_test_scrape`) rather than expecting the raw selector preview to show them.
 3. Only enable temporary selector debug when needed by passing `_debug_selectors: true` in the selectors payload during troubleshooting.
 4. Add regression tests with realistic HTML snippets for parser and mapper coverage before enabling scheduled scraping.
 5. Do not onboard the next partner until the current partner has stable preview coverage and no critical-field warnings during scrape jobs.

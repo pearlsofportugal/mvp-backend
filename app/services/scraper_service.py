@@ -35,17 +35,20 @@ from app.models.price_history_model import PriceHistory
 from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
 from app.repositories.listings_repository import ListingRepository
+from app.repositories.sold_listing_repository import SoldListingRepository
 from app.services.email_service import send_job_notification
 from app.services.ethics_service import EthicalScraper
 from app.services.playwright_scraper import PlaywrightScraper
-from app.services.mapper_service import normalize_partner_payload, schema_to_listing_dict
+from app.services.mapper_service import (
+    missing_critical_schema_fields,
+    normalize_partner_payload,
+    schema_to_listing_dict,
+)
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
 from app.services.sitemap_service import fetch_sitemap_urls
 from app.services.scrape_job_event_service import record_event
 
 logger = get_logger(__name__)
-
-_CRITICAL_PARSER_FIELDS = ("title", "price", "property_type", "district")
 
 # Boolean amenity flags derived from keyword presence: absence of a match is
 # itself meaningful ("not found on this scrape"), unlike other scalar fields
@@ -56,15 +59,12 @@ _FEATURE_FLAG_FIELDS = frozenset({
     "has_garage", "has_elevator", "has_balcony", "has_air_conditioning", "has_pool", "has_garden",
 })
 
-
-def _missing_critical_parser_fields(raw_data: dict[str, Any]) -> list[str]:
-    """Return critical parser fields that are absent or blank."""
-    missing = []
-    for field in _CRITICAL_PARSER_FIELDS:
-        value = raw_data.get(field)
-        if value is None or not str(value).strip():
-            missing.append(field)
-    return missing
+# Some partner sitemaps never remove sold/reserved listings, so a URL
+# confirmed sold keeps costing a full fetch (ethical delay + JS render) on
+# every scrape forever. Once confirmed, skip it outright for this many days
+# before re-checking — long enough to avoid re-paying the cost every run,
+# short enough that a relisted property isn't missed indefinitely.
+SOLD_URL_CACHE_TTL_DAYS = 14
 
 
 async def recover_stale_jobs(db: AsyncSession) -> int:
@@ -217,6 +217,7 @@ async def _run_scrape_async(
             max_delay=config.get("max_delay") or settings.default_max_delay,
             timeout=settings.playwright_timeout,
             extra_headers=request_headers or {},
+            content_ready_selector=selectors.get("title_selector") or selectors.get("price_selector"),
         )
         logger.info("Job %s using PlaywrightScraper (JS rendering enabled)", job_id)
     else:
@@ -607,6 +608,18 @@ async def _process_listing_url(
     O caller é responsável por chamar job.update_progress() com os contadores actualizados.
     """
     try:
+        # ── Skip URLs já confirmados como vendidos/reservados recentemente ──
+        # Alguns sitemaps de parceiros nunca removem anúncios vendidos, pelo
+        # que o mesmo URL morto voltaria a pagar o custo completo de fetch
+        # (delay ético + render JS) em todos os scrapes seguintes.
+        if await SoldListingRepository.is_recently_confirmed_sold(db, link, SOLD_URL_CACHE_TTL_DAYS):
+            logger.info("Skipping recently-confirmed-sold URL (cached): %s", link)
+            job.add_log("info", "Listing marked as sold/reserved — skipped (cached)", link)
+            job.touch_heartbeat()
+            await db.commit()
+            return False, False, False, False
+        # ─────────────────────────────────────────────────────────────────
+
         detail_html = await _fetch_html(scraper, link)
         if not detail_html:
             job.add_url("failed", link)
@@ -616,7 +629,6 @@ async def _process_listing_url(
             return False, False, True, False
 
         raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
-        logger.error("RAW DATA = %s", raw_data)
         # ── Skip listings vendidos/reservados ──────────────────────────────
         if raw_data.get("is_sold"):
             logger.info("Listing detected as sold/reserved — skipping: %s", link)
@@ -627,12 +639,24 @@ async def _process_listing_url(
                 await db.delete(existing)
                 logger.info("Removed existing listing (now sold): %s", link)
 
+            await SoldListingRepository.mark_sold(db, site_key, link)
+
             job.touch_heartbeat()
             await db.commit()
             return False, False, False, False
         # ─────────────────────────────────────────────────────────────────
 
-        missing_fields = _missing_critical_parser_fields(raw_data)
+        # Listing is active — if it was previously cached as sold (relisted
+        # after being taken off the market), drop the stale cache entry.
+        await SoldListingRepository.unmark_sold(db, link)
+
+        property_schema = normalize_partner_payload(raw_data, site_key)
+
+        # Checked against the normalized schema, not raw_data — some partners
+        # derive these fields purely in the mapper (URL parsing, fixed
+        # constants) rather than via an HTML selector, so they'd never appear
+        # in raw_data even when correctly populated in the final schema.
+        missing_fields = missing_critical_schema_fields(property_schema)
         if missing_fields:
             job.add_log(
                 "warning",
@@ -640,7 +664,6 @@ async def _process_listing_url(
                 link,
             )
 
-        property_schema = normalize_partner_payload(raw_data, site_key)
         is_new = await _persist_listing(db, job_id, property_schema, site_key)
         job.add_url("scraped", link)
         job.touch_heartbeat()
@@ -955,6 +978,12 @@ async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
 
 async def _update_site_confidence_scores(db: AsyncSession, site_key: str, job_uuid: UUID) -> None:
     """Persist field extraction confidence back to the site configuration."""
+    site = (
+        await db.execute(select(SiteConfig).where(SiteConfig.key == site_key))
+    ).scalar_one_or_none()
+    if site is None:
+        return
+
     listings = (
         await db.execute(
             select(Listing)
@@ -962,13 +991,7 @@ async def _update_site_confidence_scores(db: AsyncSession, site_key: str, job_uu
             .options(selectinload(Listing.media_assets))
         )
     ).scalars().all()
-    scores = calculate_confidence(listings)
-
-    site = (
-        await db.execute(select(SiteConfig).where(SiteConfig.key == site_key))
-    ).scalar_one_or_none()
-    if site is None:
-        return
+    scores = calculate_confidence(listings, not_applicable_fields=site.confidence_not_applicable_fields)
 
     # Store field scores + metadata in the same JSON column.
     # _meta is stripped out in SiteConfigRead and exposed as confidence_meta.

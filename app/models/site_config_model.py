@@ -24,6 +24,16 @@ class SiteConfig(Base):
     pagination_type: Mapped[str] = mapped_column(String(20), nullable=False, default="html_next")
     pagination_param: Mapped[str | None] = mapped_column(String(50), nullable=True)
     confidence_scores: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence_not_applicable_fields: Mapped[list[str] | None] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+        comment=(
+            "Scorable confidence fields that structurally never apply to this "
+            "partner (e.g. 'typology' for an English-language site with no "
+            "T-code convention) — excluded from confidence_scores entirely "
+            "rather than counted as a 0% failure."
+        ),
+    )
 
     link_pattern: Mapped[str | None] = mapped_column(String(500))
     image_filter: Mapped[str | None] = mapped_column(String(500))

@@ -73,6 +73,7 @@ class ListingBase(BaseModel):
     # ── Classification ────────────────────────────────────────────────────
     business_type: Literal["sale", "rent", "trespasse"] | None = Field(None, description="Listing transaction type.")
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house').")
+    condition: str | None = Field(None, description="Property condition (e.g. 'New', 'Used', 'Renovated').")
     typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
 
     # ── Details ───────────────────────────────────────────────────────────
@@ -153,6 +154,7 @@ class ListingUpdate(BaseModel):
 
     business_type: Literal["sale", "rent", "trespasse"] | None = None
     property_type: str | None = None
+    condition: str | None = None
     typology: str | None = None
     title: str | None = None
     bedrooms: int | None = Field(None, ge=0)

@@ -40,6 +40,7 @@ class Listing(Base):
     title: Mapped[str | None] = mapped_column(String(500))
     business_type: Mapped[str | None] = mapped_column(String(20), comment="sale, rent, trespasse")
     property_type: Mapped[str | None] = mapped_column(String(50), comment="apartment, house, land, etc.")
+    condition: Mapped[str | None] = mapped_column(String(50), comment="New, Used, Renovated, Novo, Usado, etc.")
     typology: Mapped[str | None] = mapped_column(String(10), comment="T0, T1, T2, T3, etc.")
     bedrooms: Mapped[int | None] = mapped_column(Integer)
     bathrooms: Mapped[int | None] = mapped_column(Integer)

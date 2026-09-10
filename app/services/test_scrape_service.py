@@ -10,13 +10,11 @@ from app.core.logging import get_logger
 from app.models.site_config_model import SiteConfig
 from app.schemas.site_config_schema import TestScrapeNormalized, TestScrapeResponse
 from app.services.ethics_service import EthicalScraper
-from app.services.mapper_service import normalize_partner_payload
+from app.services.mapper_service import missing_critical_schema_fields, normalize_partner_payload
 from app.services.parser_service import parse_listing_page
 from app.services.playwright_scraper import PlaywrightScraper
 
 logger = get_logger(__name__)
-
-_CRITICAL_FIELDS = ("title", "price", "property_type", "district")
 
 
 async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
@@ -31,7 +29,10 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
     html: str | None = None
 
     if site.use_js_render:
-        scraper = PlaywrightScraper(min_delay=1.0, max_delay=2.0, timeout=30)
+        content_ready_selector = site.selectors.get("title_selector") or site.selectors.get("price_selector")
+        scraper = PlaywrightScraper(
+            min_delay=1.0, max_delay=2.0, timeout=30, content_ready_selector=content_ready_selector
+        )
         try:
             html = await scraper.get_html(url)
         except Exception as exc:
@@ -69,39 +70,26 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
         logger.error("test-scrape parse failed for %s: %s", url, exc)
         return TestScrapeResponse(url=url, success=False, error=f"Parse error: {exc}")
 
-    # Missing critical fields check (mirrors scraper_service logic)
-    missing_critical = [
-        f for f in _CRITICAL_FIELDS
-        if not str(raw.get(f, "") or "").strip()
-    ]
-
     # ── Normalize ─────────────────────────────────────────────────────────
     try:
         schema = normalize_partner_payload(raw, site.key)
     except Exception as exc:
         logger.warning("test-scrape normalize failed for %s: %s", url, exc)
-        # Return raw output even if normalization fails
+        # Return raw output even if normalization fails — there's no schema
+        # left to check critical fields against, and the normalization error
+        # itself is the more informative signal here anyway.
         return TestScrapeResponse(
             url=url,
             success=True,
             raw=_safe_raw(raw),
-            missing_critical=missing_critical,
+            missing_critical=[],
             error=f"Normalization error: {exc}",
         )
 
-    # Refine missing_critical: some fields are derived from the URL in the
-    # mapper (e.g. realkey district) and won't appear in the raw parser output.
-    # Remove any "missing" field that is actually present in the normalized schema.
-    _normalized_map = {
-        "district": schema.address.region,
-        "title": schema.title,
-        "price": schema.price.amount if schema.price else None,
-        "property_type": schema.property_type,
-    }
-    missing_critical = [
-        f for f in missing_critical
-        if not (_normalized_map.get(f) is not None and str(_normalized_map[f]).strip())
-    ]
+    # Checked against the normalized schema, not the raw parser dict — some
+    # fields (e.g. bpaproperty's property_type/district) are derived purely
+    # in the mapper (URL parsing, fixed constants) and never appear in raw.
+    missing_critical = missing_critical_schema_fields(schema)
 
     normalized = TestScrapeNormalized(
         title=schema.title,

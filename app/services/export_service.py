@@ -22,6 +22,7 @@ def _listing_to_dict(listing: Listing) -> dict:
         "title": listing.title,
         "business_type": listing.business_type,
         "property_type": listing.property_type,
+        "condition": listing.condition,
         "typology": listing.typology,
         "bedrooms": listing.bedrooms,
         "bathrooms": listing.bathrooms,

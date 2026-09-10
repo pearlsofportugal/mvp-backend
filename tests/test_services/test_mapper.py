@@ -13,8 +13,10 @@ from app.services.mapper_service import (
     normalize_habinedita_payload,
     normalize_pearls_payload,
     normalize_imo_atlantico_payload,
+    normalize_bpaproperty_payload,
     normalize_partner_payload,
     schema_to_listing_dict,
+    missing_critical_schema_fields,
     _infer_business_type,
 )
 
@@ -295,6 +297,8 @@ class TestNormalizeHabineditaPayload:
             "headers": [{"level": "h1", "text": "Moradia em Banda T3"}],
         }
         assert schema.features.is_new_construction is True
+        assert schema.condition == "Novo"
+        assert listing_data["condition"] == "Novo"
         assert listing_data["area_land_m2"] == 185.0
         assert listing_data["raw_description"] == "DescriçãoMoradia nova com garagem e jardim."
         assert listing_data["description"] == "Moradia nova com garagem e jardim."
@@ -341,3 +345,115 @@ class TestNormalizeImoAtlanticoPayload:
         assert schema.address.city == "Câmara de Lobos"
         assert schema.address.area == "Câmara de Lobos"
         assert schema.descriptions["pt"] == "Moradia nova com excelente exposição solar."
+
+
+class TestNormalizeBpapropertyPayload:
+    def test_maps_fields_from_direct_selector_and_text_pattern_output(self):
+        raw = {
+            "url": "https://www.bpaproperty.com/en/property/townhouse/lagos-6132/?reference=BPA5646",
+            "title": "3 Bedroom Townhouse in Boavista Golf and Leisure Resort, Lagos",
+            "location": "Boavista Golf and Leisure Resort, Lagos",
+            "bedrooms": "3 Beds",
+            "bathrooms": "3 Bath",
+            "property_id": "Ref: BPA5646",
+            "energy_certificate": "B-",
+            "gross_area": "217.00 m",
+            "land_area": "264.00 m",
+            "construction_year": "2008",
+            "condition": "Used",
+            "price": "849.000",
+            "raw_description": "This beautifully presented 3-bedroom fully renovated semi-detached townhouse.",
+            "garage": "Yes",
+            "balcony": "Yes",
+            "swimming_pool": "Yes",
+            "garden": "Yes",
+            "images": ["https://crm.bpaproperty.com/media/clients/1/properties/6132/medium/1.jpg"],
+            "alt_texts": [""],
+        }
+
+        schema = normalize_bpaproperty_payload(raw)
+
+        assert schema.source_partner == "bpaproperty"
+        assert schema.business_type == "sale"
+        assert schema.property_type == "Townhouse"
+        assert schema.partner_id == "BPA5646"
+        assert schema.condition == "Used"
+        assert schema.address.region == "Faro"
+        assert schema.address.city == "Lagos"
+        assert schema.address.area == "Boavista Golf and Leisure Resort"
+        assert schema.bedrooms == 3
+        assert schema.bathrooms == 3
+        assert schema.area_gross_m2 == 217.0
+        assert schema.area_land_m2 == 264.0
+        assert schema.construction_year == 2008
+        assert schema.energy_certificate == "B-"
+        assert schema.price.amount == 849000.0
+        assert schema.features.has_garage is True
+        assert schema.features.has_balcony is True
+        assert schema.features.has_pool is True
+        assert schema.features.has_garden is True
+
+    def test_property_type_falls_back_to_url_slug_for_non_residential_types(self):
+        raw = {
+            "url": "https://www.bpaproperty.com/en/property/plot/lagos-7000/?reference=BPA9999",
+            "title": "Building Plot in Lagos",
+            "location": "Lagos",
+            "property_id": "Ref: BPA9999",
+        }
+
+        schema = normalize_bpaproperty_payload(raw)
+
+        assert schema.property_type == "Plot"
+        assert schema.bedrooms is None
+        assert schema.address.city == "Lagos"
+        assert schema.address.area is None
+
+
+class TestMissingCriticalSchemaFields:
+    """These must be checked against the normalized schema, not the raw
+    parser dict — bpaproperty (and realkey/EGO-platform partners) derive
+    property_type/district purely in the mapper (URL parsing, fixed
+    constants), so they'd never appear in raw_data even when correct."""
+
+    def test_bpaproperty_style_payload_has_no_missing_fields(self):
+        raw = {
+            "url": "https://www.bpaproperty.com/en/property/townhouse/lagos-6132/?reference=BPA5646",
+            "title": "3 Bedroom Townhouse in Boavista Golf and Leisure Resort, Lagos",
+            "location": "Boavista Golf and Leisure Resort, Lagos",
+            "price": "849.000",
+        }
+        schema = normalize_bpaproperty_payload(raw)
+
+        assert missing_critical_schema_fields(schema) == []
+
+    def test_reports_missing_property_type_and_district(self):
+        schema = normalize_pearls_payload({
+            "url": "https://example.com/1",
+            "title": "Nice place",
+            "price": "300 000 €",
+        })
+
+        assert sorted(missing_critical_schema_fields(schema)) == ["district", "property_type"]
+
+    def test_price_on_request_is_not_reported_as_missing(self):
+        schema = normalize_pearls_payload({
+            "url": "https://example.com/1",
+            "title": "Nice place",
+            "price": "Sob consulta",
+            "property_type": "Moradia",
+            "district": "Lisboa",
+        })
+
+        assert schema.price_on_request is True
+        assert "price" not in missing_critical_schema_fields(schema)
+
+    def test_all_fields_present_reports_nothing(self):
+        schema = normalize_pearls_payload({
+            "url": "https://example.com/1",
+            "title": "Nice place",
+            "price": "300 000 €",
+            "property_type": "Moradia",
+            "district": "Lisboa",
+        })
+
+        assert missing_critical_schema_fields(schema) == []

@@ -86,6 +86,17 @@ class SiteConfigBase(BaseModel):
     image_exclude_filter: str | None = Field(None, description="Regex pattern — images whose URL matches are excluded (e.g. banners, logos).")
     use_js_render: bool = Field(False, description="Use a headless browser (Playwright) to render JavaScript before parsing.")
     is_active: bool = Field(True, description="Whether this site config is enabled for scraping.")
+    confidence_not_applicable_fields: list[str] | None = Field(
+        default_factory=list,
+        description=(
+            "Confidence fields that structurally never apply to this partner "
+            "(e.g. 'typology' for an English-language site with no T-code "
+            "convention) — excluded from confidence_scores entirely instead "
+            "of counting as a 0% failure. Valid values: price, title, area, "
+            "rooms, location, images, property_type, typology, condition, "
+            "business_type, land_area."
+        ),
+    )
 
     # Schedule fields
     schedule_enabled: bool = Field(False, description="Whether scheduled scraping is active for this site.")
@@ -143,6 +154,9 @@ class SiteConfigUpdate(BaseModel):
     use_js_render: bool | None = None
     is_active: bool | None = None
     confidence_scores: dict[str, float] | None = Field(None, description="Per-field confidence scores (0.0–1.0).")
+    confidence_not_applicable_fields: list[str] | None = Field(
+        None, description="Confidence fields to exclude from scoring for this partner (see SiteConfigBase)."
+    )
     schedule_enabled: bool | None = None
     schedule_interval_minutes: int | None = Field(None, ge=1)
     schedule_start_at: datetime | None = None

@@ -50,12 +50,18 @@ class PlaywrightScraper:
         timeout: int = 30,
         extra_headers: dict | None = None,
         wait_until: str = "domcontentloaded",
+        content_ready_selector: str | None = None,
     ):
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.timeout = timeout * 1000  # Playwright uses ms
         self.extra_headers = extra_headers or {}
         self.wait_until = wait_until
+        # CSS selector that signals the page's real content has rendered (many
+        # sites load listing details via a post-load XHR, so domcontentloaded
+        # fires on an empty shell). When set, get_html() waits for it directly
+        # instead of blindly waiting out the networkidle window.
+        self.content_ready_selector = content_ready_selector
 
         self._robots_cache: dict[str, tuple[RobotFileParser, bool]] = {}
         self._cache_timestamps: dict[str, float] = {}
@@ -74,9 +80,8 @@ class PlaywrightScraper:
     async def _ensure_browser(self) -> None:
             """Start Playwright + Chromium if not already running."""
             if self._browser is not None:
-                # CORREÇÃO 1: `is_connected` é uma propriedade booleana. 
-                # Não usa parênteses () nem 'await'.
-                if self._browser.is_connected:
+                # `is_connected` is a method, not a property — must be called.
+                if self._browser.is_connected():
                     return
     
                 # Se chegou aqui, o browser realmente perdeu a ligação ou crashou
@@ -225,13 +230,28 @@ class PlaywrightScraper:
         page = await ctx.new_page()
         try:
             await page.goto(url, wait_until=self.wait_until, timeout=self.timeout)
-            # Best-effort: wait briefly for JS to finish. Many sites have persistent
-            # websockets/analytics that never reach networkidle — cap at 3 s so we
-            # don't waste time on connections that will never close.
-            try:
-                await page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass  # proceed with whatever is rendered
+            if self.content_ready_selector:
+                # Wait for the actual content, not an idle network — sites that load
+                # listing data via a post-load XHR can sit on open connections
+                # (chat widgets, analytics) that never go idle, forcing the
+                # networkidle wait below to always burn its full timeout.
+                try:
+                    await page.wait_for_selector(
+                        self.content_ready_selector, timeout=8000, state="attached"
+                    )
+                except Exception:
+                    logger.warning(
+                        "content_ready_selector %r never appeared on %s — proceeding anyway",
+                        self.content_ready_selector, url,
+                    )
+            else:
+                # Best-effort: wait briefly for JS to finish. Many sites have persistent
+                # websockets/analytics that never reach networkidle — cap at 3 s so we
+                # don't waste time on connections that will never close.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass  # proceed with whatever is rendered
             html = await page.content()
             logger.debug("Playwright rendered %s (%d bytes)", url, len(html))
             return html

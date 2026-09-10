@@ -72,6 +72,7 @@ class PropertySchema(BaseModel):
         None, description="Listing transaction type: sale, rent, or trespasse (Portuguese business/goodwill transfer)."
     )
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house', 'office').")
+    condition: str | None = Field(None, description="Property condition (e.g. 'New', 'Used', 'Renovated').")
     typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
 
     # ── Details ───────────────────────────────────────────────────────────

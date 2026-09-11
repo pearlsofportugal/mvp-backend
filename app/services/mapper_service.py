@@ -770,6 +770,8 @@ def normalize_ego_platform_payload(raw: dict[str, Any], source_partner: str) -> 
         area_land=parse_area(raw.get("land_area")),
         floor=raw.get("floor"),
         construction_year=parse_int(raw.get("construction_year")),
+        advertiser=_normalize_whitespace(raw.get("advertiser")) or None,
+        contacts=_normalize_whitespace(raw.get("contacts")) or None,
     )
 
 # ═══════════════════════════════════════════════════════════

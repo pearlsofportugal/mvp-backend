@@ -105,7 +105,7 @@ async def ingest_listing(db: AsyncSession, url: str) -> IngestResponse:
             source = "partner_config"
         else:
             schema, provenance, raw = await extract_generic(url)
-            source = "generic"
+            source = "ego_platform" if (schema.source_partner or "").startswith("ego_") else "generic"
     except GenericExtractError as exc:
         return IngestResponse(url=url, success=False, error=str(exc))
     except Exception as exc:  # noqa: BLE001 — one bad page must not 500 the endpoint

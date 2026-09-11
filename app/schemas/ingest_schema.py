@@ -36,7 +36,7 @@ class IngestResponse(BaseModel):
 
     url: str
     success: bool
-    source: Literal["partner_config", "generic"] | None = None
+    source: Literal["partner_config", "generic", "ego_platform"] | None = None
     property: PropertySchema | None = None
     raw: dict | None = Field(
         None,

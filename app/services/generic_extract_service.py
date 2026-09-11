@@ -30,8 +30,16 @@ from app.core.logging import get_logger
 from app.crawler.html_cache import html_cache
 from app.crawler.selector_suggester import suggest_selectors
 from app.schemas.property_schema import PropertySchema
+from app.services.ego_extract_service import (
+    ego_source_partner,
+    extract_ego_platform,
+    looks_like_ego_platform,
+)
 from app.services.ethics_service import EthicalScraper
-from app.services.mapper_service import normalize_generic_payload
+from app.services.mapper_service import (
+    normalize_ego_platform_payload,
+    normalize_generic_payload,
+)
 from app.services.parser_service import (
     _extract_body_text_without_chrome,
     parse_listing_page,
@@ -284,6 +292,14 @@ _PROVENANCE_FIELDS = (
 async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | None], dict]:
     """Extract a listing from an unconfigured site. Returns (schema, provenance, raw)."""
     html = await _fetch(url)
+
+    # eGO Real Estate platform — a single adapter covers every eGO-generated
+    # agency site. The listing data is JS-injected, so render before parsing.
+    if looks_like_ego_platform(html):
+        ego_result = await _extract_via_ego(url, html)
+        if ego_result is not None:
+            return ego_result
+
     await html_cache.set(url, html)  # prime cache so suggest_selectors() reuses it
     soup = BeautifulSoup(html, "lxml")
 
@@ -353,6 +369,30 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
     source_partner = "generic_" + re.sub(r"[^a-z0-9]+", "_", host).strip("_")
 
     schema = normalize_generic_payload(raw, source_partner)
+    return schema, provenance, raw
+
+
+async def _extract_via_ego(
+    url: str, static_html: str
+) -> tuple[PropertySchema, dict[str, str | None], dict] | None:
+    """eGO platform path: render (data is JS-injected), parse, normalize."""
+    # eGO server-renders some blocks but lazy-loads others (gallery, agent
+    # sidebar, parts of the specs) — always render so nothing is missed.
+    rendered = await _fetch_rendered(url)
+    html = rendered if (rendered and not _looks_like_challenge_page(rendered)) else static_html
+
+    raw = extract_ego_platform(html, url)
+    if not raw.get("title") and not raw.get("price"):
+        logger.info("eGO detected but nothing extracted for %s — falling back to generic", url)
+        return None
+
+    await html_cache.set(url, html)
+    schema = normalize_ego_platform_payload(raw, ego_source_partner(url))
+    provenance = {
+        f: "ego_platform"
+        for f in _PROVENANCE_FIELDS
+        if raw.get(f) or (f == "area" and raw.get("useful_area"))
+    }
     return schema, provenance, raw
 
 

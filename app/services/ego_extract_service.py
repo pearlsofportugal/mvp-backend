@@ -119,6 +119,11 @@ def _extract_gallery(soup: BeautifulSoup) -> list[str]:
         # Prefer a large render; normalise the size segment so we don't keep
         # both a 320x240 and a 1280x960 of the same photo.
         big = _PHOTO_SIZE_RE.sub("/Z1280x960/", u)
+        # eGO serves every photo as "<name>.jpg.webp", but the same URL without the
+        # trailing ".webp" returns the original JPEG. Prefer that: WebP can't be
+        # embedded by common PDF tooling (TCPDF) or older GD builds, so a WebP-only
+        # gallery silently disappears from every report built on top of it.
+        big = re.sub(r"(\.(?:jpe?g|png))\.webp$", r"\1", big, flags=re.IGNORECASE)
         best.setdefault(photo_id, big)
     return list(best.values())
 

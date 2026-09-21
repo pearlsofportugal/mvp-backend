@@ -109,3 +109,19 @@ def test_feeds_ego_normalizer_end_to_end():
     assert schema.advertiser == "Maria do Céu Pinto"
     assert schema.contacts == "969363823"
     assert schema.source_partner == "ego_goldempire_pt"
+
+
+def test_gallery_prefers_original_jpeg_over_webp_variant():
+    page = """
+    <html><body>
+      <img class="Streamed" data-imgthumb="https://images.egorealestate.com/Z320x240/S5/C1/P1/Tphoto/IDaaaa1111.jpg.webp">
+      <img class="Streamed" data-imgthumb="https://images.egorealestate.com/Z320x240/S5/C1/P1/Tphoto/IDbbbb2222.png.webp">
+      <img class="Streamed" data-imgthumb="https://images.egorealestate.com/Z320x240/S5/C1/P1/Tphoto/IDcccc3333.jpg">
+    </body></html>
+    """
+    imgs = extract_ego_platform(page, "https://www.example-ego.pt/imovel/x/1")["images"]
+    assert imgs == [
+        "https://images.egorealestate.com/Z1280x960/S5/C1/P1/Tphoto/IDaaaa1111.jpg",
+        "https://images.egorealestate.com/Z1280x960/S5/C1/P1/Tphoto/IDbbbb2222.png",
+        "https://images.egorealestate.com/Z1280x960/S5/C1/P1/Tphoto/IDcccc3333.jpg",
+    ]

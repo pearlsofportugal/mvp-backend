@@ -8,6 +8,7 @@ from app.models.background_job_model import BackgroundJob
 from app.models.site_config_model import SiteConfig
 from app.models.field_mapping_model import FieldMapping, CharacterMapping
 from app.models.imodigi_export_model import ImodigiExport
+from app.models.sold_listing_model import SoldListingUrl
 
 __all__ = [
     "Listing",
@@ -20,4 +21,5 @@ __all__ = [
     "FieldMapping",
     "CharacterMapping",
     "ImodigiExport",
+    "SoldListingUrl",
 ]

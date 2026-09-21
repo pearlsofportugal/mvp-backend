@@ -5,7 +5,6 @@ matched/rejected), detects the next page URL, and optionally samples thumbnail
 images. No DB writes.
 """
 import asyncio
-import re
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -14,7 +13,7 @@ from app.core.logging import get_logger
 from app.models.site_config_model import SiteConfig
 from app.schemas.site_config_schema import TestListingPageRequest, TestListingPageResponse
 from app.services.ethics_service import EthicalScraper
-from app.services.parser_service import parse_next_page
+from app.services.parser_service import extract_listing_links, parse_next_page
 
 logger = get_logger(__name__)
 
@@ -67,24 +66,11 @@ async def run_test_listing_page(
     soup = BeautifulSoup(html, "lxml")
     base_url = site.base_url or url
 
-    matched: list[str] = []
-    rejected: list[str] = []
-    seen: set[str] = set()
-
     try:
-        for a_tag in soup.select(link_selector):
-            href = a_tag.get("href")
-            if not href:
-                continue
-            absolute = urljoin(base_url, href)
-            if absolute in seen:
-                continue
-            seen.add(absolute)
-
-            if link_pattern and not re.search(link_pattern, absolute):
-                rejected.append(absolute)
-            else:
-                matched.append(absolute)
+        matched, rejected = extract_listing_links(html, base_url, {
+            "listing_link_selector": link_selector,
+            "listing_link_pattern": link_pattern,
+        })
     except Exception as exc:
         logger.warning("test-listing-page link extraction error: %s", exc)
         return TestListingPageResponse(

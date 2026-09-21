@@ -102,7 +102,9 @@ class ListingService:
             )
         pages = math.ceil(total / page_size) if total > 0 else 0
         return ListingSearchResponse(items=items), Meta(page=page, page_size=page_size, total=total, pages=pages)
-
+    @staticmethod
+    async def get_source_partners(db: AsyncSession) -> list[str]:
+        return await ListingRepository.get_source_partners(db)
     @staticmethod
     async def get_stats(
         db: AsyncSession,
@@ -164,11 +166,15 @@ class ListingService:
         for field, value in update_data.items():
             setattr(listing, field, value)
 
-        # Recalculate price_per_m2 whenever its inputs are touched
-        if "price_amount" in update_data or "area_useful_m2" in update_data:
-            if listing.price_amount is not None and listing.area_useful_m2:
+        # Recalculate price_per_m2 whenever its inputs are touched.
+        # Mirrors mapper_service._build_base_schema: gross area wins over useful
+        # area when both are present, so editing a listing doesn't silently
+        # change which area price_per_m2 is derived from.
+        if "price_amount" in update_data or "area_useful_m2" in update_data or "area_gross_m2" in update_data:
+            reference_area = listing.area_gross_m2 or listing.area_useful_m2
+            if listing.price_amount is not None and reference_area:
                 listing.price_per_m2 = (
-                    Decimal(str(listing.price_amount)) / Decimal(str(listing.area_useful_m2))
+                    Decimal(str(listing.price_amount)) / Decimal(str(reference_area))
                 ).quantize(Decimal("0.01"))
             else:
                 listing.price_per_m2 = None

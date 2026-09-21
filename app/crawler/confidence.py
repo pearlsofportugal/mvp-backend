@@ -29,45 +29,68 @@ _SCORABLE_FIELDS = (
 _PRICE_RE = re.compile(r"\d.*(?:€|eur|euro)", re.IGNORECASE)
 _AREA_RE = re.compile(r"\d+(?:[\.,]\d+)?\s*(?:m2|m²|metros?)", re.IGNORECASE)
 _TYPOLOGY_RE = re.compile(r"\bT\d+(?:\+\d+)?\b", re.IGNORECASE)
-_CONDITION_RE = re.compile(r"\b(?:usado|novo|renovado|recuperado|excelente|bom\s+estado|em\s+construcao|na\s+planta|para\s+recuperar)\b", re.IGNORECASE)
+_CONDITION_RE = re.compile(
+    r"\b(?:usado|novo|renovado|recuperado|excelente|bom\s+estado|em\s+construcao|na\s+planta|para\s+recuperar|"
+    r"used|new|renovated|refurbished|excellent|good\s+condition|under\s+construction|off[\s-]?plan|to\s+restore)\b",
+    re.IGNORECASE,
+)
 _BUSINESS_RE = re.compile(r"\b(?:venda|comprar|arrendar|arrendamento|sale|rent|buy)\b", re.IGNORECASE)
-_PROPERTY_TYPE_RE = re.compile(r"\b(?:moradia|apartamento|terreno|loja|armaz[eé]m|escrit[oó]rio|garagem|quintinha|quinta|vivenda)\b", re.IGNORECASE)
+_PROPERTY_TYPE_RE = re.compile(
+    r"\b(?:moradia|apartamento|terreno|loja|armaz[eé]m|escrit[oó]rio|garagem|quintinha|quinta|vivenda|"
+    r"townhouse|apartment|house|villa|plot|land|shop|warehouse|office|garage|farm|business|"
+    r"hotel|guesthouse|investment)\b",
+    re.IGNORECASE,
+)
 
 
-def calculate_confidence(results: list[Any]) -> dict[str, float]:
-    """Return field-level extraction coverage for a completed crawl."""
+def calculate_confidence(
+    results: list[Any],
+    not_applicable_fields: Sequence[str] | None = None,
+) -> dict[str, float]:
+    """Return field-level extraction coverage for a completed crawl.
+
+    `not_applicable_fields` excludes fields that structurally never apply to
+    this partner (e.g. "typology" for an English-language site with no T-code
+    convention) from the result entirely — they're left out of the returned
+    dict rather than scored as a 0% failure, so a partner's average reflects
+    what's actually achievable for it instead of being permanently dragged
+    down by fields it could never have populated in the first place.
+    """
+    excluded = set(not_applicable_fields or ())
+    scorable_fields = tuple(f for f in _SCORABLE_FIELDS if f not in excluded)
+
     total = len(results)
     if total == 0:
-        return {field: 0.0 for field in _SCORABLE_FIELDS}
+        return {field: 0.0 for field in scorable_fields}
 
-    presence_counts = {field: 0 for field in _SCORABLE_FIELDS}
+    presence_counts = {field: 0 for field in scorable_fields}
     for result in results:
-        if _has_price(result):
+        if "price" in presence_counts and _has_price(result):
             presence_counts["price"] += 1
-        if _has_title(result):
+        if "title" in presence_counts and _has_title(result):
             presence_counts["title"] += 1
-        if _has_area(result):
+        if "area" in presence_counts and _has_area(result):
             presence_counts["area"] += 1
-        if _has_rooms(result):
+        if "rooms" in presence_counts and _has_rooms(result):
             presence_counts["rooms"] += 1
-        if _has_location(result):
+        if "location" in presence_counts and _has_location(result):
             presence_counts["location"] += 1
-        if _has_images(result):
+        if "images" in presence_counts and _has_images(result):
             presence_counts["images"] += 1
-        if _has_valid_field(result, "property_type", _PROPERTY_TYPE_RE):
+        if "property_type" in presence_counts and _has_valid_field(result, "property_type", _PROPERTY_TYPE_RE):
             presence_counts["property_type"] += 1
-        if _has_valid_field(result, "typology", _TYPOLOGY_RE):
+        if "typology" in presence_counts and _has_valid_field(result, "typology", _TYPOLOGY_RE):
             presence_counts["typology"] += 1
-        if _has_valid_field(result, "condition", _CONDITION_RE):
+        if "condition" in presence_counts and _has_valid_field(result, "condition", _CONDITION_RE):
             presence_counts["condition"] += 1
-        if _has_valid_field(result, "business_type", _BUSINESS_RE):
+        if "business_type" in presence_counts and _has_valid_field(result, "business_type", _BUSINESS_RE):
             presence_counts["business_type"] += 1
-        if _has_land_area(result):
+        if "land_area" in presence_counts and _has_land_area(result):
             presence_counts["land_area"] += 1
 
     return {
         field: round(presence_counts[field] / total, 2)
-        for field in _SCORABLE_FIELDS
+        for field in scorable_fields
     }
 
 

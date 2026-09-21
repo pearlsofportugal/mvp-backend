@@ -76,7 +76,16 @@ class ListingRepository:
         total = rows[0][1]                   # total_count da primeira linha
     
         return listings, total
+    @staticmethod
+    async def get_source_partners(db: AsyncSession) -> list[str]:
+        result = await db.execute(
+            select(Listing.source_partner)
+            .where(Listing.source_partner.isnot(None))
+            .distinct()
+            .order_by(Listing.source_partner)
+        )
 
+        return list(result.scalars().all())
     @staticmethod
     async def get_listings_for_export(db: AsyncSession, filters: dict, limit: int | None = None) -> list[Listing]:
         query = apply_listing_filters(select(Listing), filters).order_by(Listing.created_at.desc())

@@ -1,7 +1,11 @@
 """In-memory store for short-lived background jobs (enrichment & Imodigi bulk export).
 
-Jobs are kept only for the lifetime of the process. State is stored in a module-level
-dict keyed by job UUID — no DB persistence required for these ephemeral operations.
+Jobs live primarily in a module-level dict keyed by job UUID, for fast
+same-instance polling with no DB round trip. Each job is also mirrored into
+the durable `background_jobs` table (see background_job_service /
+persist_snapshot below) at creation, periodically during the run, and at
+completion — so a process restart or a request landing on a different
+instance can still recover the last known progress instead of a bare 404.
 
 Concurrency note: all mutations go through plain dict accesses which are GIL-protected
 in CPython. This is safe for asyncio code running in a single event-loop thread.
@@ -13,6 +17,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
+
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Supported job types
 JOB_TYPE_ENRICHMENT = "enrichment"
@@ -72,10 +80,18 @@ class BulkJobState:
             self.errors.append(msg)
 
 
-def create_job(job_type: str, total: int) -> BulkJobState:
-    """Register a new job in the store and return its initial state."""
+def create_job(job_type: str, total: int, *, job_id: UUID | None = None) -> BulkJobState:
+    """Register a new job in the store and return its initial state.
+
+    `job_id` lets a caller pin this in-memory job to an ID it already
+    allocated elsewhere — used to mirror the job in the durable
+    `BackgroundJob` table (see background_job_service) under the same ID, so
+    a status lookup can fall back to the DB if this process instance no
+    longer has the job in memory (restart, or a different instance in a
+    multi-instance deployment).
+    """
     evict_completed_jobs()
-    job = BulkJobState(id=uuid4(), job_type=job_type, status=STATUS_RUNNING, total=total)
+    job = BulkJobState(id=job_id or uuid4(), job_type=job_type, status=STATUS_RUNNING, total=total)
     _JOBS[job.id] = job
     return job
 
@@ -98,3 +114,28 @@ def evict_completed_jobs(max_age_seconds: int = 3600) -> int:
     for jid in to_remove:
         del _JOBS[jid]
     return len(to_remove)
+
+
+async def persist_snapshot(job: BulkJobState) -> None:
+    """Mirror this job's current progress into the durable BackgroundJob row.
+
+    Best-effort: a failure to persist must not abort the caller's job loop —
+    the in-memory state (used for live polling on this instance) is
+    unaffected either way. Call this periodically (not on every single item,
+    to avoid a DB round trip per item in a large batch) and always once more
+    after the job reaches a terminal state.
+    """
+    from app.services import background_job_service
+
+    try:
+        await background_job_service.update_job(
+            job.id,
+            done=job.done,
+            failed=job.failed,
+            skipped=job.skipped,
+            errors=job.errors,
+            result=job.result,
+            status=job.status,
+        )
+    except Exception:
+        logger.warning("Failed to persist durable snapshot for job %s", job.id, exc_info=True)

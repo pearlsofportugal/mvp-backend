@@ -113,6 +113,25 @@ pytest -v
 - `force: true` regenera mesmo que o campo já tenha valor
 - Se `keywords` for vazio, são inferidas automaticamente a partir do listing
 
+### Ingest
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/ingest` | Extract a single listing from any URL (nothing is persisted) |
+
+Synchronous and user-facing: a person pastes one link and waits for the
+response. If the host matches an active `SiteConfig` the precise selector
+pipeline runs; otherwise a generic layered pipeline does (structured data →
+selector suggester → regex heuristics → optional LLM fallback). The response
+carries a `completeness.missing` list so the caller knows which fields still
+need a human, plus `field_provenance` recording which layer supplied each field.
+
+Sites built on the **eGO Real Estate** platform are handled by a single adapter
+covering every eGO domain, and are always rendered in headless Chromium because
+eGO injects its listing data with JavaScript — see
+[docs/ego-adapter.md](docs/ego-adapter.md). This is why the Cloud Run service is
+sized for a browser process (memory, request timeout and concurrency in
+`cloudbuild.yaml`).
+
 ### Export
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -135,9 +154,15 @@ backend/
 │   ├── services/         # Business logic (scraping, parsing, enrichment)
 │   └── core/             # Logging, exceptions
 ├── tests/                # pytest test suite
+├── docs/                 # Topic docs (eGO adapter, scalable workers)
 ├── docker-compose.yml    # PostgreSQL + API
+├── cloudbuild.yaml       # CI tests + image build + Cloud Run deploy
 └── Dockerfile
 ```
+
+### Topic docs
+- [docs/ego-adapter.md](docs/ego-adapter.md) — eGO Real Estate platform adapter, and why `/ingest` renders pages in a browser
+- [docs/scalable-workers.md](docs/scalable-workers.md) — API + scraping worker processes, Cloud Tasks dispatch
 
 ## Ethical Scraping Rules
 
@@ -148,12 +173,18 @@ backend/
 5. **Per-domain robots.txt cache** — 1-hour TTL to avoid hammering robots.txt endpoints
 6. **URL deduplication** — within a job, the same URL is never fetched twice
 
+These rules govern the scheduled scraping jobs. The on-demand `/api/v1/ingest`
+path is currently an exception to rule 1: it constructs its scrapers with
+`respect_robots=False`, on the rationale recorded in
+`generic_extract_service.py` that the caller is a human pasting a single link
+they are already viewing. Rules 2-6 still apply there.
+
 ## Partner Onboarding Workflow
 
 Use this process before activating a new partner in production:
 
 1. Create the `SiteConfig` and use `POST /api/v1/sites/preview/selector-suggestions` to bootstrap candidate selectors for the detail page.
-2. Validate individual selectors with `POST /api/v1/sites/preview/selector` until critical fields such as `title`, `price`, `property_type`, and `district` are extracted.
+2. Validate individual selectors with `POST /api/v1/sites/preview/selector` until critical fields such as `title`, `price`, `property_type`, and `district` are extracted. Note: `property_type`/`district` don't always need a selector — a partner may derive them in its mapper normalizer instead (from the URL, or a fixed constant when the site has no such field at all). In that case, validate coverage via the normalized dry-run preview (`run_test_scrape`) rather than expecting the raw selector preview to show them.
 3. Only enable temporary selector debug when needed by passing `_debug_selectors: true` in the selectors payload during troubleshooting.
 4. Add regression tests with realistic HTML snippets for parser and mapper coverage before enabling scheduled scraping.
 5. Do not onboard the next partner until the current partner has stable preview coverage and no critical-field warnings during scrape jobs.

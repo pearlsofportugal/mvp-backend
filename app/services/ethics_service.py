@@ -42,6 +42,7 @@ class EthicalScraper:
         max_retries: int = 3,
         backoff_factor: float = 2.0,
         extra_headers: dict | None = None,
+        respect_robots: bool = True,
     ):
         self.min_delay = min_delay
         self.max_delay = max_delay
@@ -49,6 +50,10 @@ class EthicalScraper:
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
+        # When False, robots.txt rules are logged but not enforced. Only used for
+        # the on-demand single-URL /ingest path (a human pasting one link they are
+        # already looking at), never for automated bulk crawling.
+        self.respect_robots = respect_robots
 
         # Robots.txt cache: domain -> (parser, is_loaded_successfully, expires_at)
         # Single dict for atomic reads/writes — no race between cache and timestamps.
@@ -100,6 +105,37 @@ class EthicalScraper:
             # Cannot resolve or invalid hostname — let robots.txt/HTTP layer handle it
             return False
 
+    _ROBOTS_FETCH_ATTEMPTS = 3
+    _ROBOTS_RETRY_DELAY_SECONDS = 1.5
+    _ROBOTS_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+    def _fetch_robots_response(self, robots_url: str) -> "Response | None":
+        """Fetch robots.txt with a couple of retries for transient failures.
+
+        A momentary network blip or 5xx must not fail-close an entire site for
+        the full ROBOTS_CACHE_TTL (1 hour) — that's wildly disproportionate to
+        an issue a normal page fetch would just retry past (HttpAdapter already
+        retries 429/5xx for regular page requests; robots.txt used `get_raw`,
+        which bypasses that retry logic entirely since it needs to see 404/403
+        distinctly).
+        """
+        response = None
+        for attempt in range(self._ROBOTS_FETCH_ATTEMPTS):
+            response = self._http.get_raw(robots_url)
+            transient = response is None or response.status_code in self._ROBOTS_RETRYABLE_STATUS
+            if not transient:
+                return response
+            if attempt < self._ROBOTS_FETCH_ATTEMPTS - 1:
+                logger.info(
+                    "Transient failure fetching %s (attempt %d/%d)%s — retrying",
+                    robots_url,
+                    attempt + 1,
+                    self._ROBOTS_FETCH_ATTEMPTS,
+                    f" (HTTP {response.status_code})" if response is not None else "",
+                )
+                time.sleep(self._ROBOTS_RETRY_DELAY_SECONDS)
+        return response
+
     def _load_robots(self, domain: str) -> tuple[RobotFileParser, bool]:
         """Load and cache robots.txt for a domain."""
         now = time.time()
@@ -119,7 +155,7 @@ class EthicalScraper:
 
         loaded = False
         try:
-            response = self._http.get_raw(robots_url)
+            response = self._fetch_robots_response(robots_url)
             if response is None:
                 # Connection/timeout error — fail-closed
                 logger.warning(
@@ -178,11 +214,17 @@ class EthicalScraper:
 
         # FAIL-CLOSED: if robots.txt failed to load, block everything
         if not loaded:
+            if not self.respect_robots:
+                logger.info("robots.txt not loaded for %s — allowing anyway (respect_robots=False)", url)
+                return True
             logger.warning("Blocking %s — robots.txt not loaded (fail-closed)", url)
             return False
 
         allowed = parser.can_fetch(self.user_agent, url)
         if not allowed:
+            if not self.respect_robots:
+                logger.info("robots.txt disallows %s — allowing anyway (respect_robots=False)", url)
+                return True
             logger.info("Blocked by robots.txt: %s", url)
         return allowed
 

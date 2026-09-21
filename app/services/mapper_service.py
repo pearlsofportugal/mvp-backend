@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════
 # Configuration Cache
 # ═══════════════════════════════════════════════════════════
-_TYPOLOGY_PATTERN = re.compile(r"[TtVv](\d+)")
+_TYPOLOGY_PATTERN = re.compile(r"\b[TtVv](\d+)\b")
 _EGO_REF_PATTERN = re.compile(r"^Ref\.\s*")
 _CLEAN_DESC_PREFIX_PATTERN = re.compile(r"^(descriç[aã]o|description)\s*[:\-]?\s*", re.IGNORECASE)
 _CLEAN_DESC_PUNCT_SPACES = re.compile(r"\s+([,.;:!?])")
@@ -71,6 +71,30 @@ _DEFAULT_CURRENCY_MAP = {
     "jpy": "JPY",
 }
 
+CRITICAL_SCHEMA_FIELDS = ("title", "price", "property_type", "district")
+
+
+def missing_critical_schema_fields(schema: PropertySchema) -> list[str]:
+    """Return which of the critical listing fields are absent from the
+    normalized schema — checked here (not on the raw parser dict) because
+    some partners derive these fields purely in the mapper (URL parsing,
+    fixed constants) rather than from an HTML selector, e.g. bpaproperty's
+    property_type (from the URL slug) and district (hardcoded "Faro"), or
+    realkey's URL-derived district. A price-on-request listing is not
+    "missing" a price — it genuinely has none.
+    """
+    missing = []
+    if not schema.title or not schema.title.strip():
+        missing.append("title")
+    if schema.price.amount is None and not schema.price_on_request:
+        missing.append("price")
+    if not schema.property_type or not schema.property_type.strip():
+        missing.append("property_type")
+    if not schema.address.region or not schema.address.region.strip():
+        missing.append("district")
+    return missing
+
+
 _LISTING_STRING_LIMITS = {
     "partner_id": 255,
     "source_partner": 50,
@@ -78,6 +102,7 @@ _LISTING_STRING_LIMITS = {
     "title": 500,
     "business_type": 20,
     "property_type": 50,
+    "condition": 50,
     "typology": 10,
     "floor": 20,
     "price_currency": 3,
@@ -139,34 +164,34 @@ async def _load_currency_map() -> dict[str, str]:
         ):
             return _CURRENCY_MAP_CACHE
 
-    try:
-        from sqlalchemy import select
-        from app.models.field_mapping_model import CharacterMapping
+        try:
+            from sqlalchemy import select
+            from app.models.field_mapping_model import CharacterMapping
 
-        async with async_session_factory() as db:
-            result = await db.execute(
-                select(CharacterMapping).where(
-                    CharacterMapping.category == "currency",
-                    CharacterMapping.is_active.is_(True),
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(CharacterMapping).where(
+                        CharacterMapping.category == "currency",
+                        CharacterMapping.is_active.is_(True),
+                    )
                 )
-            )
-            mappings = result.scalars().all()
+                mappings = result.scalars().all()
 
-            if mappings:
-                currency_map = {m.source_chars: m.target_chars for m in mappings}
-                # Add lowercase variants
-                extended_map = {}
-                for k, v in currency_map.items():
-                    extended_map[k] = v
-                    extended_map[k.lower()] = v
-                
-                _CURRENCY_MAP_CACHE = extended_map
-                _CACHE_TIMESTAMP = now
-                logger.debug("Loaded %d currency mappings from DB", len(currency_map))
-                return _CURRENCY_MAP_CACHE
+                if mappings:
+                    currency_map = {m.source_chars: m.target_chars for m in mappings}
+                    # Add lowercase variants
+                    extended_map = {}
+                    for k, v in currency_map.items():
+                        extended_map[k] = v
+                        extended_map[k.lower()] = v
 
-    except Exception as e:
-        logger.warning("Could not load currency map from DB: %s. Using defaults.", str(e))
+                    _CURRENCY_MAP_CACHE = extended_map
+                    _CACHE_TIMESTAMP = now
+                    logger.debug("Loaded %d currency mappings from DB", len(currency_map))
+                    return _CURRENCY_MAP_CACHE
+
+        except Exception as e:
+            logger.warning("Could not load currency map from DB: %s. Using defaults.", str(e))
 
     return _DEFAULT_CURRENCY_MAP
 
@@ -196,11 +221,25 @@ async def init_mapper_cache() -> None:
 
 
 
-def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
+_MIN_PLAUSIBLE_PRICE = {
+    "sale": Decimal("1000"),
+    "rent": Decimal("50"),
+}
+_DEFAULT_MIN_PLAUSIBLE_PRICE = Decimal("50")
+
+
+def parse_price(
+    raw: str | None,
+    business_type: str | None = None,
+) -> tuple[Decimal | None, str | None]:
     """Parse a price string like '250 000 €' into (Decimal(250000), 'EUR').
 
     Returns (Decimal('-1'), None) for 'price on request' strings.
     Returns (None, None) for empty input or unparseable strings.
+
+    `business_type` tunes the "suspiciously low" sanity floor — rent listings
+    are routinely priced well under 1000 (e.g. a room at 350 EUR/month), so
+    the sale-oriented floor must not reject them.
     """
     if not raw:
         return None, None
@@ -235,7 +274,8 @@ def parse_price(raw: str | None) -> tuple[Decimal | None, str | None]:
         logger.warning("Failed to parse price amount from: '%s'", raw)
         return None, None
 
-    if amount < Decimal("1000"):
+    min_plausible = _MIN_PLAUSIBLE_PRICE.get(business_type or "", _DEFAULT_MIN_PLAUSIBLE_PRICE)
+    if amount < min_plausible:
         logger.warning("Suspiciously low price (%s) parsed from: '%s'", amount, raw)
         return None, None
 
@@ -269,16 +309,37 @@ def parse_area(raw: str | None) -> float | None:
         return None
 
     num_str = match.group(1).strip().replace(" ", "")
-    # Detect European thousands separator: digit(s) + dot + exactly 3 digits
-    # e.g. "2.408" → 2408.0  but "120.5" → 120.5
-    if re.match(r"^\d+\.\d{3}$", num_str):
-        num_str = num_str.replace(".", "")
-    else:
-        num_str = num_str.replace(",", ".")
+    num_str = _normalize_decimal_separators(num_str)
     try:
         return float(num_str)
     except ValueError:
         return None
+
+
+def _normalize_decimal_separators(num_str: str) -> str:
+    """Resolve mixed '.'/',' thousands vs. decimal separators into a plain float string.
+
+    Handles European (1.500,50), American (1,234.56), and thousands-only
+    (2.408 / 2,408) formats — same heuristic used by parse_price.
+    """
+    if "," in num_str and "." in num_str:
+        if num_str.rfind(",") > num_str.rfind("."):
+            # European: '.' is the thousands separator, ',' is decimal
+            return num_str.replace(".", "").replace(",", ".")
+        # American: ',' is the thousands separator, '.' is decimal
+        return num_str.replace(",", "")
+
+    if "," in num_str:
+        # A lone comma in an area string is always a decimal separator
+        # (areas are rarely written with a comma thousands separator).
+        return num_str.replace(",", ".")
+
+    if "." in num_str:
+        parts = num_str.split(".")
+        if all(len(p) == 3 for p in parts[1:]):
+            return num_str.replace(".", "")
+
+    return num_str
 
 
 # ───────── Integer Parsing ─────────
@@ -437,14 +498,31 @@ def partner_normalizer(key: str) -> Callable:
 _NOT_SET = object()  # sentinel — distinguishes "not provided" from None
 
 _BUSINESS_TYPE_RENT_KEYWORDS = ("arrend", "arrendar", "arrendamento", "rent", "rental", "aluguer")
+_BUSINESS_TYPE_TRESPASSE_KEYWORDS = ("trespasse", "trespass")
 
 
 def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) -> str:
-    """Infer 'rent' or 'sale' from raw payload fields or an optional URL hint."""
+    """Infer 'sale', 'rent', or 'trespasse' from raw payload fields or an optional URL hint.
+
+    Trespasse (business/goodwill transfer, distinct from selling the property
+    itself) is checked first: it's a business type in its own right and must
+    not fall through to 'sale' just because it isn't a rent keyword.
+    """
     val = (raw.get("business_type") or raw.get("business_state") or "").lower()
+    if any(w in val for w in _BUSINESS_TYPE_TRESPASSE_KEYWORDS):
+        return "trespasse"
     if any(w in val for w in _BUSINESS_TYPE_RENT_KEYWORDS):
         return "rent"
-    if url_hint and "/Arrendamento/" in url_hint:
+    if url_hint:
+        if "/Trespasse/" in url_hint:
+            return "trespasse"
+        if "/Arrendamento/" in url_hint:
+            return "rent"
+    # Last resort — many sites (no dedicated business_type field, no URL hint)
+    # only state it in the headline or description ("apartamento arrendado",
+    # "para arrendamento", "renda mensal").
+    text = " ".join(str(raw.get(k) or "") for k in ("title", "raw_description")).lower()
+    if any(w in text for w in ("arrendad", "para arrendamento", "renda mensal", "/mês", "/mes", " por mês")):
         return "rent"
     return "sale"
 
@@ -490,6 +568,7 @@ def _build_base_schema(
     # Optional overrides — if omitted, values are read/computed from raw
     bedrooms: int | None | object = _NOT_SET,
     title: str | None | object = _NOT_SET,
+    condition: str | None | object = _NOT_SET,
     floor: str | None = None,
     construction_year: int | None = None,
     seo: dict[str, Any] | None = None,
@@ -511,15 +590,16 @@ def _build_base_schema(
     if title is _NOT_SET:
         title = raw.get("title")
 
-    price_amount, price_currency = parse_price(raw.get("price"))
+    if condition is _NOT_SET:
+        condition = _normalize_whitespace(raw.get("condition"))
+
+    price_amount, price_currency = parse_price(raw.get("price"), business_type=business_type)
     price_per_m2_amount = None
 
     if price_amount is not None and price_amount != PRICE_ON_REQUEST:
         price_per_m2_amount = calculate_price_per_m2(price_amount, area_gross or area_useful)
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
-
-    # price_for_money = None if (is_on_request or price_amount is None) else float(price_amount)
 
     return PropertySchema(
         partner_id=partner_id,
@@ -528,14 +608,14 @@ def _build_base_schema(
         title=title,  # type: ignore[arg-type]
         business_type=business_type,
         property_type=property_type,
+        condition=condition,  # type: ignore[arg-type]
         typology=raw.get("typology"),
         bedrooms=bedrooms,  # type: ignore[arg-type]
         bathrooms=parse_int(raw.get("bathrooms")),
         floor=floor,
         construction_year=construction_year,
-        price=Money(    amount=_price_amount_to_money(price_amount),
-    currency=price_currency),
-
+        price=Money(amount=_price_amount_to_money(price_amount), currency=price_currency),
+        price_on_request=is_on_request,
         price_per_m2=Money(
             amount=float(price_per_m2_amount) if price_per_m2_amount else None,
             currency=price_currency,
@@ -550,11 +630,15 @@ media=[
     if url
 ],
         features=ListingFlags(
-            has_garage=parse_bool(raw.get("garage")),
-            has_elevator=parse_bool(raw.get("elevator")),
-            has_balcony=parse_bool(raw.get("balcony")),
-            has_air_conditioning=parse_bool(raw.get("air_conditioning")),
-            has_pool=parse_bool(raw.get("swimming_pool")),
+            # Parsers are inconsistent about the key prefix — the feature keyword
+            # scan emits "garage", but some site parsers emit "has_garage". Accept
+            # both so a feature is never silently dropped in normalization.
+            has_garage=parse_bool(raw.get("garage") or raw.get("has_garage")),
+            has_elevator=parse_bool(raw.get("elevator") or raw.get("has_elevator")),
+            has_balcony=parse_bool(raw.get("balcony") or raw.get("has_balcony")),
+            has_air_conditioning=parse_bool(raw.get("air_conditioning") or raw.get("has_air_conditioning")),
+            has_pool=parse_bool(raw.get("swimming_pool") or raw.get("has_pool") or raw.get("pool")),
+            has_garden=parse_bool(raw.get("garden") or raw.get("has_garden")),
             **(extra_flags or {}),
         ),
         descriptions={k: v for k, v in {
@@ -686,6 +770,8 @@ def normalize_ego_platform_payload(raw: dict[str, Any], source_partner: str) -> 
         area_land=parse_area(raw.get("land_area")),
         floor=raw.get("floor"),
         construction_year=parse_int(raw.get("construction_year")),
+        advertiser=_normalize_whitespace(raw.get("advertiser")) or None,
+        contacts=_normalize_whitespace(raw.get("contacts")) or None,
     )
 
 # ═══════════════════════════════════════════════════════════
@@ -757,6 +843,7 @@ def normalize_habinedita_payload(raw: dict[str, Any]) -> PropertySchema:
         area_useful=parse_area(raw.get("useful_area")),
         area_gross=parse_area(raw.get("gross_area")),
         area_land=parse_area(raw.get("land_area")),
+        condition=condition,
         floor=raw.get("floor"),
         construction_year=parse_int(raw.get("construction_year")),
         seo=seo or None,
@@ -864,6 +951,43 @@ def normalize_sottomayor_payload(raw: dict[str, Any]) -> PropertySchema:
     return normalize_ego_platform_payload(raw, "sottomayor")
 
 
+# ═══════════════════════════════════════════════════════════
+# Imo Atlântico Normalizer
+# ═══════════════════════════════════════════════════════════
+
+@partner_normalizer("imo_atlantico")
+def normalize_imo_atlantico_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a raw IMO Atlântico payload into the canonical PropertySchema."""
+    property_type = _normalize_whitespace(raw.get("property_type"))
+    title = _normalize_whitespace(raw.get("title"))
+    business_type = _infer_business_type(raw)
+
+    if not property_type and title:
+        property_type = _infer_property_type_from_title(title, ("Moradia", "Apartamento", "Terreno"), startswith=False)
+
+    address = Address(
+        country="Portugal",
+        region=_normalize_whitespace(raw.get("district")),
+        city=_normalize_whitespace(raw.get("county")),
+        area=_normalize_whitespace(raw.get("parish")),
+        full_address=_truncate_text(raw.get("location"), 500),
+    )
+
+    return _build_base_schema(
+        raw,
+        source_partner="imo_atlantico",
+        business_type=business_type,
+        property_type=property_type,
+        partner_id=_normalize_whitespace(raw.get("property_id")) or None,
+        address=address,
+        area_useful=parse_area(raw.get("useful_area")),
+        area_gross=parse_area(raw.get("gross_area")),
+        area_land=parse_area(raw.get("land_area")),
+        bedrooms=typology_to_bedrooms(raw.get("typology")) or parse_int(raw.get("bedrooms")),
+        title=title,
+        advertiser=_normalize_whitespace(raw.get("advertiser")) or None,
+        contacts=_normalize_whitespace(raw.get("contacts")) or None,
+    )
 @partner_normalizer("barcelcasa")
 def normalize_barcelcasa_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a Barcelcasa Imobiliária (EGO RealEstate platform) payload into canonical PropertySchema."""
@@ -953,6 +1077,7 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
         area_useful=useful_area,
         area_gross=gross_area,
         area_land=parse_area(raw.get("land_area")),
+        condition=condition,
         construction_year=parse_int(raw.get("construction_year")),
         bedrooms=bedrooms,
         title=clean_title or None,
@@ -994,6 +1119,7 @@ def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
         area_useful=parse_area(raw.get("useful_area")),
         area_gross=parse_area(raw.get("gross_area")),
         area_land=parse_area(raw.get("land_area")),
+        condition=condition,
         floor=raw.get("floor"),
         construction_year=parse_int(raw.get("construction_year")),
         seo=seo or None,
@@ -1002,12 +1128,173 @@ def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
         extra_flags={"is_new_construction": is_new_construction} if is_new_construction is not None else None,
     )
 
+
+# ═══════════════════════════════════════════════════════════
+# B&P Real Estate (bpaproperty.com, Algarve)
+# ═══════════════════════════════════════════════════════════
+
+_BPA_URL_TYPE_PATTERN = re.compile(r"/property/([a-z0-9-]+)/", re.IGNORECASE)
+
+
+def _bpa_property_type_from_url(url: str | None) -> str | None:
+    """Derive the property type from the URL slug (e.g. '/property/townhouse/...').
+
+    More reliable than parsing the title ("N Bedroom {Type} in ...") since
+    non-residential types (Plot, Garage, Business, Investment Package) have
+    no bedroom count and don't follow that title pattern at all.
+    """
+    if not url:
+        return None
+    match = _BPA_URL_TYPE_PATTERN.search(url)
+    if not match:
+        return None
+    return match.group(1).replace("-", " ").title()
+
+
+@partner_normalizer("bpaproperty")
+def normalize_bpaproperty_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a raw B&P Real Estate (Algarve, Lagos) payload into canonical PropertySchema.
+
+    BPA sells exclusively in the western Algarve (Lagos, Monchique, Portimão,
+    Vila do Bispo concelhos) — all within the Faro district, which the site
+    itself has no field for, so it's a fixed constant here. The site is
+    sale-only (no rentals), confirmed by every listing's JSON-LD
+    `listingStatus: "ForSale"`.
+    """
+    source_url = raw.get("url") or ""
+    location_raw = _normalize_whitespace(raw.get("location") or "") or ""
+
+    county: str | None = None
+    parish: str | None = None
+    if location_raw:
+        parts = [p.strip() for p in location_raw.split(",") if p.strip()]
+        if parts:
+            county = _truncate_text(parts[-1], 100)
+            if len(parts) > 1:
+                parish = _truncate_text(", ".join(parts[:-1]), 100)
+
+    # "Ref: BPA5646" — strip the label prefix, same pattern as realkey/centralimo.
+    partner_id_raw = raw.get("property_id") or ""
+    partner_id = re.sub(r"^[^:]+:\s*", "", partner_id_raw).strip() or None
+
+    property_type = raw.get("property_type") or _bpa_property_type_from_url(source_url)
+
+    return _build_base_schema(
+        raw,
+        source_partner="bpaproperty",
+        business_type="sale",
+        property_type=property_type,
+        partner_id=partner_id,
+        address=Address(
+            country="Portugal",
+            region="Faro",
+            city=county,
+            area=parish,
+            full_address=_truncate_text(location_raw, 500) or None,
+        ),
+        area_useful=None,
+        area_gross=parse_area(raw.get("gross_area")),
+        area_land=parse_area(raw.get("land_area")),
+        construction_year=parse_int(raw.get("construction_year")),
+    )
+
+
 def normalize_partner_payload(raw: dict[str, Any], partner: str) -> PropertySchema:
     """Dispatch normalization to the appropriate partner normalizer."""
     normalizer = _PARTNER_NORMALIZERS.get(partner)
     if not normalizer:
         raise ValueError(f"No normalizer registered for partner: '{partner}'")
     return normalizer(raw)
+
+
+# ═══════════════════════════════════════════════════════════
+# Generic normalizer — for sites with no dedicated partner config
+# ═══════════════════════════════════════════════════════════
+
+_GENERIC_PROPERTY_TYPES = (
+    "Moradia Geminada", "Moradia", "Apartamento", "Loja", "Escritório",
+    "Armazém", "Terreno", "Garagem", "Quintinha", "Quinta", "Prédio",
+    "Lote", "Duplex", "Estúdio", "Penthouse", "Villa", "House", "Apartment",
+)
+
+
+def _generic_address_from_raw(raw: dict[str, Any]) -> Address:
+    """Best-effort Address for a site without a dedicated normalizer.
+
+    Prefers explicit district/county/parish keys (from JSON-LD address parts or
+    the selector suggester); otherwise splits a free-form `location` string,
+    assuming a "parish, county, district" or "county, district" ordering as is
+    common on Portuguese sites.
+    """
+    region = _truncate_text(raw.get("district"), 100)
+    city = _truncate_text(raw.get("county"), 100)
+    parish = _truncate_text(raw.get("parish"), 100)
+
+    location_raw = _normalize_whitespace(raw.get("location") or "") or ""
+    if location_raw and not (region and city):
+        parts = [p.strip() for p in re.split(r"[>,]", location_raw) if p.strip()]
+        if len(parts) >= 3:
+            region = region or _truncate_text(parts[-1], 100)
+            city = city or _truncate_text(parts[-2], 100)
+            parish = parish or _truncate_text(parts[-3], 100)
+        elif len(parts) == 2:
+            region = region or _truncate_text(parts[-1], 100)
+            city = city or _truncate_text(parts[-2], 100)
+        elif len(parts) == 1:
+            city = city or _truncate_text(parts[0], 100)
+
+    return Address(
+        country="Portugal",
+        region=region or city,  # many sites omit the district level
+        city=city,
+        area=parish,
+        full_address=_truncate_text(location_raw, 500) or None,
+    )
+
+
+def normalize_generic_payload(raw: dict[str, Any], source_partner: str) -> PropertySchema:
+    """Normalize a raw payload from an unconfigured site into canonical PropertySchema.
+
+    Used by the /ingest endpoint's generic path. Leans entirely on the shared
+    `_build_base_schema` core plus best-effort address/property_type resolution —
+    no site-specific quirks. `source_partner` must already be a valid slug
+    (e.g. 'generic_realkey_pt').
+    """
+    title = _normalize_whitespace(raw.get("title"))
+    property_type = _normalize_whitespace(raw.get("property_type"))
+    if not property_type and title:
+        property_type = _infer_property_type_from_title(
+            title, _GENERIC_PROPERTY_TYPES, startswith=False
+        )
+
+    # Infer typology (T3 / V4) from the title when not scraped — many sites put it
+    # only in the headline. _build_base_schema then derives bedrooms from it.
+    if not raw.get("typology") and title:
+        typ_match = _TYPOLOGY_PATTERN.search(title)
+        if typ_match:
+            raw = {**raw, "typology": typ_match.group(0).upper()}
+
+    partner_id = _normalize_whitespace(raw.get("property_id") or raw.get("reference"))
+    if partner_id:
+        partner_id = re.sub(r"^[^:]+:\s*", "", partner_id).strip() or None
+
+    return _build_base_schema(
+        raw,
+        source_partner=source_partner,
+        business_type=_infer_business_type(raw, url_hint=raw.get("url")),
+        property_type=property_type,
+        partner_id=partner_id,
+        address=_generic_address_from_raw(raw),
+        area_useful=parse_area(raw.get("area") or raw.get("useful_area")),
+        area_gross=parse_area(raw.get("gross_area")),
+        area_land=parse_area(raw.get("land_area")),
+        title=title,
+        condition=_normalize_whitespace(raw.get("condition")),
+        floor=raw.get("floor"),
+        construction_year=parse_int(raw.get("construction_year")),
+        advertiser=_normalize_whitespace(raw.get("advertiser")) or None,
+        contacts=_normalize_whitespace(raw.get("contacts")) or None,
+    )
 
 
 # ───────── PropertySchema → DB model fields ─────────
@@ -1021,6 +1308,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "title": schema.title,
         "business_type": schema.business_type,
         "property_type": schema.property_type,
+        "condition": schema.condition,
         "typology": schema.typology,
         "bedrooms": schema.bedrooms,
         "bathrooms": schema.bathrooms,
@@ -1043,6 +1331,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "has_balcony": schema.features.has_balcony,
         "has_air_conditioning": schema.features.has_air_conditioning,
         "has_pool": schema.features.has_pool,
+        "has_garden": schema.features.has_garden,
         "energy_certificate": schema.energy_certificate,
         "construction_year": schema.construction_year,
         "advertiser": schema.advertiser,

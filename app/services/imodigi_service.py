@@ -15,12 +15,12 @@ External API endpoints used:
 """
 from __future__ import annotations
 import asyncio
-from sqlalchemy import not_
+from datetime import datetime, timedelta, timezone
 
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, exists, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -42,6 +42,11 @@ logger = get_logger(__name__)
 _BUSINESS_TYPE_MAP: dict[str, str] = {
     "sale": "To Buy",
     "rent": "To Rent",
+    # Best-effort guess — Imodigi's exact catalog value for a business/goodwill
+    # transfer hasn't been confirmed (see get_catalog_values()). Falls back to
+    # "To Buy" like any other unmapped value, but logs a warning below so this
+    # doesn't silently misrepresent trespasse listings as regular sales.
+    "trespasse": "Trespass",
 }
 
 _PROPERTY_TYPE_MAP: dict[str, str] = {
@@ -52,13 +57,27 @@ _PROPERTY_TYPE_MAP: dict[str, str] = {
     "moradia geminada": "House",
     "land": "Land",
     "terreno": "Lot",
+    "lote": "Lot",
+    "lote de terreno": "Lot",
     "commercial": "Commercial",
     "loja": "Commercial",
-    "escritório": "Commercial",
+    # "escritório" (PT, what property_type actually contains) was previously
+    # mapped to "Commercial" while only the English "office" (never produced
+    # by any partner normalizer) mapped to "Office" — offices were silently
+    # lumped in with shops. Both now map to the same target.
+    "escritório": "Office",
+    "escritorio": "Office",
     "office": "Office",
     "garage": "Garage",
     "garagem": "Garage",
 }
+
+# Property types with no confirmed Imodigi catalog equivalent — passed
+# through as the raw Portuguese string via _map_property_type's fallback
+# rather than guessed, since sending a wrong invented category is worse than
+# sending the literal source value. Verify against get_catalog_values()
+# before adding a mapping.
+_PROPERTY_TYPE_UNCONFIRMED = ("quinta", "quintinha", "quintal", "armazém", "armazem")
 
 _CONDITION_MAP: dict[str, str] = {
     "new": "New",
@@ -88,7 +107,21 @@ def build_property_payload(listing: Listing) -> dict[str, Any]:
     Only non-None fields are included so partial PATCH calls stay minimal.
     """
     business_type = _BUSINESS_TYPE_MAP.get(listing.business_type or "", "To Buy")
+    if listing.business_type and listing.business_type not in _BUSINESS_TYPE_MAP:
+        logger.warning(
+            "Listing %s has unrecognized business_type '%s' — defaulting to 'To Buy' in Imodigi payload",
+            listing.id, listing.business_type,
+        )
     property_type = _map_property_type(listing.property_type)
+    if (
+        listing.property_type
+        and listing.property_type.lower().strip() in _PROPERTY_TYPE_UNCONFIRMED
+    ):
+        logger.warning(
+            "Listing %s has property_type '%s' with no confirmed Imodigi catalog "
+            "mapping — sending the raw value as-is",
+            listing.id, listing.property_type,
+        )
 
     payload: dict[str, Any] = {
         "businessType": business_type,
@@ -442,12 +475,35 @@ async def get_listing_ids_for_bulk_imodigi(
         return list(listing_ids)
 
     filters: dict[str, object | None] = {
-        "is_exported_to_imodigi": False if not force else None,
         "source_partner": source_partner,
         "is_enriched": is_enriched,
     }
-
     stmt = apply_listing_filters(select(Listing.id), filters)
+
+    if not force:
+        cooldown_cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=settings.imodigi_failed_retry_cooldown_minutes
+        )
+        # Exclude listings already published/updated, and listings that
+        # failed recently and are still within their retry cooldown. Without
+        # the cooldown half of this, a handful of permanently-broken listings
+        # (oldest by created_at = highest priority in the ORDER BY below)
+        # would occupy the entire per-run `limit` on every scheduled sync,
+        # starving newer listings that have never been attempted even once.
+        already_handled = exists(
+            select(ImodigiExport.id).where(
+                ImodigiExport.listing_id == Listing.id,
+                or_(
+                    ImodigiExport.status.in_(["published", "updated"]),
+                    and_(
+                        ImodigiExport.status == "failed",
+                        ImodigiExport.updated_at > cooldown_cutoff,
+                    ),
+                ),
+            ).correlate(Listing)
+        )
+        stmt = stmt.where(~already_handled)
+
     stmt = stmt.order_by(Listing.created_at.asc()).limit(limit)
     rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
@@ -475,7 +531,7 @@ async def run_bulk_imodigi_job(
     from datetime import datetime, timezone
 
     from app.database import async_session_factory
-    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job
+    from app.services.bulk_job_store import STATUS_COMPLETED, STATUS_FAILED, get_job, persist_snapshot
 
     job = get_job(job_id)
     if job is None:
@@ -493,7 +549,8 @@ async def run_bulk_imodigi_job(
     failed = 0
     results = []
 
-    for lid in listing_ids:
+    _JOB_PERSIST_EVERY = 5
+    for processed, lid in enumerate(listing_ids, start=1):
         try:
             async with async_session_factory() as db:
                 export_record, action = await export_listing_to_crm(
@@ -514,6 +571,9 @@ async def run_bulk_imodigi_job(
             job.errors.append(f"{lid}: {exc}")
             results.append({"listing_id": str(lid), "status": "failed", "error": str(exc)})
 
+        if processed % _JOB_PERSIST_EVERY == 0:
+            await persist_snapshot(job)
+
     created = sum(1 for item in results if item.get("action") == "created")
     updated = sum(1 for item in results if item.get("action") == "updated")
     status = STATUS_FAILED if done == 0 and failed > 0 else STATUS_COMPLETED
@@ -528,6 +588,7 @@ async def run_bulk_imodigi_job(
     }
     job.status = status
     job.finished_at = datetime.now(timezone.utc)
+    await persist_snapshot(job)
     logger.info(
         "Bulk Imodigi export job %s finished: done=%s failed=%s created=%s updated=%s",
         job_id,

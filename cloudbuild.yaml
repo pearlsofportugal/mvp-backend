@@ -8,7 +8,12 @@ steps:
         pip install -q -e ".[dev]" &&
         python -m pytest tests/ -q --tb=short -x
     env:
+      # Settings.database_url_sync has no default — without it pydantic-settings
+      # fails at import of app.config, which breaks conftest collection and
+      # (with -x) the whole build. Locally it comes from .env, which is not
+      # committed, so the gap only shows up in CI.
       - 'DATABASE_URL=sqlite+aiosqlite:///./test.db'
+      - 'DATABASE_URL_SYNC=sqlite:///./test.db'
       - 'API_KEY=test-key'
       - 'ENVIRONMENT=test'
     volumes:
@@ -35,11 +40,30 @@ steps:
       - '--image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
       - '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$BUILD_TRIGGER_ID'
       - '--region=$_DEPLOY_REGION'
-      - '--memory=2Gi'
+      # Sized for the synchronous /api/v1/ingest path, which renders pages in
+      # headless Chromium (always, for eGO sites). See docs/ego-adapter.md.
+      # 4Gi: ~400 MB app baseline + a Chromium per in-flight render. Chromium on
+      # an image-heavy listing page runs 500 MB-1 GB RSS, and --disable-dev-shm-usage
+      # (playwright_scraper.py) pushes its shared memory into /tmp, which on Cloud
+      # Run is a tmpfs billed against this same limit. A container OOM kills the
+      # whole instance and every request on it, not just the offending one.
+      - '--memory=4Gi'
+      # 4Gi requires >= 2 vCPU on Cloud Run; also what Chromium page-load needs.
       - '--cpu=2'
-      - '--timeout=60'
+      # 300s: the ingest code's own worst case exceeds 60s. A single render costs
+      # up to robots fetch 15s + delay 0.5s + goto 30s + networkidle 3s, and the
+      # generic path can render twice (initial fallback + the JS-retry in
+      # extract_generic), each a cold browser launch, on top of a static fetch
+      # that EthicalScraper allows 120s. 60s truncated real work into 504s.
+      - '--timeout=300'
       - '--min-instances=1'
-      - '--max-instances=3'
+      # Each in-flight ingest owns its own Chromium (a fresh PlaywrightScraper per
+      # call — nothing is pooled), so concurrency is a memory bound, not a CPU one.
+      # Cloud Run's default of 80 would put ~80 browsers on one 4Gi instance.
+      - '--concurrency=3'
+      # Concurrency dropped 80 -> 3, so raise the instance ceiling to keep
+      # service-wide capacity; idle instances above min-instances cost nothing.
+      - '--max-instances=10'
       - '--no-cpu-throttling'
       - '--quiet'
     id: Deploy

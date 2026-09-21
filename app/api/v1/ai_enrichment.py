@@ -28,6 +28,7 @@ from app.services.ai_enrichment_service import (
     run_bulk_enrich_job,
     run_single_enrich_job,
 )
+from app.services import background_job_service
 from app.services.bulk_job_store import create_job, get_job
 
 router = APIRouter()
@@ -137,7 +138,11 @@ async def bulk_enrich(
     """
     listings = await get_listings_for_bulk_enrich(db, payload)
     listing_ids = [listing.id for listing in listings]
-    job = create_job("enrichment", total=len(listing_ids))
+    # Durable row first (survives a restart / different instance), then pin
+    # the fast in-memory job to the same ID so status polling has both a
+    # hot path and a fallback.
+    db_job = await background_job_service.create_job(db, "enrichment", total=len(listing_ids))
+    job = create_job("enrichment", total=len(listing_ids), job_id=db_job.id)
     background_tasks.add_task(run_bulk_enrich_job, job.id, listing_ids, payload)
     return ok(
         BulkJobAccepted(
@@ -157,14 +162,23 @@ async def bulk_enrich(
     responses=ERROR_RESPONSES,
     operation_id="get_bulk_enrich_job",
 )
-async def get_bulk_job(job_id: UUID, request: Request):
-    """Poll the current status of a background bulk enrichment job."""
+async def get_bulk_job(job_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
+    """Poll the current status of a background bulk enrichment job.
+
+    Falls back to the durable BackgroundJob row when this process instance
+    no longer holds the job in memory (restart, TTL eviction, or a different
+    instance behind the load balancer answered this request).
+    """
     from app.core.exceptions import NotFoundError
 
     job = get_job(job_id)
-    if job is None:
+    if job is not None:
+        return ok(BulkJobStatus(**job.to_dict()), "Job status retrieved", request)
+
+    db_job = await background_job_service.get_job(db, job_id)
+    if db_job is None:
         raise NotFoundError(f"Bulk job {job_id} not found")
-    return ok(BulkJobStatus(**job.to_dict()), "Job status retrieved", request)
+    return ok(BulkJobStatus(**background_job_service.to_status_dict(db_job)), "Job status retrieved", request)
 
 
 @router.get(
@@ -245,6 +259,7 @@ async def translate_listing_async(
     payload: ListingTranslationRequest,
     request: Request,
     background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ):
     """Start a non-blocking single-listing enrichment job and return immediately (HTTP 202).
 
@@ -258,7 +273,8 @@ async def translate_listing_async(
         from app.core.exceptions import AppException
         raise AppException("Use POST /translations with apply=True to persist translations synchronously.")
 
-    job = create_job("enrichment", total=1)
+    db_job = await background_job_service.create_job(db, "enrichment", total=1)
+    job = create_job("enrichment", total=1, job_id=db_job.id)
     background_tasks.add_task(run_single_enrich_job, job.id, payload.listing_id, payload)
     return ok(
         BulkJobAccepted(

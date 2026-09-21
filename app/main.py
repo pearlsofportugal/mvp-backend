@@ -14,6 +14,7 @@ from app.api.v1.ai_enrichment import router as ai_enrichment_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.export import router as export_router
 from app.api.v1.imodigi import router as imodigi_router
+from app.api.v1.ingest import router as ingest_router
 from app.api.v1.listings import router as listings_router
 from app.api.v1.scrape_jobs import router as jobs_router
 from app.api.v1.sites import router as sites_router
@@ -241,6 +242,12 @@ def create_app() -> FastAPI:
         jobs_router,
         prefix="/api/v1/jobs",
         tags=["jobs"],
+        dependencies=auth_dependencies,
+    )
+    application.include_router(
+        ingest_router,
+        prefix="/api/v1/ingest",
+        tags=["ingest"],
         dependencies=auth_dependencies,
     )
     application.include_router(

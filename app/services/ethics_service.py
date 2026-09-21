@@ -42,6 +42,7 @@ class EthicalScraper:
         max_retries: int = 3,
         backoff_factor: float = 2.0,
         extra_headers: dict | None = None,
+        respect_robots: bool = True,
     ):
         self.min_delay = min_delay
         self.max_delay = max_delay
@@ -49,6 +50,10 @@ class EthicalScraper:
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
+        # When False, robots.txt rules are logged but not enforced. Only used for
+        # the on-demand single-URL /ingest path (a human pasting one link they are
+        # already looking at), never for automated bulk crawling.
+        self.respect_robots = respect_robots
 
         # Robots.txt cache: domain -> (parser, is_loaded_successfully, expires_at)
         # Single dict for atomic reads/writes — no race between cache and timestamps.
@@ -209,11 +214,17 @@ class EthicalScraper:
 
         # FAIL-CLOSED: if robots.txt failed to load, block everything
         if not loaded:
+            if not self.respect_robots:
+                logger.info("robots.txt not loaded for %s — allowing anyway (respect_robots=False)", url)
+                return True
             logger.warning("Blocking %s — robots.txt not loaded (fail-closed)", url)
             return False
 
         allowed = parser.can_fetch(self.user_agent, url)
         if not allowed:
+            if not self.respect_robots:
+                logger.info("robots.txt disallows %s — allowing anyway (respect_robots=False)", url)
+                return True
             logger.info("Blocked by robots.txt: %s", url)
         return allowed
 

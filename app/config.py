@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     ai_rate_limit_requests: int = 20
     ai_rate_limit_window: int = 60
 
+    # Generic /ingest extraction — LLM fallback fires only when the free layers
+    # (structured data, selector suggester, regex heuristics) fail to get title
+    # AND price. Off by default; cost is ~$0.002/page with Flash when it does run.
+    generic_extract_llm_fallback: bool = False
+
     # Google Cloud
     google_cloud_project: str = ""
     google_cloud_scheduler_location: str = "europe-west1"

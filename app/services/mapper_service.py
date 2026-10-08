@@ -95,6 +95,24 @@ def missing_critical_schema_fields(schema: PropertySchema) -> list[str]:
     return missing
 
 
+_NUMERIC_TITLE_RE = re.compile(r"^\s*\d{1,5}\s*$")
+
+
+def is_junk_listing(schema: PropertySchema) -> bool:
+    """True for pages that parsed into a shell rather than a property.
+
+    A rendered error page (``<h1>410</h1>``) normalises to a numeric title with
+    no property type and no price. A real listing missing one of those is merely
+    incomplete (see ``missing_critical_schema_fields``); missing all three is not
+    a listing at all and must never be stored or overwrite a good record.
+    """
+    title = (schema.title or "").strip()
+    title_is_junk = not title or bool(_NUMERIC_TITLE_RE.match(title))
+    no_type = not (schema.property_type or "").strip()
+    no_price = schema.price.amount is None and not schema.price_on_request
+    return title_is_junk and no_type and no_price
+
+
 _LISTING_STRING_LIMITS = {
     "partner_id": 255,
     "source_partner": 50,

@@ -17,6 +17,7 @@ from urllib.robotparser import RobotFileParser
 
 from playwright.async_api import async_playwright
 
+from app.core.lifecycle import GONE_STATUSES
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -70,6 +71,8 @@ class PlaywrightScraper:
         self._robots_cache: dict[str, tuple[RobotFileParser, bool]] = {}
         self._cache_timestamps: dict[str, float] = {}
         self._visited_urls: set[str] = set()
+        # HTTP status of the most recent get_html(); None if no response.
+        self.last_status: int | None = None
 
         # Playwright browser — lazily initialised on first use
         self._playwright = None
@@ -218,8 +221,10 @@ class PlaywrightScraper:
         Returns None if:
         - URL is blocked by robots.txt
         - URL was already visited
+        - The server answered 404/410 (see ``last_status``)
         - Navigation fails or times out
         """
+        self.last_status = None
         if self.is_visited(url):
             logger.debug("Skipping already visited URL: %s", url)
             return None
@@ -239,7 +244,13 @@ class PlaywrightScraper:
         )
         page = await ctx.new_page()
         try:
-            await page.goto(url, wait_until=self.wait_until, timeout=self.timeout)
+            response = await page.goto(url, wait_until=self.wait_until, timeout=self.timeout)
+            self.last_status = response.status if response is not None else None
+            if self.last_status in GONE_STATUSES:
+                # An error page rendered by the site is not a listing; returning
+                # its HTML would let the parser store "410" as a title.
+                logger.info("HTTP %s for %s — page is gone", self.last_status, url)
+                return None
             if self.content_ready_selector:
                 # Wait for the actual content, not an idle network — sites that load
                 # listing data via a post-load XHR can sit on open connections

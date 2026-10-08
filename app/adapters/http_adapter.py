@@ -30,6 +30,10 @@ class HttpAdapter:
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._timeout = timeout
+        # HTTP status of the most recent get(); None when no response arrived.
+        # get() collapses every non-200 to None, so callers that must tell a
+        # gone page (404/410) from a transient failure read this.
+        self.last_status: int | None = None
         self._session = requests.Session()
 
         retry_strategy = Retry(
@@ -52,8 +56,10 @@ class HttpAdapter:
 
         Returns the Response on HTTP 200, None on 4xx or exhausted retries.
         """
+        self.last_status = None
         try:
             response = self._session.get(url, timeout=self._timeout)
+            self.last_status = response.status_code
             if response.status_code == 200:
                 return response
             if 400 <= response.status_code < 500 and response.status_code != 429:

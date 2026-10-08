@@ -8,6 +8,7 @@ from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.sql import Select
 
 from app.config import settings
+from app.core.lifecycle import STATUS_ACTIVE, STATUS_ALL
 from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 
@@ -44,6 +45,9 @@ class ListingFilters(TypedDict, total=False):
     has_garden: bool | None
     created_after: datetime | None
     created_before: datetime | None
+    updated_after: datetime | None
+    updated_before: datetime | None
+    status: str | None
     search: str | None
     is_enriched: bool | None
     is_exported_to_imodigi: bool | None
@@ -60,6 +64,12 @@ def apply_listing_filters(query: Select, filters: ListingFilters) -> Select:
     Compatible with any base select() statement that targets Listing.
     """
     conds = []
+
+    # Lifecycle: absent key == "active", so every caller (lists, exports, counts)
+    # keeps hiding removed listings unless it explicitly asks for them.
+    status = filters.get("status") or STATUS_ACTIVE
+    if status != STATUS_ALL:
+        conds.append(Listing.status == status)
  
     if filters.get("district"):
         conds.append(Listing.district.ilike(f"%{filters['district']}%"))
@@ -117,6 +127,10 @@ def apply_listing_filters(query: Select, filters: ListingFilters) -> Select:
         conds.append(Listing.created_at >= filters["created_after"])
     if filters.get("created_before"):
         conds.append(Listing.created_at <= filters["created_before"])
+    if filters.get("updated_after"):
+        conds.append(Listing.updated_at >= filters["updated_after"])
+    if filters.get("updated_before"):
+        conds.append(Listing.updated_at <= filters["updated_before"])
  
     # Enrichment filter
     if filters.get("is_enriched") is True:

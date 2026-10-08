@@ -207,6 +207,10 @@ class ListingDetailRead(ListingBase):
     scrape_job_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
+    status: Literal["active", "removed"] = Field("active", description="Lifecycle: `removed` = gone from the source.")
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    removed_at: datetime | None = None
     media_assets: list[MediaAssetRead] = Field(default_factory=list)
     price_history: list[PriceHistoryRead] = Field(default_factory=list)
     is_enriched: bool = Field(
@@ -264,6 +268,7 @@ class ListingListRead(BaseModel):
     source_url: str | None = None
     created_at: datetime
     updated_at: datetime
+    status: Literal["active", "removed"] = Field("active", description="Lifecycle: `removed` = gone from the source.")
 
     @model_validator(mode="after")
     def _apply_enriched_title(self) -> "ListingListRead":

@@ -106,6 +106,17 @@ class Listing(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+    # Lifecycle: `removed` rows are kept (history, price history, reactivation)
+    # but hidden from list endpoints by default. `last_seen_at` moves on every
+    # crawl visit; `updated_at` only when the content (or status) changes.
+    status: Mapped[str] = mapped_column(
+        String(10), default="active", server_default="active", nullable=False, index=True,
+        comment="active | removed",
+    )
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # Foreign key to scrape job
     scrape_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
 

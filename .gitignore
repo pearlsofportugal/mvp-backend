@@ -40,3 +40,4 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+backups/

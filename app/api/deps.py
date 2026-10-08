@@ -118,6 +118,17 @@ def listing_filter_params(
     has_garden: bool | None = Query(None),
     created_after: datetime | None = Query(None),
     created_before: datetime | None = Query(None),
+    updated_after: datetime | None = Query(
+        None,
+        description="Only listings whose content (or status) changed at/after this instant. "
+        "`updated_at` only moves when the content hash changes, so this is safe for incremental sync.",
+    ),
+    updated_before: datetime | None = Query(None, description="Only listings last changed at/before this instant."),
+    status: str = Query(
+        "active",
+        pattern="^(active|removed|all)$",
+        description="Listing lifecycle: `active` (default), `removed` (gone from the source) or `all`.",
+    ),
     search: str | None = Query(None),
 ) -> dict:
     """Shared listing filter parameters used by /listings and /export endpoints."""
@@ -134,5 +145,7 @@ def listing_filter_params(
         has_balcony=has_balcony, has_air_conditioning=has_air_conditioning,
         has_garden=has_garden,
         created_after=created_after, created_before=created_before,
+        updated_after=updated_after, updated_before=updated_before,
+        status=status,
         search=search,
     )

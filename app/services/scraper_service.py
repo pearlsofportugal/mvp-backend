@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
+from app.core.lifecycle import GONE_STATUSES, STATUS_ACTIVE
 from app.core.logging import get_logger, set_correlation_id
 from app.crawler.confidence import calculate_confidence, log_low_confidence_scores
 from app.database import async_session_factory, engine
@@ -40,6 +41,7 @@ from app.services.email_service import send_job_notification
 from app.services.ethics_service import EthicalScraper
 from app.services.playwright_scraper import PlaywrightScraper
 from app.services.mapper_service import (
+    is_junk_listing,
     missing_critical_schema_fields,
     normalize_partner_payload,
     schema_to_listing_dict,
@@ -423,7 +425,7 @@ async def _run_scrape_async(
             logger.info("Job %s: skipping auto-delete — %s", job_id, reason)
             job.add_log("info", f"Auto-delete skipped: {reason} before the crawl finished")
         else:
-            deleted_count = await _delete_missing_listings(
+            deleted_count = await _remove_missing_listings(
                 db=db,
                 job=job,
                 site_key=site_key,
@@ -561,7 +563,7 @@ async def _run_sitemap_scrape(
                 "Auto-delete skipped: job was cancelled before the crawl finished",
             )
         else:
-            deleted_count = await _delete_missing_listings(
+            deleted_count = await _remove_missing_listings(
                 db=db,
                 job=job,
                 site_key=site_key,
@@ -621,6 +623,18 @@ async def _process_listing_url(
         # ─────────────────────────────────────────────────────────────────
 
         detail_html = await _fetch_html(scraper, link)
+        if not detail_html and getattr(scraper, "last_status", None) in GONE_STATUSES:
+            # 404/410: the ad was taken down at the source. Flag the stored
+            # listing (if any) instead of treating this as a fetch failure, and
+            # remember the URL so the next crawls don't pay to re-fetch it.
+            existing = await ListingRepository.get_by_source_url(db, link)
+            if existing and await ListingRepository.mark_removed(db, existing):
+                logger.info("Listing gone at source (HTTP %s) — marked removed: %s", scraper.last_status, link)
+            job.add_log("info", f"Listing gone at source (HTTP {scraper.last_status}) — skipped", link)
+            await SoldListingRepository.mark_sold(db, site_key, link)
+            job.touch_heartbeat()
+            await db.commit()
+            return False, False, False, False
         if not detail_html:
             job.add_url("failed", link)
             job.add_log("warning", "Failed to fetch listing page", link)
@@ -635,9 +649,8 @@ async def _process_listing_url(
             job.add_log("info", "Listing marked as sold/reserved — skipped", link)
 
             existing = await ListingRepository.get_by_source_url(db, link)
-            if existing:
-                await db.delete(existing)
-                logger.info("Removed existing listing (now sold): %s", link)
+            if existing and await ListingRepository.mark_removed(db, existing):
+                logger.info("Marked existing listing removed (now sold): %s", link)
 
             await SoldListingRepository.mark_sold(db, site_key, link)
 
@@ -656,6 +669,16 @@ async def _process_listing_url(
         # derive these fields purely in the mapper (URL parsing, fixed
         # constants) rather than via an HTML selector, so they'd never appear
         # in raw_data even when correctly populated in the final schema.
+        if is_junk_listing(property_schema):
+            # A shell page (error page, empty template) — never store it, and
+            # never let it overwrite a good record from an earlier scrape.
+            logger.warning("Skipping junk page (no real title/type/price): %s", link)
+            job.add_log("warning", "Page has no listing data (numeric/empty title, no type, no price) — skipped", link)
+            job.add_url("failed", link)
+            job.touch_heartbeat()
+            await db.commit()
+            return False, False, True, False
+
         missing_fields = missing_critical_schema_fields(property_schema)
         if missing_fields:
             job.add_log(
@@ -716,6 +739,15 @@ async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str)
         return await _persist_listing_with_postgres_upsert(db, job_id, schema, listing_data)
 
     return await _persist_listing_legacy(db, job_id, schema, listing_data)
+
+
+def _mark_seen(listing: Listing) -> None:
+    """Record a crawl visit and reactivate a listing that came back."""
+    listing.last_seen_at = datetime.now(timezone.utc)
+    if listing.status != STATUS_ACTIVE:
+        logger.info("Reactivating previously removed listing: %s", listing.source_url)
+        listing.status = STATUS_ACTIVE
+        listing.removed_at = None
 
 
 async def _persist_listing_with_postgres_upsert(
@@ -790,6 +822,7 @@ async def _persist_listing_with_postgres_upsert(
 
     existing.updated_at = datetime.now(timezone.utc)
     existing.scrape_job_id = UUID(job_id)
+    _mark_seen(existing)
 
     await _replace_media_assets(db, existing.id, schema)
 
@@ -839,6 +872,7 @@ async def _persist_listing_legacy(
                 setattr(existing, field, value)
         existing.updated_at = datetime.now(timezone.utc)
         existing.scrape_job_id = UUID(job_id)
+        _mark_seen(existing)
         await _replace_media_assets(db, existing.id, schema)
         return False
 
@@ -878,7 +912,7 @@ async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> N
     # 3. Force an immediate flush of the added media assets to the database transaction
     await db.flush()
     logger.info("Successfully flushed %d media assets for listing %s", len(media_list), listing_id)
-async def _delete_missing_listings(
+async def _remove_missing_listings(
     db: AsyncSession,
     job: ScrapeJob,
     site_key: str,
@@ -887,69 +921,65 @@ async def _delete_missing_listings(
     min_discovered: int = 10,
     max_delete_ratio: float = 0.40,
 ) -> int:
-    """Hard delete listings for this partner that were not seen in this crawl.
+    """Soft-delete (status=removed) active listings of this partner not seen in this crawl.
+
+    Rows are kept so history survives and the listing is reactivated if it
+    reappears; list endpoints hide them by default.
 
     Safeguards:
     - Aborts if discovered_urls is suspiciously small (failed crawl).
-    - Aborts if the delete ratio exceeds max_delete_ratio (site restructure / bug).
+    - Aborts if the removal ratio exceeds max_delete_ratio (site restructure / bug).
     """
     if len(discovered_urls) < min_discovered:
         logger.warning(
-            "Job %s: skipping delete — only %d URLs discovered (min: %d)",
+            "Job %s: skipping removal — only %d URLs discovered (min: %d)",
             job.id, len(discovered_urls), min_discovered,
         )
         job.add_log(
             "warning",
-            f"Auto-delete skipped: only {len(discovered_urls)} URLs discovered (min: {min_discovered})",
+            f"Auto-remove skipped: only {len(discovered_urls)} URLs discovered (min: {min_discovered})",
         )
         return 0
 
-    total_in_db = await db.scalar(
-        select(func.count()).where(Listing.source_partner == site_key)
+    total_active = await db.scalar(
+        select(func.count()).where(Listing.source_partner == site_key, Listing.status == STATUS_ACTIVE)
     )
 
-    if total_in_db and total_in_db > 0:
-        to_delete_count = await db.scalar(
+    if total_active and total_active > 0:
+        to_remove_count = await db.scalar(
             select(func.count()).where(
                 Listing.source_partner == site_key,
+                Listing.status == STATUS_ACTIVE,
                 Listing.source_url.notin_(discovered_urls),
             )
         )
-        ratio = (to_delete_count or 0) / total_in_db
+        ratio = (to_remove_count or 0) / total_active
         if ratio > max_delete_ratio:
             logger.error(
-                "Job %s: skipping delete — would delete %d/%d listings (%.0f%% > limit %.0f%%)",
-                job.id, to_delete_count, total_in_db, ratio * 100, max_delete_ratio * 100,
+                "Job %s: skipping removal — would remove %d/%d listings (%.0f%% > limit %.0f%%)",
+                job.id, to_remove_count, total_active, ratio * 100, max_delete_ratio * 100,
             )
             job.add_log(
                 "warning",
-                f"Auto-delete skipped: {to_delete_count}/{total_in_db} listings would be deleted "
+                f"Auto-remove skipped: {to_remove_count}/{total_active} listings would be removed "
                 f"({ratio:.0%} exceeds {max_delete_ratio:.0%} safety limit)",
             )
             return 0
 
-    result = await db.execute(
-        delete(Listing)
-        .where(
-            Listing.source_partner == site_key,
-            Listing.source_url.notin_(discovered_urls),
-        )
-        .returning(Listing.id)
-    )
-    deleted_ids = result.scalars().all()
-    deleted_count = len(deleted_ids)
+    removed_count = await ListingRepository.mark_missing_removed(db, site_key, discovered_urls)
 
-    if deleted_count:
+    if removed_count:
         logger.info(
-            "Job %s: hard deleted %d stale listings for partner '%s'",
-            job.id, deleted_count, site_key,
+            "Job %s: marked %d stale listings removed for partner '%s'",
+            job.id, removed_count, site_key,
         )
         job.add_log(
             "info",
-            f"Auto-deleted {deleted_count} listings no longer present on site",
+            f"Marked {removed_count} listings removed (no longer present on site)",
         )
 
-    return deleted_count
+    return removed_count
+
 
 async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
     """Marca o job como completo."""

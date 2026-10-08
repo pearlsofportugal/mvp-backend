@@ -99,6 +99,9 @@ class PropertySchema(BaseModel):
     address: Address = Field(default_factory=Address)
     latitude: float | None = Field(None, ge=-90, le=90, description="WGS-84 latitude.")
     longitude: float | None = Field(None, ge=-180, le=180, description="WGS-84 longitude.")
+    location_precision: Literal["exact", "parish", "county"] | None = Field(
+        None, description="How precise latitude/longitude are; None when there are no coordinates."
+    )
 
     # ── Features ──────────────────────────────────────────────────────────
     features: ListingFlags = Field(default_factory=ListingFlags)

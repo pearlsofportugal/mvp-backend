@@ -101,6 +101,9 @@ class ListingBase(BaseModel):
     full_address: str | None = None
     latitude: float | None = Field(None, ge=-90, le=90, description="WGS-84 latitude.")
     longitude: float | None = Field(None, ge=-180, le=180, description="WGS-84 longitude.")
+    location_precision: Literal["exact", "parish", "county"] | None = Field(
+        None, description="Precision of latitude/longitude: `exact` = declared by the source page."
+    )
 
     # ── Features ──────────────────────────────────────────────────────────
     has_garage: bool | None = None
@@ -174,6 +177,7 @@ class ListingUpdate(BaseModel):
     full_address: str | None = None
     latitude: float | None = Field(None, ge=-90, le=90)
     longitude: float | None = Field(None, ge=-180, le=180)
+    location_precision: Literal["exact", "parish", "county"] | None = None
     has_garage: bool | None = None
     has_elevator: bool | None = None
     has_balcony: bool | None = None
@@ -262,6 +266,9 @@ class ListingListRead(BaseModel):
     price_per_m2: Decimal | None = None
     district: str | None = None
     county: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    location_precision: Literal["exact", "parish", "county"] | None = None
     area_useful_m2: float | None = None
     bedrooms: int | None = None
     bathrooms: int | None = None

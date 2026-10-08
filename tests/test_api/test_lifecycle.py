@@ -84,3 +84,13 @@ async def test_openapi_documents_status_and_updated_after(client: AsyncClient):
     params = {p["name"]: p for p in resp.json()["paths"]["/api/v1/listings"]["get"]["parameters"]}
     assert params["status"]["schema"]["default"] == "active"
     assert "updated_after" in params and params["updated_after"]["description"]
+
+
+async def test_list_and_detail_expose_coordinates(client: AsyncClient, db_session):
+    listing = await _make(
+        db_session, "https://x.pt/geo", latitude=41.1579, longitude=-8.6291, location_precision="exact"
+    )
+    item = (await client.get("/api/v1/listings")).json()["data"]["items"][0]
+    assert (item["latitude"], item["longitude"], item["location_precision"]) == (41.1579, -8.6291, "exact")
+    detail = (await client.get(f"/api/v1/listings/{listing.id}")).json()["data"]
+    assert detail["location_precision"] == "exact"

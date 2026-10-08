@@ -63,6 +63,9 @@ class Listing(Base):
     full_address: Mapped[str | None] = mapped_column(String(500))
     latitude: Mapped[float | None] = mapped_column(Float)
     longitude: Mapped[float | None] = mapped_column(Float)
+    location_precision: Mapped[str | None] = mapped_column(
+        String(10), comment="exact | parish | county — None when there are no coordinates"
+    )
 
     # Features (boolean flags)
     has_garage: Mapped[bool | None] = mapped_column(Boolean)

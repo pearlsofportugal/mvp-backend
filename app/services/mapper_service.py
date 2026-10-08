@@ -27,6 +27,7 @@ from uuid import UUID
 from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.utils.coordinates import is_plausible_portugal
 from app.schemas.property_schema import (
     Address,
     ListingFlags,
@@ -96,6 +97,15 @@ def missing_critical_schema_fields(schema: PropertySchema) -> list[str]:
 
 
 _NUMERIC_TITLE_RE = re.compile(r"^\s*\d{1,5}\s*$")
+
+
+def parse_coordinates(lat: Any, lng: Any) -> tuple[float | None, float | None]:
+    """Coerce raw lat/lng to floats; (None, None) unless the pair is plausibly in Portugal."""
+    try:
+        la, lo = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None, None
+    return (la, lo) if is_plausible_portugal(la, lo) else (None, None)
 
 
 def is_junk_listing(schema: PropertySchema) -> bool:
@@ -713,6 +723,9 @@ def _build_base_schema(
 
     media = _build_gallery(raw.get("images"), raw.get("alt_texts"))
 
+    # Coordinates are only ever the ones the source page declared (see utils/coordinates).
+    latitude, longitude = parse_coordinates(raw.get("latitude"), raw.get("longitude"))
+
     return PropertySchema(
         partner_id=partner_id,
         source_partner=source_partner,
@@ -736,6 +749,9 @@ def _build_base_schema(
         area_gross_m2=area_gross,
         area_land_m2=area_land,
         address=address,
+        latitude=latitude,
+        longitude=longitude,
+        location_precision="exact" if latitude is not None else None,
         media=media,
         features=ListingFlags(
             # Parsers are inconsistent about the key prefix — the feature keyword
@@ -1443,6 +1459,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "full_address": schema.address.full_address,
         "latitude": schema.latitude,
         "longitude": schema.longitude,
+        "location_precision": schema.location_precision,
         "has_garage": schema.features.has_garage,
         "has_elevator": schema.features.has_elevator,
         "has_balcony": schema.features.has_balcony,

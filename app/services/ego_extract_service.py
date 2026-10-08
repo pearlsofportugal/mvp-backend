@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup, Tag
 
 from app.core.logging import get_logger
+from app.utils.coordinates import extract_coordinates
 
 logger = get_logger(__name__)
 
@@ -132,6 +133,10 @@ def extract_ego_platform(html: str, url: str) -> dict:
     """Parse a rendered eGO listing page into a raw dict for the eGO normalizer."""
     soup = BeautifulSoup(html, "lxml")
     raw: dict = {"url": url}
+
+    coords = extract_coordinates(soup)
+    if coords:
+        raw["latitude"], raw["longitude"] = coords.latitude, coords.longitude
 
     title_el = soup.select_one("div.propertyTitle h1, h1.propertyTitle, .propertyName h1")
     if title_el:

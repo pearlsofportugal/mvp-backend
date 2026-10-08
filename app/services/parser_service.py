@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup, Tag
 
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.utils.coordinates import extract_coordinates
 from app.crawler.selector_suggester import (
     _extract_json_ld_reference_values,
     _extract_meta_reference_values,
@@ -370,6 +371,11 @@ def parse_listing_page(
     data.update(_parse_images(soup, selectors, url))
     data.update(_parse_seo(soup))
     _fill_missing_listing_fields_from_page(soup, data)
+
+    # Coordinates: only what the page itself declares (no geocoding)
+    coords = extract_coordinates(soup)
+    if coords:
+        data["latitude"], data["longitude"] = coords.latitude, coords.longitude
 
     # Sold/reserved detection
     data["is_sold"] = _detect_sold_status(data, selectors)

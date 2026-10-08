@@ -39,6 +39,8 @@ class MediaAsset(BaseModel):
         description="Asset type.",
     )
     position: int | None = Field(None, ge=0, description="Display order (0-indexed).")
+    width: int | None = Field(None, gt=0, description="Pixel width, when known.")
+    height: int | None = Field(None, gt=0, description="Pixel height, when known.")
 
 
 class ListingFlags(BaseModel):

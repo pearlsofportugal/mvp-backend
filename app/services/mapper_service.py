@@ -230,9 +230,8 @@ _DEFAULT_MIN_PLAUSIBLE_PRICE = Decimal("50")
 
 # Site chrome (header/footer logo, favicons, sprites) sits in `raw["images"]`
 # right alongside real photos — often first, since it's near the top of the
-# page in DOM order. Only the cover photo is kept now (see media= below), so
-# picking the wrong one at [0] isn't a "worse of several", it's the only
-# image the client area ever sees. Mirrors the "negative" keyword list
+# page in DOM order. Filtered out of the gallery (see _build_gallery); the cover
+# is the first image that survives. Mirrors the "negative" keyword list
 # selector_suggester.py already uses to de-score logo/icon/avatar candidates.
 _JUNK_IMAGE_RE = re.compile(
     r"logo|favicon|sprite|placeholder|/icon[-_./]|/flags?/|[-_/]flag[-_.]|"
@@ -263,6 +262,28 @@ def _looks_like_junk_image(url: str) -> bool:
     if _SVG_EXTENSION_RE.search(url):
         return True
     return bool(_JUNK_IMAGE_RE.search(url))
+
+
+def _build_gallery(images: list | None, alt_texts: list | None) -> list[MediaAsset]:
+    """Full gallery in page order, site chrome removed, cover first.
+
+    Logos/icons often sit at ``images[0]`` (top of the DOM), so the cover is the
+    first non-flat-graphic photo and is moved to position 0; the remaining photos
+    keep their page order. If *everything* looks like junk (JS-rendered gallery
+    where only the logo is in the static HTML) the gallery is empty — no cover is
+    better than a wrong one. Duplicate URLs are dropped.
+    """
+    seen: set[str] = set()
+    usable: list[tuple[str, str | None]] = []
+    for url, alt in zip_longest(images or [], alt_texts or [], fillvalue=None):
+        if not url or url in seen or _looks_like_junk_image(url):
+            continue
+        seen.add(url)
+        usable.append((url, alt))
+    cover_idx = next((i for i, (url, _) in enumerate(usable) if not _FLAT_GRAPHIC_EXT_RE.search(url)), 0)
+    if usable and cover_idx:
+        usable.insert(0, usable.pop(cover_idx))
+    return [MediaAsset(url=url, alt_text=alt, type="photo", position=i) for i, (url, alt) in enumerate(usable)]
 
 
 def parse_price(
@@ -672,19 +693,7 @@ def _build_base_schema(
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
 
-    # Cover photo: first non-junk image (skips site logos/icons, which often
-    # sit at images[0] — near the top of the page in DOM order). Falls back
-    # to images[0] if every candidate looks like junk, so a listing with only
-    # a logo available still gets *something* rather than no photo at all.
-    paired_images = list(zip_longest(raw.get("images") or [], raw.get("alt_texts") or [], fillvalue=None))
-    usable = [(url, alt) for url, alt in paired_images if url and not _looks_like_junk_image(url)]
-    # If *everything* looks like junk (JS-rendered gallery: only the site logo /
-    # agent portrait is in the static HTML), no cover is better than a wrong
-    # one — the client area shows its own "missing image" placeholder.
-    cover_url, cover_alt = next(
-        ((url, alt) for url, alt in usable if not _FLAT_GRAPHIC_EXT_RE.search(url)),
-        usable[0] if usable else (None, None),
-    )
+    media = _build_gallery(raw.get("images"), raw.get("alt_texts"))
 
     return PropertySchema(
         partner_id=partner_id,
@@ -709,7 +718,7 @@ def _build_base_schema(
         area_gross_m2=area_gross,
         area_land_m2=area_land,
         address=address,
-media=[MediaAsset(url=cover_url, alt_text=cover_alt, type="photo")] if cover_url else [],
+        media=media,
         features=ListingFlags(
             # Parsers are inconsistent about the key prefix — the feature keyword
             # scan emits "garage", but some site parsers emit "has_garage". Accept

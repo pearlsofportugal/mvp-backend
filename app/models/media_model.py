@@ -26,6 +26,8 @@ class MediaAsset(Base):
     alt_text: Mapped[str | None] = mapped_column(String(500))
     type: Mapped[str | None] = mapped_column(String(20), comment="photo, floorplan, video")
     position: Mapped[int | None] = mapped_column(Integer, comment="Display order")
+    width: Mapped[int | None] = mapped_column(Integer, comment="Pixel width, when known")
+    height: Mapped[int | None] = mapped_column(Integer, comment="Pixel height, when known")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     # Relationship

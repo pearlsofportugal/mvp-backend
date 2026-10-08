@@ -30,6 +30,8 @@ class MediaAssetRead(BaseModel):
     alt_text: str | None = None
     type: Literal["photo", "floorplan", "video"] | None = None
     position: int | None = Field(None, ge=0)
+    width: int | None = Field(None, gt=0, description="Pixel width, when known.")
+    height: int | None = Field(None, gt=0, description="Pixel height, when known.")
 
 
 class MediaAssetCreate(BaseModel):
@@ -42,6 +44,8 @@ class MediaAssetCreate(BaseModel):
         description="Asset type: photo, floorplan, or video.",
     )
     position: int | None = Field(None, ge=0, description="Display order (0-indexed).")
+    width: int | None = Field(None, gt=0, description="Pixel width, when known.")
+    height: int | None = Field(None, gt=0, description="Pixel height, when known.")
 
 
 # ---------------------------------------------------------------------------

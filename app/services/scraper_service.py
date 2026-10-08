@@ -925,33 +925,46 @@ async def _persist_listing_legacy(
         return True
 
 
-async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> None:
-    """Replace listing media atomically so retries and upserts do not duplicate assets."""
-    # 1. Clear out any old assets
-    logger.warning("media assets found in schema : %s", schema.media)
-    await db.execute(delete(MediaAsset).where(MediaAsset.listing_id == listing_id))
+def _media_rows(schema) -> list[dict[str, Any]]:
+    """The schema's gallery as plain dicts, in display order."""
+    media_list = getattr(schema, "media", None) or []
+    return [
+        {
+            "url": str(m.url),
+            "alt_text": getattr(m, "alt_text", None),
+            "type": getattr(m, "type", None) or "photo",
+            "position": m.position if getattr(m, "position", None) is not None else i,
+            "width": getattr(m, "width", None),
+            "height": getattr(m, "height", None),
+        }
+        for i, m in enumerate(media_list)
+    ]
 
-    # 2. Extract media safely (handling potential fallback names like 'images')
-    media_list = getattr(schema, "media", None) or getattr(schema, "images", [])
-    
-    if not media_list:
-        logger.warning("No media assets found in schema for listing ID: %s", listing_id)
+
+async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> None:
+    """Make the stored gallery match the schema's, touching the table only if it differs."""
+    wanted = _media_rows(schema)
+    stored = (
+        await db.execute(
+            select(MediaAsset)
+            .where(MediaAsset.listing_id == listing_id)
+            .order_by(MediaAsset.position.asc().nulls_last(), MediaAsset.created_at.asc())
+        )
+    ).scalars().all()
+    current = [
+        {k: getattr(a, k) for k in ("url", "alt_text", "type", "position", "width", "height")}
+        for a in stored
+    ]
+    if current == wanted:
         return
 
-    for media in media_list:
-        db.add(
-            MediaAsset(
-                listing_id=listing_id,
-                url=str(media.url),
-                alt_text=getattr(media, "alt_text", None),
-                type=getattr(media, "type", "photo") or "photo",
-                position=getattr(media, "position", 0),
-            )
-        )
-    
-    # 3. Force an immediate flush of the added media assets to the database transaction
+    await db.execute(delete(MediaAsset).where(MediaAsset.listing_id == listing_id))
+    for row in wanted:
+        db.add(MediaAsset(listing_id=listing_id, **row))
     await db.flush()
-    logger.info("Successfully flushed %d media assets for listing %s", len(media_list), listing_id)
+    logger.info("Stored %d media assets for listing %s (was %d)", len(wanted), listing_id, len(current))
+
+
 async def _remove_missing_listings(
     db: AsyncSession,
     job: ScrapeJob,

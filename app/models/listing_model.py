@@ -137,7 +137,9 @@ class Listing(Base):
     price_on_request: Mapped[bool] = mapped_column(Boolean, default=False, nullable=True)
 
     # Relationships
-    media_assets: Mapped[list["MediaAsset"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="raise")
+    media_assets: Mapped[list["MediaAsset"]] = relationship(
+        back_populates="listing", cascade="all, delete-orphan", lazy="raise", order_by="MediaAsset.position"
+    )
     price_history: Mapped[list["PriceHistory"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="raise")
 
     # Indexes

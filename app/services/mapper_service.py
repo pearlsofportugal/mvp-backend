@@ -28,6 +28,7 @@ from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
 from app.utils.coordinates import is_plausible_portugal
+from app.utils.images import dimensions_from_url
 from app.schemas.property_schema import (
     Address,
     ListingFlags,
@@ -292,7 +293,11 @@ def _looks_like_junk_image(url: str) -> bool:
     return bool(_JUNK_IMAGE_RE.search(url))
 
 
-def _build_gallery(images: list | None, alt_texts: list | None) -> list[MediaAsset]:
+def _build_gallery(
+    images: list | None,
+    alt_texts: list | None,
+    sizes: dict[str, tuple[int | None, int | None]] | None = None,
+) -> list[MediaAsset]:
     """Full gallery in page order, site chrome removed, cover first.
 
     Logos/icons often sit at ``images[0]`` (top of the DOM), so the cover is the
@@ -311,7 +316,13 @@ def _build_gallery(images: list | None, alt_texts: list | None) -> list[MediaAss
     cover_idx = next((i for i, (url, _) in enumerate(usable) if not _FLAT_GRAPHIC_EXT_RE.search(url)), 0)
     if usable and cover_idx:
         usable.insert(0, usable.pop(cover_idx))
-    return [MediaAsset(url=url, alt_text=alt, type="photo", position=i) for i, (url, alt) in enumerate(usable)]
+    gallery = []
+    for i, (url, alt) in enumerate(usable):
+        width, height = (sizes or {}).get(url) or (None, None)
+        if not (width and height) and (from_url := dimensions_from_url(url)):
+            width, height = from_url
+        gallery.append(MediaAsset(url=url, alt_text=alt, type="photo", position=i, width=width, height=height))
+    return gallery
 
 
 def parse_price(
@@ -721,7 +732,7 @@ def _build_base_schema(
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
 
-    media = _build_gallery(raw.get("images"), raw.get("alt_texts"))
+    media = _build_gallery(raw.get("images"), raw.get("alt_texts"), raw.get("image_sizes"))
 
     # Coordinates are only ever the ones the source page declared (see utils/coordinates).
     latitude, longitude = parse_coordinates(raw.get("latitude"), raw.get("longitude"))

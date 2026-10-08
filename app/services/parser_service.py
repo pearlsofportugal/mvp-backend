@@ -26,6 +26,7 @@ from bs4 import BeautifulSoup, Tag
 from app.core.logging import get_logger
 from app.database import async_session_factory
 from app.utils.coordinates import extract_coordinates
+from app.utils.images import largest_srcset_candidate, parse_srcset
 from app.crawler.selector_suggester import (
     _extract_json_ld_reference_values,
     _extract_meta_reference_values,
@@ -346,6 +347,20 @@ def parse_next_page(
 def _set_if_missing(data:Any,key: str, value: Any):
         if value and not data.get(key):
             data[key] = value
+def _add_og_image_size(soup: BeautifulSoup, data: dict[str, Any], base_url: str) -> None:
+    """Record og:image:width/height for the og:image when it is part of the gallery."""
+    def _meta(prop: str) -> str | None:
+        tag = soup.find("meta", attrs={"property": prop})
+        return tag.get("content") if tag and tag.get("content") else None
+
+    og_url, width, height = _meta("og:image"), _meta("og:image:width"), _meta("og:image:height")
+    if not (og_url and width and height and width.isdigit() and height.isdigit()):
+        return
+    absolute = urljoin(base_url, og_url)
+    if absolute in data.get("images", []):
+        data.setdefault("image_sizes", {})[absolute] = (int(width), int(height))
+
+
 def parse_listing_page(
     html: str,
     url: str,
@@ -369,6 +384,7 @@ def parse_listing_page(
 
     # Common extractions
     data.update(_parse_images(soup, selectors, url))
+    _add_og_image_size(soup, data, url)
     data.update(_parse_seo(soup))
     _fill_missing_listing_fields_from_page(soup, data)
 
@@ -1475,18 +1491,12 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
 
 def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str) -> dict[str, Any]:
     """Extract images from the listing page."""
-    data: dict[str, Any] = {"images": [], "alt_texts": []}
+    data: dict[str, Any] = {"images": [], "alt_texts": [], "image_sizes": {}}
 
     # ── FIX: aceitar tanto "image_selector" como "images_selector" (alias) ──
     image_selector = selectors.get("image_selector") or selectors.get("images_selector", "img")
     image_filter = selectors.get("image_filter")
     image_exclude_filter = selectors.get("image_exclude_filter")
-
-    elements = soup.select(image_selector)
-
-    logger.warning("Found %d elements", len(elements))
-    for img in elements:
-        logger.warning(img)
 
     def _normalize_image_url(img: Tag) -> str | None:
         # ── FIX: suportar padrão de galeria em âncoras <a href="full.jpg"><img src="thumb.jpg"></a> ──
@@ -1501,16 +1511,27 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
             value = img.get(attr)
             if value and not value.startswith("data:"):
                 return value.strip()
-        if img.name == "source":
-            value = img.get("srcset") or img.get("data-srcset")
-            if value:
-                return value.split(",")[0].strip().split(" ")[0]
+        srcset = img.get("srcset") or img.get("data-srcset")
+        if srcset:
+            # <source> (and an <img> with only a srcset): take the widest rendition,
+            # not the first — srcsets are usually listed smallest-first.
+            best = largest_srcset_candidate(srcset)
+            if best:
+                return best[0]
+        return None
+
+    def _srcset_width(img: Tag, chosen: str) -> int | None:
+        """Width the page itself declares for the chosen URL (srcset ``w`` descriptor)."""
+        for attr in ("srcset", "data-srcset"):
+            for candidate, width in parse_srcset(img.get(attr)):
+                if width and (candidate == chosen or urljoin(base_url, candidate) == chosen):
+                    return width
         return None
 
     for img in soup.select(image_selector):
         src = _normalize_image_url(img)
         if not src:
-            logger.warning("SKIP: sem src -> %s", img)
+            logger.debug("SKIP: sem src -> %s", img)
             continue
 
         absolute_url = urljoin(base_url, src)
@@ -1519,16 +1540,19 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
             match = re.search(image_filter, absolute_url)
 
             if not match:
-                logger.warning("SKIP: image_filter rejeitou %s", absolute_url)
+                logger.debug("SKIP: image_filter rejeitou %s", absolute_url)
                 continue
 
         if image_exclude_filter:
             excluded = re.search(image_exclude_filter, absolute_url)
             if excluded:
-                logger.warning("SKIP: image_exclude_filter rejeitou %s", absolute_url)
+                logger.debug("SKIP: image_exclude_filter rejeitou %s", absolute_url)
                 continue
 
         data["images"].append(absolute_url)
+        declared_width = _srcset_width(img, src) or _srcset_width(img, absolute_url)
+        if declared_width:
+            data["image_sizes"][absolute_url] = (declared_width, None)
 
         alt = (
             img.get("alt", "")

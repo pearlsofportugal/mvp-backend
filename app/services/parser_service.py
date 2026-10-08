@@ -963,7 +963,43 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
     return ""
 
 
-_CHROME_TAGS = ("nav", "header", "footer", "script", "style", "noscript", "aside")
+# select/option/datalist/label: search-filter controls whose text is *price
+# ranges*, not the listing's price ("+500.000 EUR" radio label on
+# pearlsofportugal, the 100.000€…6.000.000€ min/max dropdowns on
+# principal-algarve) — a text sweep for "first € amount" happily picked them.
+_CHROME_TAGS = ("nav", "header", "footer", "script", "style", "noscript", "aside", "select", "option", "datalist", "label")
+
+# "Similar/related properties" widgets show OTHER listings on the same page;
+# their price/typology/bedroom text reads exactly like real content to a
+# regex sweep, but describes a different property. Keep in sync with
+# app.crawler.selector_suggester._EXCLUDED_ANCESTOR_RE (same intent, DOM
+# decompose here vs. candidate filtering there — two different extraction
+# strategies, not worth a shared import for one regex).
+_RELATED_LISTINGS_RE = re.compile(
+    r"similar|related|recommend|semelhant|relacionad|sugest[aã]o|sugestoes|"
+    r"you[-_]?may[-_]?also|also[-_]?like|voce[-_]?tambem",
+    re.IGNORECASE,
+)
+
+
+def strip_repeated_price_cards(soup: BeautifulSoup) -> None:
+    """Decompose listing-grid cards (see selector_suggester._repeated_price_card)."""
+    from app.crawler.selector_suggester import _CARD_PRICE_RE, _repeated_price_card
+
+    # Two passes: identify every card first, remove afterwards. Removing as we
+    # go shrinks the sibling set, so the *last* card of a grid no longer looks
+    # "repeated" and survives (its price then leaks into the text sweep).
+    cards: list[Tag] = []
+    for text_node in soup.find_all(string=_CARD_PRICE_RE):
+        parent = getattr(text_node, "parent", None)
+        if parent is None:
+            continue
+        card = _repeated_price_card(parent)
+        if card is not None and not any(card is c for c in cards):
+            cards.append(card)
+    for card in cards:
+        if card.parent is not None:
+            card.decompose()
 
 
 def _extract_body_text_without_chrome(soup: BeautifulSoup) -> str:
@@ -980,6 +1016,11 @@ def _extract_body_text_without_chrome(soup: BeautifulSoup) -> str:
     for tag_name in _CHROME_TAGS:
         for el in clean.find_all(tag_name):
             el.decompose()
+    for el in clean.find_all(id=_RELATED_LISTINGS_RE):
+        el.decompose()
+    for el in clean.find_all(class_=_RELATED_LISTINGS_RE):
+        el.decompose()
+    strip_repeated_price_cards(clean)
     return clean.get_text(separator=" ", strip=True)
 
 

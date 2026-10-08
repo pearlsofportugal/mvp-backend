@@ -89,6 +89,9 @@ class GeminiAdapter:
                         "system_instruction": system_instruction,
                         "temperature": temp,
                         "response_mime_type": "application/json",
+                        # Fail fast instead of hanging forever — see the
+                        # comment on google_genai_timeout_ms in config.py.
+                        "http_options": {"timeout": settings.google_genai_timeout_ms},
                     },
                     contents=prompt,
                 )

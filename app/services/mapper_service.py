@@ -123,7 +123,8 @@ PRICE_ON_REQUEST = Decimal("-1")
 _PRICE_PATTERN = re.compile(r"[\d][0-9\s.,]*[\d]|[\d]")
 
 _PRICE_ON_REQUEST_PATTERN = re.compile(
-    r"sob\s+consulta|on\s+request|price\s+on\s+request|a\s+definir|consultar|sob\s+pedido",
+    r"sob\s+consulta|on\s+request|price\s+on\s+request|a\s+definir|consultar|sob\s+pedido|"
+    r"call\s+for\s+price|contact\s+(?:us\s+)?for\s+(?:the\s+)?price|upon\s+request|\bPOA\b|preço\s+a\s+combinar",
     re.IGNORECASE,
 )
 # ───────── Area Parsing ─────────
@@ -227,6 +228,42 @@ _MIN_PLAUSIBLE_PRICE = {
 }
 _DEFAULT_MIN_PLAUSIBLE_PRICE = Decimal("50")
 
+# Site chrome (header/footer logo, favicons, sprites) sits in `raw["images"]`
+# right alongside real photos — often first, since it's near the top of the
+# page in DOM order. Only the cover photo is kept now (see media= below), so
+# picking the wrong one at [0] isn't a "worse of several", it's the only
+# image the client area ever sees. Mirrors the "negative" keyword list
+# selector_suggester.py already uses to de-score logo/icon/avatar candidates.
+_JUNK_IMAGE_RE = re.compile(
+    r"logo|favicon|sprite|placeholder|/icon[-_./]|/flags?/|[-_/]flag[-_.]|"
+    # tracking pixels (facebook.com/tr?id=... on ville.pt)
+    r"facebook\.com/tr|doubleclick|googletagmanager|analytics|pixel|"
+    # language switchers (pinkrealestate.pt: mod_languages/images/en_gb.gif)
+    r"mod_languages|/lang(?:uages?)?/|[-_/](?:en|pt|es|fr|de)[-_](?:gb|pt|us|es|fr|de)\.|"
+    # agent/team portraits (algarve-property-agency.com: storage/team/employees/x.jpg)
+    r"/team/|employee|/agents?/|avatar|/staff/|broker|consultor|"
+    # static maps and unrendered template placeholders ({{Property.X}})
+    r"listingsmaps|staticmap|[-_/.]maps?[-_/.]|\{\{|%7b%7b|"
+    r"transp|spacer|blank\.|1x1|qr[-_]?code|"
+    # trust/compliance badges & payment/social icons (livro_reclamacoes.png on casaecomigo)
+    r"reclama|badge|/seals?/|selo[-_.]|paypal|mastercard|visa[-_.]|social[-_]",
+    re.IGNORECASE,
+)
+# Flat graphics: logos, maps and badges are PNG/GIF; listing photos are
+# essentially always JPEG/WebP. Used to *prefer* a photo, not to exclude PNGs
+# outright (some sites do serve PNG photos).
+_FLAT_GRAPHIC_EXT_RE = re.compile(r"\.(?:png|gif|bmp|ico)(?:\?|$)", re.IGNORECASE)
+# `url.endswith(".svg")` misses "logo.svg?v=abc123" — a cache-busting query
+# string is the common case, not the exception. Match the extension anywhere
+# before a `?` or the end, not just at the very end of the raw string.
+_SVG_EXTENSION_RE = re.compile(r"\.svg(?:\?|$)", re.IGNORECASE)
+
+
+def _looks_like_junk_image(url: str) -> bool:
+    if _SVG_EXTENSION_RE.search(url):
+        return True
+    return bool(_JUNK_IMAGE_RE.search(url))
+
 
 def parse_price(
     raw: str | None,
@@ -292,10 +329,16 @@ def parse_price(
 
 
 
-def parse_area(raw: str | None) -> float | None:
-    """Parse an area string like '120 m²' into 120.0."""
-    if not raw:
+def parse_area(raw: str | int | float | None) -> float | None:
+    """Parse an area string like '120 m²' into 120.0.
+
+    Also accepts a bare int/float, for the same reason as parse_int (LLM JSON
+    fields can come back as numbers instead of strings).
+    """
+    if raw is None or raw == "":
         return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
 
     match = _AREA_PATTERN.search(raw)
     if not match:
@@ -344,10 +387,17 @@ def _normalize_decimal_separators(num_str: str) -> str:
 
 # ───────── Integer Parsing ─────────
 
-def parse_int(raw: str | None) -> int | None:
-    """Parse integer from string, handling 'T3' → 3 for typology."""
-    if not raw:
+def parse_int(raw: str | int | float | None) -> int | None:
+    """Parse integer from string, handling 'T3' → 3 for typology.
+
+    Also accepts a bare int/float — the LLM fallback's JSON response returns
+    numeric fields (bedrooms, bathrooms) as actual numbers, not strings, and
+    this used to crash re.search() with TypeError.
+    """
+    if raw is None or raw == "":
         return None
+    if isinstance(raw, (int, float)):
+        return int(raw)
     match = re.search(r"\d+", raw)
     if match:
         return int(match.group())
@@ -501,6 +551,14 @@ _BUSINESS_TYPE_RENT_KEYWORDS = ("arrend", "arrendar", "arrendamento", "rent", "r
 _BUSINESS_TYPE_TRESPASSE_KEYWORDS = ("trespasse", "trespass")
 
 
+_SALE_SIGNALS = ("venda", "for-sale", "for sale", "comprar", "/buy", "-sale-", "à venda", "a-venda")
+_RENT_HEAD_SIGNALS = ("arrend", "alug", "for-rent", "for rent", "to-let", "to let", "-rent-", "/rent", "rental", "para-arrendar")
+_RENT_TEXT_PHRASES = (
+    "for rent", "to rent", "para arrendamento", "para arrendar", "long term rent",
+    "long-term rental", "per month", "/month", "monthly rent",
+)
+
+
 def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) -> str:
     """Infer 'sale', 'rent', or 'trespasse' from raw payload fields or an optional URL hint.
 
@@ -524,6 +582,19 @@ def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) ->
     text = " ".join(str(raw.get(k) or "") for k in ("title", "raw_description")).lower()
     if any(w in text for w in ("arrendad", "para arrendamento", "renda mensal", "/mês", "/mes", " por mês")):
         return "rent"
+
+    # English / URL-slug rentals on generic sites (cascais-property.com,
+    # algarve-property-agency.com were ingested as 'sale' with a monthly rent
+    # as the "price"). A sale signal in the URL/title wins, so a sale listing
+    # that merely mentions "rental potential" isn't flipped.
+    head = f"{url_hint or ''} {raw.get('title') or ''}".lower()
+    has_sale_signal = any(s in head for s in _SALE_SIGNALS)
+    if not has_sale_signal:
+        if any(s in head for s in _RENT_HEAD_SIGNALS):
+            return "rent"
+        desc = str(raw.get("raw_description") or "").lower()
+        if any(p in desc for p in _RENT_TEXT_PHRASES):
+            return "rent"
     return "sale"
 
 
@@ -601,6 +672,20 @@ def _build_base_schema(
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
 
+    # Cover photo: first non-junk image (skips site logos/icons, which often
+    # sit at images[0] — near the top of the page in DOM order). Falls back
+    # to images[0] if every candidate looks like junk, so a listing with only
+    # a logo available still gets *something* rather than no photo at all.
+    paired_images = list(zip_longest(raw.get("images") or [], raw.get("alt_texts") or [], fillvalue=None))
+    usable = [(url, alt) for url, alt in paired_images if url and not _looks_like_junk_image(url)]
+    # If *everything* looks like junk (JS-rendered gallery: only the site logo /
+    # agent portrait is in the static HTML), no cover is better than a wrong
+    # one — the client area shows its own "missing image" placeholder.
+    cover_url, cover_alt = next(
+        ((url, alt) for url, alt in usable if not _FLAT_GRAPHIC_EXT_RE.search(url)),
+        usable[0] if usable else (None, None),
+    )
+
     return PropertySchema(
         partner_id=partner_id,
         source_partner=source_partner,
@@ -624,11 +709,7 @@ def _build_base_schema(
         area_gross_m2=area_gross,
         area_land_m2=area_land,
         address=address,
-media=[
-    MediaAsset(url=url, alt_text=alt, type="photo")
-    for url, alt in zip_longest(raw.get("images", []), raw.get("alt_texts", []), fillvalue=None)
-    if url
-],
+media=[MediaAsset(url=cover_url, alt_text=cover_alt, type="photo")] if cover_url else [],
         features=ListingFlags(
             # Parsers are inconsistent about the key prefix — the feature keyword
             # scan emits "garage", but some site parsers emit "has_garage". Accept
@@ -1278,10 +1359,19 @@ def normalize_generic_payload(raw: dict[str, Any], source_partner: str) -> Prope
     if partner_id:
         partner_id = re.sub(r"^[^:]+:\s*", "", partner_id).strip() or None
 
+    business_type = _infer_business_type(raw, url_hint=raw.get("url"))
+    if business_type == "sale" and (raw.get("typology") or parse_int(raw.get("bedrooms"))):
+        # A house/apartment "for sale" at under 15k EUR is a monthly rent that
+        # nothing on the page labelled as such (cascais-property.com: 6000,
+        # algarve-property-agency.com: 1900 — both ingested as 'sale').
+        _amount, _cur = parse_price(raw.get("price"), business_type="sale")
+        if _amount is not None and _amount != PRICE_ON_REQUEST and _amount < Decimal("15000"):
+            business_type = "rent"
+
     return _build_base_schema(
         raw,
         source_partner=source_partner,
-        business_type=_infer_business_type(raw, url_hint=raw.get("url")),
+        business_type=business_type,
         property_type=property_type,
         partner_id=partner_id,
         address=_generic_address_from_raw(raw),

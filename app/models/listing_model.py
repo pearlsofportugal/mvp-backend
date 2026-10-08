@@ -117,6 +117,10 @@ class Listing(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # SHA-256 of the normalised content fields + gallery URLs (see utils/content_hash).
+    # updated_at only moves when this changes.
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+
     # Foreign key to scrape job
     scrape_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
 

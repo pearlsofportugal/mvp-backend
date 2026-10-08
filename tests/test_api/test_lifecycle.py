@@ -75,3 +75,12 @@ async def test_old_client_fields_unchanged(client: AsyncClient):
                 "district", "county", "bedrooms", "created_at", "updated_at"):
         assert key in listed, key
     assert detail["status"] == "active"
+
+
+async def test_openapi_documents_status_and_updated_after(client: AsyncClient):
+    resp = await client.get("/openapi.json")
+    if resp.status_code != 200:  # docs are disabled in production-like settings
+        return
+    params = {p["name"]: p for p in resp.json()["paths"]["/api/v1/listings"]["get"]["parameters"]}
+    assert params["status"]["schema"]["default"] == "active"
+    assert "updated_after" in params and params["updated_after"]["description"]

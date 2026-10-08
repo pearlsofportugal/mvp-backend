@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +47,7 @@ from app.services.mapper_service import (
     schema_to_listing_dict,
 )
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
+from app.utils.content_hash import CONTENT_FIELDS, compute_content_hash
 from app.services.sitemap_service import fetch_sitemap_urls
 from app.services.scrape_job_event_service import record_event
 
@@ -741,13 +742,113 @@ async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str)
     return await _persist_listing_legacy(db, job_id, schema, listing_data)
 
 
-def _mark_seen(listing: Listing) -> None:
-    """Record a crawl visit and reactivate a listing that came back."""
-    listing.last_seen_at = datetime.now(timezone.utc)
-    if listing.status != STATUS_ACTIVE:
-        logger.info("Reactivating previously removed listing: %s", listing.source_url)
-        listing.status = STATUS_ACTIVE
-        listing.removed_at = None
+def _hash_for_new(listing_data: dict[str, Any], schema) -> str:
+    return compute_content_hash(listing_data, [str(m.url) for m in (getattr(schema, "media", None) or [])])
+
+
+def _merged_content(existing: Listing, listing_data: dict[str, Any]) -> dict[str, Any]:
+    """Content the row would hold after this scrape: new non-None values win.
+
+    Mirrors the overwrite rule of the update loop (None never erases a stored
+    value, except the amenity flags), so the hash reflects the *effective* state
+    and a flaky extraction that drops a field does not register as a change.
+    """
+    merged = {f: getattr(existing, f) for f in CONTENT_FIELDS}
+    for field, value in listing_data.items():
+        if field in CONTENT_FIELDS and (value is not None or field in _FEATURE_FLAG_FIELDS):
+            merged[field] = value
+    return merged
+
+
+async def _stored_media_urls(db: AsyncSession, listing_id: UUID) -> list[str]:
+    rows = await db.execute(
+        select(MediaAsset.url)
+        .where(MediaAsset.listing_id == listing_id)
+        .order_by(MediaAsset.position.asc().nulls_last(), MediaAsset.created_at.asc())
+    )
+    return list(rows.scalars().all())
+
+
+async def _update_existing_listing(
+    db: AsyncSession,
+    job_id: str,
+    existing: Listing,
+    schema,
+    listing_data: dict[str, Any],
+) -> None:
+    """Apply a re-scrape to a stored listing, moving ``updated_at`` only on real change.
+
+    Every visit records ``last_seen_at``/``scrape_job_id``. ``updated_at`` (which
+    the API exposes and the WordPress sync keys on) only moves when the content
+    hash changes or the listing comes back from ``removed``.
+    """
+    source_url = listing_data.get("source_url")
+    now = datetime.now(timezone.utc)
+    new_media_urls = [str(m.url) for m in (getattr(schema, "media", None) or [])]
+
+    merged = _merged_content(existing, listing_data)
+    new_hash = compute_content_hash(merged, new_media_urls)
+    # The "before" hash is recomputed from the stored row rather than read from
+    # content_hash: other writers (PATCH, AI enrichment, rows predating the
+    # column) change content without refreshing it, and trusting a stale hash
+    # would hide a scrape that reverts their edit. One small SELECT per visit.
+    old_hash = compute_content_hash(
+        {f: getattr(existing, f) for f in CONTENT_FIELDS},
+        await _stored_media_urls(db, existing.id),
+    )
+    reactivated = existing.status != STATUS_ACTIVE
+
+    if new_hash == old_hash and not reactivated:
+        # Core UPDATE with an explicit updated_at: the column's onupdate would
+        # otherwise bump it for any write to the row.
+        await db.execute(
+            update(Listing)
+            .where(Listing.id == existing.id)
+            .values(
+                last_seen_at=now,
+                scrape_job_id=UUID(job_id),
+                content_hash=new_hash,
+                updated_at=Listing.updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _replace_media_assets(db, existing.id, schema)
+        logger.debug("Listing unchanged: %s", source_url)
+        return
+
+    new_price = listing_data.get("price_amount")
+    if (
+        new_price is not None
+        and existing.price_amount is not None
+        and existing.price_amount != new_price
+    ):
+        db.add(
+            PriceHistory(
+                listing_id=existing.id,
+                price_amount=existing.price_amount,
+                price_currency=existing.price_currency or "EUR",
+            )
+        )
+        logger.info("Price change for %s: %s → %s", source_url, existing.price_amount, new_price)
+
+    if reactivated:
+        logger.info("Reactivating previously removed listing: %s", source_url)
+        existing.status = STATUS_ACTIVE
+        existing.removed_at = None
+
+    logger.info("Updating existing listing: %s", source_url)
+    for field, value in listing_data.items():
+        if field == "scrape_job_id":
+            continue
+        if value is not None or field in _FEATURE_FLAG_FIELDS:
+            setattr(existing, field, value)
+
+    existing.content_hash = new_hash
+    existing.updated_at = now
+    existing.last_seen_at = now
+    existing.scrape_job_id = UUID(job_id)
+
+    await _replace_media_assets(db, existing.id, schema)
 
 
 async def _persist_listing_with_postgres_upsert(
@@ -770,7 +871,7 @@ async def _persist_listing_with_postgres_upsert(
         inserted_id = (
             await db.execute(
                 pg_insert(Listing)
-                .values(**listing_data)
+                .values(**listing_data, content_hash=_hash_for_new(listing_data, schema))
                 .on_conflict_do_nothing(index_elements=[Listing.source_url])
                 .returning(Listing.id)
             )
@@ -793,39 +894,7 @@ async def _persist_listing_with_postgres_upsert(
     if existing is None:
         raise RuntimeError(f"Failed to resolve listing persistence target for {source_url}")
 
-    new_price = listing_data.get("price_amount")
-    if (
-        new_price is not None
-        and existing.price_amount is not None
-        and existing.price_amount != new_price
-    ):
-        db.add(
-            PriceHistory(
-                listing_id=existing.id,
-                price_amount=existing.price_amount,
-                price_currency=existing.price_currency or "EUR",
-            )
-        )
-        logger.info(
-            "Price change for %s: %s → %s",
-            source_url,
-            existing.price_amount,
-            new_price,
-        )
-
-    logger.info("Updating existing listing: %s", source_url)
-    for field, value in listing_data.items():
-        if field == "scrape_job_id":
-            continue
-        if value is not None or field in _FEATURE_FLAG_FIELDS:
-            setattr(existing, field, value)
-
-    existing.updated_at = datetime.now(timezone.utc)
-    existing.scrape_job_id = UUID(job_id)
-    _mark_seen(existing)
-
-    await _replace_media_assets(db, existing.id, schema)
-
+    await _update_existing_listing(db, job_id, existing, schema, listing_data)
     return False
 
 
@@ -844,40 +913,11 @@ async def _persist_listing_legacy(
         existing = result.scalar_one_or_none()
 
     if existing:
-        logger.info("Updating existing listing: %s", listing_data["source_url"])
-
-        new_price = listing_data.get("price_amount")
-        if (
-            new_price is not None
-            and existing.price_amount is not None
-            and existing.price_amount != new_price
-        ):
-            price_record = PriceHistory(
-                listing_id=existing.id,
-                price_amount=existing.price_amount,
-                price_currency=existing.price_currency or "EUR",
-            )
-            db.add(price_record)
-            logger.info(
-                "Price change for %s: %s → %s",
-                listing_data["source_url"],
-                existing.price_amount,
-                new_price,
-            )
-
-        for field, value in listing_data.items():
-            if field == "scrape_job_id":
-                continue
-            if value is not None or field in _FEATURE_FLAG_FIELDS:
-                setattr(existing, field, value)
-        existing.updated_at = datetime.now(timezone.utc)
-        existing.scrape_job_id = UUID(job_id)
-        _mark_seen(existing)
-        await _replace_media_assets(db, existing.id, schema)
+        await _update_existing_listing(db, job_id, existing, schema, listing_data)
         return False
 
     else:
-        listing = Listing(**listing_data)
+        listing = Listing(**listing_data, content_hash=_hash_for_new(listing_data, schema))
         db.add(listing)
         await db.flush()  # Flush necessari per obtenir l'ID abans d'afegir fitxers multimèdia
 

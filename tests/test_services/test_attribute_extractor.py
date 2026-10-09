@@ -122,3 +122,8 @@ async def test_backfill_only_fills_null_columns(db_session):
     row = (await db_session.execute(select(Listing))).scalar_one()
     assert (row.has_elevator, row.construction_year, row.floor) == (True, 1999, "2")
     assert row.has_pool is False                       # stored value kept even though the text says "piscina"
+
+
+def test_floor_accepts_raw_property_type_wording():
+    assert extract_attributes("Penthouse no 5º andar.", "Penthouse").floor == "5"
+    assert extract_attributes("Moradia no 5º andar.", "Vivenda").floor is None

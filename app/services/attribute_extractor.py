@@ -10,6 +10,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from app.core.vocabularies import normalize_property_type
+
 _FLOOR_PROPERTY_TYPES = frozenset({"Apartamento", "Escritório", "Loja", "Comercial", "Garagem"})
 
 
@@ -152,5 +154,6 @@ def extract_attributes(text: str | None, property_type: str | None = None) -> Ex
         flags=flags,
         construction_year=_construction_year(folded),
         condition=_condition(folded),
-        floor=_floor(folded) if property_type in _FLOOR_PROPERTY_TYPES else None,
+        # Accept raw wording ("Penthouse") as well as the canonical value.
+        floor=_floor(folded) if normalize_property_type(property_type) in _FLOOR_PROPERTY_TYPES else None,
     )

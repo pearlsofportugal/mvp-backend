@@ -15,6 +15,7 @@ from app.core.logging import get_logger
 from app.core.prompt_loader import render_prompt
 from app.models.listing_model import Listing
 from app.repositories.listings_repository import ListingRepository
+from app.services.description_cleaner import clean_description, score_description
 from app.schemas.ai_enrichment_schema import (
     BulkEnrichmentItemResult,
     BulkEnrichmentRequest,
@@ -72,6 +73,26 @@ async def _check_ai_rate_limit(now: float | None = None) -> None:
             )
 
         _AI_REQUEST_TIMESTAMPS.append(current_time)
+
+
+def _fill_derived_fields(listing: Listing, translations: dict[str, Any]) -> None:
+    """Populate columns that were never filled, from what was just generated.
+
+    ``meta_description`` (otherwise scraped, often missing) takes the Portuguese
+    text, falling back to English; ``description_quality_score`` is the cleaner's
+    heuristic. Existing values are never replaced.
+    """
+    if not listing.meta_description:
+        for locale in ("pt", "en"):
+            meta = (translations.get(locale) or {}).get("meta_description")
+            if meta:
+                listing.meta_description = meta
+                break
+    if listing.description_quality_score is None:
+        clean = listing.description_clean or clean_description(
+            listing.raw_description or listing.description, listing.source_partner
+        )
+        listing.description_quality_score = score_description(clean)
 
 
 def infer_listing_keywords(listing: Listing) -> list[str]:
@@ -240,7 +261,7 @@ def _build_multilang_prompt(listing: "Listing", keywords: list[str], locales: li
         f"Energy certificate: {listing.energy_certificate or ''}",
         f"Features: garage={listing.has_garage}, pool={listing.has_pool}, "
         f"elevator={listing.has_elevator}, balcony={listing.has_balcony}",
-        f"Description: {listing.description or listing.raw_description or ''}",
+        f"Description: {listing.description_clean or listing.description or listing.raw_description or ''}",
     ]
 
     return render_prompt(
@@ -302,6 +323,7 @@ async def enrich_listing_translations(
         for locale, locale_output in incoming.items():
             merged[locale] = locale_output.model_dump(exclude_none=True)
         listing.enriched_translations = merged
+        _fill_derived_fields(listing, merged)
 
         results = {
             locale: LocaleEnrichmentOutput.model_validate(merged.get(locale, {}))

@@ -112,3 +112,37 @@ async def backfill_description_clean(db: AsyncSession, *, apply: bool) -> dict:
     if apply and changed:
         await db.commit()
     return {"scanned": len(rows), "changed": changed}
+
+
+# ── attribute backfill ────────────────────────────────────────────────────
+
+_FLAG_COLUMNS = {
+    "garage": "has_garage", "elevator": "has_elevator", "balcony": "has_balcony",
+    "air_conditioning": "has_air_conditioning", "pool": "has_pool", "garden": "has_garden",
+}
+
+
+async def backfill_attributes(db: AsyncSession, *, apply: bool) -> dict:
+    """Fill has_*, construction_year, condition and floor that are still NULL, from the text.
+
+    Only NULL columns are touched, only on explicit evidence (see attribute_extractor).
+    """
+    from app.services.attribute_extractor import extract_attributes
+
+    filled = {"rows": 0, "fields": 0}
+    rows = (await db.execute(select(Listing))).scalars().all()
+    for row in rows:
+        found = extract_attributes(f"{row.title or ''} . {row.raw_description or row.description or ''}", row.property_type)
+        updates = {_FLAG_COLUMNS[name]: value for name, value in found.flags.items()}
+        updates.update(construction_year=found.construction_year, condition=found.condition, floor=found.floor)
+        updates = {col: v for col, v in updates.items() if v is not None and getattr(row, col) is None}
+        if not updates:
+            continue
+        filled["rows"] += 1
+        filled["fields"] += len(updates)
+        if apply:
+            for col, value in updates.items():
+                setattr(row, col, value)
+    if apply and filled["rows"]:
+        await db.commit()
+    return {"scanned": len(rows), **filled}

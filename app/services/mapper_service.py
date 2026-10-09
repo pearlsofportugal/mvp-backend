@@ -27,6 +27,7 @@ from uuid import UUID
 from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.services.attribute_extractor import extract_attributes
 from app.services.description_cleaner import clean_description, score_description
 from app.core.vocabularies import PROPERTY_TYPE_OTHER, normalize_property_type, normalize_typology
 from app.utils.coordinates import is_plausible_portugal
@@ -109,6 +110,11 @@ def parse_coordinates(lat: Any, lng: Any) -> tuple[float | None, float | None]:
     except (TypeError, ValueError):
         return None, None
     return (la, lo) if is_plausible_portugal(la, lo) else (None, None)
+
+
+def _first_known(*values: bool | None) -> bool | None:
+    """First value that is not None (False counts: an explicit "no" beats a guess)."""
+    return next((v for v in values if v is not None), None)
 
 
 def _canonical_property_type(raw: str | None, source_partner: str) -> str | None:
@@ -746,6 +752,13 @@ def _build_base_schema(
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
 
+    # Gaps the source left open, filled only from explicit phrases in the text
+    # (the source's own value always wins).
+    inferred = extract_attributes(f"{title or ''} . {raw_description or ''}", property_type)
+    condition = condition or inferred.condition
+    floor = floor or inferred.floor
+    construction_year = construction_year or inferred.construction_year
+
     # Display-ready copy; `description` stays as the partner wrote it.
     description_clean = clean_description(raw_description, source_partner)
 
@@ -786,12 +799,12 @@ def _build_base_schema(
             # Parsers are inconsistent about the key prefix — the feature keyword
             # scan emits "garage", but some site parsers emit "has_garage". Accept
             # both so a feature is never silently dropped in normalization.
-            has_garage=parse_bool(raw.get("garage") or raw.get("has_garage")),
-            has_elevator=parse_bool(raw.get("elevator") or raw.get("has_elevator")),
-            has_balcony=parse_bool(raw.get("balcony") or raw.get("has_balcony")),
-            has_air_conditioning=parse_bool(raw.get("air_conditioning") or raw.get("has_air_conditioning")),
-            has_pool=parse_bool(raw.get("swimming_pool") or raw.get("has_pool") or raw.get("pool")),
-            has_garden=parse_bool(raw.get("garden") or raw.get("has_garden")),
+            has_garage=_first_known(parse_bool(raw.get("garage") or raw.get("has_garage")), inferred.flags.get("garage")),
+            has_elevator=_first_known(parse_bool(raw.get("elevator") or raw.get("has_elevator")), inferred.flags.get("elevator")),
+            has_balcony=_first_known(parse_bool(raw.get("balcony") or raw.get("has_balcony")), inferred.flags.get("balcony")),
+            has_air_conditioning=_first_known(parse_bool(raw.get("air_conditioning") or raw.get("has_air_conditioning")), inferred.flags.get("air_conditioning")),
+            has_pool=_first_known(parse_bool(raw.get("swimming_pool") or raw.get("has_pool") or raw.get("pool")), inferred.flags.get("pool")),
+            has_garden=_first_known(parse_bool(raw.get("garden") or raw.get("has_garden")), inferred.flags.get("garden")),
             **(extra_flags or {}),
         ),
         descriptions={k: v for k, v in {

@@ -27,6 +27,12 @@ from uuid import UUID
 from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.services.geo_normalizer import normalize_geo
+from app.services.attribute_extractor import extract_attributes
+from app.services.description_cleaner import clean_description, score_description
+from app.core.vocabularies import PROPERTY_TYPE_OTHER, normalize_property_type, normalize_typology
+from app.utils.coordinates import is_plausible_portugal
+from app.utils.images import dimensions_from_url
 from app.schemas.property_schema import (
     Address,
     ListingFlags,
@@ -95,6 +101,46 @@ def missing_critical_schema_fields(schema: PropertySchema) -> list[str]:
     return missing
 
 
+_NUMERIC_TITLE_RE = re.compile(r"^\s*\d{1,5}\s*$")
+
+
+def parse_coordinates(lat: Any, lng: Any) -> tuple[float | None, float | None]:
+    """Coerce raw lat/lng to floats; (None, None) unless the pair is plausibly in Portugal."""
+    try:
+        la, lo = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None, None
+    return (la, lo) if is_plausible_portugal(la, lo) else (None, None)
+
+
+def _first_known(*values: bool | None) -> bool | None:
+    """First value that is not None (False counts: an explicit "no" beats a guess)."""
+    return next((v for v in values if v is not None), None)
+
+
+def _canonical_property_type(raw: str | None, source_partner: str) -> str | None:
+    canonical = normalize_property_type(raw)
+    if canonical == PROPERTY_TYPE_OTHER:
+        # Surfaces vocabulary gaps instead of silently burying them in "Outro".
+        logger.info("Unrecognised property_type %r from %s → %s", raw, source_partner, PROPERTY_TYPE_OTHER)
+    return canonical
+
+
+def is_junk_listing(schema: PropertySchema) -> bool:
+    """True for pages that parsed into a shell rather than a property.
+
+    A rendered error page (``<h1>410</h1>``) normalises to a numeric title with
+    no property type and no price. A real listing missing one of those is merely
+    incomplete (see ``missing_critical_schema_fields``); missing all three is not
+    a listing at all and must never be stored or overwrite a good record.
+    """
+    title = (schema.title or "").strip()
+    title_is_junk = not title or bool(_NUMERIC_TITLE_RE.match(title))
+    no_type = not (schema.property_type or "").strip()
+    no_price = schema.price.amount is None and not schema.price_on_request
+    return title_is_junk and no_type and no_price
+
+
 _LISTING_STRING_LIMITS = {
     "partner_id": 255,
     "source_partner": 50,
@@ -123,7 +169,8 @@ PRICE_ON_REQUEST = Decimal("-1")
 _PRICE_PATTERN = re.compile(r"[\d][0-9\s.,]*[\d]|[\d]")
 
 _PRICE_ON_REQUEST_PATTERN = re.compile(
-    r"sob\s+consulta|on\s+request|price\s+on\s+request|a\s+definir|consultar|sob\s+pedido",
+    r"sob\s+consulta|on\s+request|price\s+on\s+request|a\s+definir|consultar|sob\s+pedido|"
+    r"call\s+for\s+price|contact\s+(?:us\s+)?for\s+(?:the\s+)?price|upon\s+request|\bPOA\b|preço\s+a\s+combinar",
     re.IGNORECASE,
 )
 # ───────── Area Parsing ─────────
@@ -227,6 +274,73 @@ _MIN_PLAUSIBLE_PRICE = {
 }
 _DEFAULT_MIN_PLAUSIBLE_PRICE = Decimal("50")
 
+# Site chrome (header/footer logo, favicons, sprites) sits in `raw["images"]`
+# right alongside real photos — often first, since it's near the top of the
+# page in DOM order. Filtered out of the gallery (see _build_gallery); the cover
+# is the first image that survives. Mirrors the "negative" keyword list
+# selector_suggester.py already uses to de-score logo/icon/avatar candidates.
+_JUNK_IMAGE_RE = re.compile(
+    r"logo|favicon|sprite|placeholder|/icon[-_./]|/flags?/|[-_/]flag[-_.]|"
+    # tracking pixels (facebook.com/tr?id=... on ville.pt)
+    r"facebook\.com/tr|doubleclick|googletagmanager|analytics|pixel|"
+    # language switchers (pinkrealestate.pt: mod_languages/images/en_gb.gif)
+    r"mod_languages|/lang(?:uages?)?/|[-_/](?:en|pt|es|fr|de)[-_](?:gb|pt|us|es|fr|de)\.|"
+    # agent/team portraits (algarve-property-agency.com: storage/team/employees/x.jpg)
+    r"/team/|employee|/agents?/|avatar|/staff/|broker|consultor|"
+    # static maps and unrendered template placeholders ({{Property.X}})
+    r"listingsmaps|staticmap|[-_/.]maps?[-_/.]|\{\{|%7b%7b|"
+    r"transp|spacer|blank\.|1x1|qr[-_]?code|"
+    # trust/compliance badges & payment/social icons (livro_reclamacoes.png on casaecomigo)
+    r"reclama|badge|/seals?/|selo[-_.]|paypal|mastercard|visa[-_.]|social[-_]",
+    re.IGNORECASE,
+)
+# Flat graphics: logos, maps and badges are PNG/GIF; listing photos are
+# essentially always JPEG/WebP. Used to *prefer* a photo, not to exclude PNGs
+# outright (some sites do serve PNG photos).
+_FLAT_GRAPHIC_EXT_RE = re.compile(r"\.(?:png|gif|bmp|ico)(?:\?|$)", re.IGNORECASE)
+# `url.endswith(".svg")` misses "logo.svg?v=abc123" — a cache-busting query
+# string is the common case, not the exception. Match the extension anywhere
+# before a `?` or the end, not just at the very end of the raw string.
+_SVG_EXTENSION_RE = re.compile(r"\.svg(?:\?|$)", re.IGNORECASE)
+
+
+def _looks_like_junk_image(url: str) -> bool:
+    if _SVG_EXTENSION_RE.search(url):
+        return True
+    return bool(_JUNK_IMAGE_RE.search(url))
+
+
+def _build_gallery(
+    images: list | None,
+    alt_texts: list | None,
+    sizes: dict[str, tuple[int | None, int | None]] | None = None,
+) -> list[MediaAsset]:
+    """Full gallery in page order, site chrome removed, cover first.
+
+    Logos/icons often sit at ``images[0]`` (top of the DOM), so the cover is the
+    first non-flat-graphic photo and is moved to position 0; the remaining photos
+    keep their page order. If *everything* looks like junk (JS-rendered gallery
+    where only the logo is in the static HTML) the gallery is empty — no cover is
+    better than a wrong one. Duplicate URLs are dropped.
+    """
+    seen: set[str] = set()
+    usable: list[tuple[str, str | None]] = []
+    for url, alt in zip_longest(images or [], alt_texts or [], fillvalue=None):
+        if not url or url in seen or _looks_like_junk_image(url):
+            continue
+        seen.add(url)
+        usable.append((url, alt))
+    cover_idx = next((i for i, (url, _) in enumerate(usable) if not _FLAT_GRAPHIC_EXT_RE.search(url)), 0)
+    if usable and cover_idx:
+        usable.insert(0, usable.pop(cover_idx))
+    gallery = []
+    for i, (url, alt) in enumerate(usable):
+        width, height = (sizes or {}).get(url) or (None, None)
+        if not (width and height) and (from_url := dimensions_from_url(url)):
+            width, height = from_url
+        gallery.append(MediaAsset(url=url, alt_text=alt, type="photo", position=i, width=width, height=height))
+    return gallery
+
 
 def parse_price(
     raw: str | None,
@@ -292,10 +406,16 @@ def parse_price(
 
 
 
-def parse_area(raw: str | None) -> float | None:
-    """Parse an area string like '120 m²' into 120.0."""
-    if not raw:
+def parse_area(raw: str | int | float | None) -> float | None:
+    """Parse an area string like '120 m²' into 120.0.
+
+    Also accepts a bare int/float, for the same reason as parse_int (LLM JSON
+    fields can come back as numbers instead of strings).
+    """
+    if raw is None or raw == "":
         return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
 
     match = _AREA_PATTERN.search(raw)
     if not match:
@@ -344,10 +464,17 @@ def _normalize_decimal_separators(num_str: str) -> str:
 
 # ───────── Integer Parsing ─────────
 
-def parse_int(raw: str | None) -> int | None:
-    """Parse integer from string, handling 'T3' → 3 for typology."""
-    if not raw:
+def parse_int(raw: str | int | float | None) -> int | None:
+    """Parse integer from string, handling 'T3' → 3 for typology.
+
+    Also accepts a bare int/float — the LLM fallback's JSON response returns
+    numeric fields (bedrooms, bathrooms) as actual numbers, not strings, and
+    this used to crash re.search() with TypeError.
+    """
+    if raw is None or raw == "":
         return None
+    if isinstance(raw, (int, float)):
+        return int(raw)
     match = re.search(r"\d+", raw)
     if match:
         return int(match.group())
@@ -501,6 +628,14 @@ _BUSINESS_TYPE_RENT_KEYWORDS = ("arrend", "arrendar", "arrendamento", "rent", "r
 _BUSINESS_TYPE_TRESPASSE_KEYWORDS = ("trespasse", "trespass")
 
 
+_SALE_SIGNALS = ("venda", "for-sale", "for sale", "comprar", "/buy", "-sale-", "à venda", "a-venda")
+_RENT_HEAD_SIGNALS = ("arrend", "alug", "for-rent", "for rent", "to-let", "to let", "-rent-", "/rent", "rental", "para-arrendar")
+_RENT_TEXT_PHRASES = (
+    "for rent", "to rent", "para arrendamento", "para arrendar", "long term rent",
+    "long-term rental", "per month", "/month", "monthly rent",
+)
+
+
 def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) -> str:
     """Infer 'sale', 'rent', or 'trespasse' from raw payload fields or an optional URL hint.
 
@@ -524,6 +659,19 @@ def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) ->
     text = " ".join(str(raw.get(k) or "") for k in ("title", "raw_description")).lower()
     if any(w in text for w in ("arrendad", "para arrendamento", "renda mensal", "/mês", "/mes", " por mês")):
         return "rent"
+
+    # English / URL-slug rentals on generic sites (cascais-property.com,
+    # algarve-property-agency.com were ingested as 'sale' with a monthly rent
+    # as the "price"). A sale signal in the URL/title wins, so a sale listing
+    # that merely mentions "rental potential" isn't flipped.
+    head = f"{url_hint or ''} {raw.get('title') or ''}".lower()
+    has_sale_signal = any(s in head for s in _SALE_SIGNALS)
+    if not has_sale_signal:
+        if any(s in head for s in _RENT_HEAD_SIGNALS):
+            return "rent"
+        desc = str(raw.get("raw_description") or "").lower()
+        if any(p in desc for p in _RENT_TEXT_PHRASES):
+            return "rent"
     return "sale"
 
 
@@ -590,6 +738,10 @@ def _build_base_schema(
     if title is _NOT_SET:
         title = raw.get("title")
 
+    # Closed vocabularies (core/vocabularies): the raw wording is still in raw_partner_payload.
+    property_type = _canonical_property_type(property_type, source_partner)
+    typology, typology_extra = normalize_typology(raw.get("typology"))
+
     if condition is _NOT_SET:
         condition = _normalize_whitespace(raw.get("condition"))
 
@@ -601,6 +753,24 @@ def _build_base_schema(
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
 
+    # Gaps the source left open, filled only from explicit phrases in the text
+    # (the source's own value always wins).
+    inferred = extract_attributes(f"{title or ''} . {raw_description or ''}", property_type)
+    condition = condition or inferred.condition
+    floor = floor or inferred.floor
+    construction_year = construction_year or inferred.construction_year
+
+    # Display-ready copy; `description` stays as the partner wrote it.
+    description_clean = clean_description(raw_description, source_partner)
+
+    media = _build_gallery(raw.get("images"), raw.get("alt_texts"), raw.get("image_sizes"))
+
+    # Official codes for the stated district / county / parish (text fields are left as scraped).
+    geo = normalize_geo(address.region, address.city, address.area)
+
+    # Coordinates are only ever the ones the source page declared (see utils/coordinates).
+    latitude, longitude = parse_coordinates(raw.get("latitude"), raw.get("longitude"))
+
     return PropertySchema(
         partner_id=partner_id,
         source_partner=source_partner,
@@ -609,7 +779,8 @@ def _build_base_schema(
         business_type=business_type,
         property_type=property_type,
         condition=condition,  # type: ignore[arg-type]
-        typology=raw.get("typology"),
+        typology=typology,
+        typology_extra=typology_extra,
         bedrooms=bedrooms,  # type: ignore[arg-type]
         bathrooms=parse_int(raw.get("bathrooms")),
         floor=floor,
@@ -624,27 +795,31 @@ def _build_base_schema(
         area_gross_m2=area_gross,
         area_land_m2=area_land,
         address=address,
-media=[
-    MediaAsset(url=url, alt_text=alt, type="photo")
-    for url, alt in zip_longest(raw.get("images", []), raw.get("alt_texts", []), fillvalue=None)
-    if url
-],
+        latitude=latitude,
+        longitude=longitude,
+        location_precision="exact" if latitude is not None else None,
+        district_code=geo.district_code,
+        county_code=geo.county_code,
+        parish_code=geo.parish_code,
+        media=media,
         features=ListingFlags(
             # Parsers are inconsistent about the key prefix — the feature keyword
             # scan emits "garage", but some site parsers emit "has_garage". Accept
             # both so a feature is never silently dropped in normalization.
-            has_garage=parse_bool(raw.get("garage") or raw.get("has_garage")),
-            has_elevator=parse_bool(raw.get("elevator") or raw.get("has_elevator")),
-            has_balcony=parse_bool(raw.get("balcony") or raw.get("has_balcony")),
-            has_air_conditioning=parse_bool(raw.get("air_conditioning") or raw.get("has_air_conditioning")),
-            has_pool=parse_bool(raw.get("swimming_pool") or raw.get("has_pool") or raw.get("pool")),
-            has_garden=parse_bool(raw.get("garden") or raw.get("has_garden")),
+            has_garage=_first_known(parse_bool(raw.get("garage") or raw.get("has_garage")), inferred.flags.get("garage")),
+            has_elevator=_first_known(parse_bool(raw.get("elevator") or raw.get("has_elevator")), inferred.flags.get("elevator")),
+            has_balcony=_first_known(parse_bool(raw.get("balcony") or raw.get("has_balcony")), inferred.flags.get("balcony")),
+            has_air_conditioning=_first_known(parse_bool(raw.get("air_conditioning") or raw.get("has_air_conditioning")), inferred.flags.get("air_conditioning")),
+            has_pool=_first_known(parse_bool(raw.get("swimming_pool") or raw.get("has_pool") or raw.get("pool")), inferred.flags.get("pool")),
+            has_garden=_first_known(parse_bool(raw.get("garden") or raw.get("has_garden")), inferred.flags.get("garden")),
             **(extra_flags or {}),
         ),
         descriptions={k: v for k, v in {
             "raw": raw_description,
             "pt": _normalize_description_text(raw_description),
+            "clean": description_clean,
         }.items() if v},
+        description_quality_score=score_description(description_clean),
         seo=seo or None,
         energy_certificate=normalize_energy_certificate(
             raw.get("energy_certificate"),
@@ -1278,10 +1453,19 @@ def normalize_generic_payload(raw: dict[str, Any], source_partner: str) -> Prope
     if partner_id:
         partner_id = re.sub(r"^[^:]+:\s*", "", partner_id).strip() or None
 
+    business_type = _infer_business_type(raw, url_hint=raw.get("url"))
+    if business_type == "sale" and (raw.get("typology") or parse_int(raw.get("bedrooms"))):
+        # A house/apartment "for sale" at under 15k EUR is a monthly rent that
+        # nothing on the page labelled as such (cascais-property.com: 6000,
+        # algarve-property-agency.com: 1900 — both ingested as 'sale').
+        _amount, _cur = parse_price(raw.get("price"), business_type="sale")
+        if _amount is not None and _amount != PRICE_ON_REQUEST and _amount < Decimal("15000"):
+            business_type = "rent"
+
     return _build_base_schema(
         raw,
         source_partner=source_partner,
-        business_type=_infer_business_type(raw, url_hint=raw.get("url")),
+        business_type=business_type,
         property_type=property_type,
         partner_id=partner_id,
         address=_generic_address_from_raw(raw),
@@ -1310,6 +1494,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "property_type": schema.property_type,
         "condition": schema.condition,
         "typology": schema.typology,
+        "typology_extra": schema.typology_extra,
         "bedrooms": schema.bedrooms,
         "bathrooms": schema.bathrooms,
         "floor": schema.floor,
@@ -1326,6 +1511,10 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "full_address": schema.address.full_address,
         "latitude": schema.latitude,
         "longitude": schema.longitude,
+        "district_code": schema.district_code,
+        "county_code": schema.county_code,
+        "parish_code": schema.parish_code,
+        "location_precision": schema.location_precision,
         "has_garage": schema.features.has_garage,
         "has_elevator": schema.features.has_elevator,
         "has_balcony": schema.features.has_balcony,
@@ -1338,6 +1527,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "contacts": schema.contacts,
         "raw_description": schema.descriptions.get("raw"),
         "description": schema.descriptions.get("pt"),
+        "description_clean": schema.descriptions.get("clean"),
         "description_quality_score": schema.description_quality_score,
         "page_title": schema.seo.get("page_title") if schema.seo else None,
         "headers": schema.seo.get("headers") if schema.seo else None,

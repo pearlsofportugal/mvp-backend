@@ -25,6 +25,8 @@ from bs4 import BeautifulSoup, Tag
 
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.utils.coordinates import extract_coordinates
+from app.utils.images import largest_srcset_candidate, parse_srcset
 from app.crawler.selector_suggester import (
     _extract_json_ld_reference_values,
     _extract_meta_reference_values,
@@ -345,6 +347,20 @@ def parse_next_page(
 def _set_if_missing(data:Any,key: str, value: Any):
         if value and not data.get(key):
             data[key] = value
+def _add_og_image_size(soup: BeautifulSoup, data: dict[str, Any], base_url: str) -> None:
+    """Record og:image:width/height for the og:image when it is part of the gallery."""
+    def _meta(prop: str) -> str | None:
+        tag = soup.find("meta", attrs={"property": prop})
+        return tag.get("content") if tag and tag.get("content") else None
+
+    og_url, width, height = _meta("og:image"), _meta("og:image:width"), _meta("og:image:height")
+    if not (og_url and width and height and width.isdigit() and height.isdigit()):
+        return
+    absolute = urljoin(base_url, og_url)
+    if absolute in data.get("images", []):
+        data.setdefault("image_sizes", {})[absolute] = (int(width), int(height))
+
+
 def parse_listing_page(
     html: str,
     url: str,
@@ -368,8 +384,14 @@ def parse_listing_page(
 
     # Common extractions
     data.update(_parse_images(soup, selectors, url))
+    _add_og_image_size(soup, data, url)
     data.update(_parse_seo(soup))
     _fill_missing_listing_fields_from_page(soup, data)
+
+    # Coordinates: only what the page itself declares (no geocoding)
+    coords = extract_coordinates(soup)
+    if coords:
+        data["latitude"], data["longitude"] = coords.latitude, coords.longitude
 
     # Sold/reserved detection
     data["is_sold"] = _detect_sold_status(data, selectors)
@@ -963,7 +985,43 @@ def _extract_element_value(el: Tag, field: str | None = None) -> str:
     return ""
 
 
-_CHROME_TAGS = ("nav", "header", "footer", "script", "style", "noscript", "aside")
+# select/option/datalist/label: search-filter controls whose text is *price
+# ranges*, not the listing's price ("+500.000 EUR" radio label on
+# pearlsofportugal, the 100.000€…6.000.000€ min/max dropdowns on
+# principal-algarve) — a text sweep for "first € amount" happily picked them.
+_CHROME_TAGS = ("nav", "header", "footer", "script", "style", "noscript", "aside", "select", "option", "datalist", "label")
+
+# "Similar/related properties" widgets show OTHER listings on the same page;
+# their price/typology/bedroom text reads exactly like real content to a
+# regex sweep, but describes a different property. Keep in sync with
+# app.crawler.selector_suggester._EXCLUDED_ANCESTOR_RE (same intent, DOM
+# decompose here vs. candidate filtering there — two different extraction
+# strategies, not worth a shared import for one regex).
+_RELATED_LISTINGS_RE = re.compile(
+    r"similar|related|recommend|semelhant|relacionad|sugest[aã]o|sugestoes|"
+    r"you[-_]?may[-_]?also|also[-_]?like|voce[-_]?tambem",
+    re.IGNORECASE,
+)
+
+
+def strip_repeated_price_cards(soup: BeautifulSoup) -> None:
+    """Decompose listing-grid cards (see selector_suggester._repeated_price_card)."""
+    from app.crawler.selector_suggester import _CARD_PRICE_RE, _repeated_price_card
+
+    # Two passes: identify every card first, remove afterwards. Removing as we
+    # go shrinks the sibling set, so the *last* card of a grid no longer looks
+    # "repeated" and survives (its price then leaks into the text sweep).
+    cards: list[Tag] = []
+    for text_node in soup.find_all(string=_CARD_PRICE_RE):
+        parent = getattr(text_node, "parent", None)
+        if parent is None:
+            continue
+        card = _repeated_price_card(parent)
+        if card is not None and not any(card is c for c in cards):
+            cards.append(card)
+    for card in cards:
+        if card.parent is not None:
+            card.decompose()
 
 
 def _extract_body_text_without_chrome(soup: BeautifulSoup) -> str:
@@ -980,6 +1038,11 @@ def _extract_body_text_without_chrome(soup: BeautifulSoup) -> str:
     for tag_name in _CHROME_TAGS:
         for el in clean.find_all(tag_name):
             el.decompose()
+    for el in clean.find_all(id=_RELATED_LISTINGS_RE):
+        el.decompose()
+    for el in clean.find_all(class_=_RELATED_LISTINGS_RE):
+        el.decompose()
+    strip_repeated_price_cards(clean)
     return clean.get_text(separator=" ", strip=True)
 
 
@@ -1428,18 +1491,12 @@ def _parse_direct_selectors(soup: BeautifulSoup, selectors: dict[str, Any]) -> d
 
 def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str) -> dict[str, Any]:
     """Extract images from the listing page."""
-    data: dict[str, Any] = {"images": [], "alt_texts": []}
+    data: dict[str, Any] = {"images": [], "alt_texts": [], "image_sizes": {}}
 
     # ── FIX: aceitar tanto "image_selector" como "images_selector" (alias) ──
     image_selector = selectors.get("image_selector") or selectors.get("images_selector", "img")
     image_filter = selectors.get("image_filter")
     image_exclude_filter = selectors.get("image_exclude_filter")
-
-    elements = soup.select(image_selector)
-
-    logger.warning("Found %d elements", len(elements))
-    for img in elements:
-        logger.warning(img)
 
     def _normalize_image_url(img: Tag) -> str | None:
         # ── FIX: suportar padrão de galeria em âncoras <a href="full.jpg"><img src="thumb.jpg"></a> ──
@@ -1454,16 +1511,27 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
             value = img.get(attr)
             if value and not value.startswith("data:"):
                 return value.strip()
-        if img.name == "source":
-            value = img.get("srcset") or img.get("data-srcset")
-            if value:
-                return value.split(",")[0].strip().split(" ")[0]
+        srcset = img.get("srcset") or img.get("data-srcset")
+        if srcset:
+            # <source> (and an <img> with only a srcset): take the widest rendition,
+            # not the first — srcsets are usually listed smallest-first.
+            best = largest_srcset_candidate(srcset)
+            if best:
+                return best[0]
+        return None
+
+    def _srcset_width(img: Tag, chosen: str) -> int | None:
+        """Width the page itself declares for the chosen URL (srcset ``w`` descriptor)."""
+        for attr in ("srcset", "data-srcset"):
+            for candidate, width in parse_srcset(img.get(attr)):
+                if width and (candidate == chosen or urljoin(base_url, candidate) == chosen):
+                    return width
         return None
 
     for img in soup.select(image_selector):
         src = _normalize_image_url(img)
         if not src:
-            logger.warning("SKIP: sem src -> %s", img)
+            logger.debug("SKIP: sem src -> %s", img)
             continue
 
         absolute_url = urljoin(base_url, src)
@@ -1472,16 +1540,19 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
             match = re.search(image_filter, absolute_url)
 
             if not match:
-                logger.warning("SKIP: image_filter rejeitou %s", absolute_url)
+                logger.debug("SKIP: image_filter rejeitou %s", absolute_url)
                 continue
 
         if image_exclude_filter:
             excluded = re.search(image_exclude_filter, absolute_url)
             if excluded:
-                logger.warning("SKIP: image_exclude_filter rejeitou %s", absolute_url)
+                logger.debug("SKIP: image_exclude_filter rejeitou %s", absolute_url)
                 continue
 
         data["images"].append(absolute_url)
+        declared_width = _srcset_width(img, src) or _srcset_width(img, absolute_url)
+        if declared_width:
+            data["image_sizes"][absolute_url] = (declared_width, None)
 
         alt = (
             img.get("alt", "")

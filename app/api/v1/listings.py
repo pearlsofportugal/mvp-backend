@@ -4,9 +4,10 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.vocabularies import PROPERTY_TYPES, valid_typologies
 from app.api.deps import get_db, listing_filter_params
 from app.api.responses import ERROR_RESPONSES, ok
 from app.schemas.base_schema import ApiResponse
@@ -16,17 +17,18 @@ from app.schemas.listing_schema import (
     ListingDetailRead,
     ListingStats,
     ListingUpdate,
+    PaginatedDetailResponse,
     PaginatedResponse,
 )
 from app.schemas.listing_search_schema import ListingSearchResponse
-from app.services.listing_service import SORT_FIELDS, ListingService
+from app.services.listing_service import MAX_DETAIL_PAGE_SIZE, SORT_FIELDS, ListingService
 
 router = APIRouter()
 
 
 @router.get(
     "",
-    response_model=ApiResponse[PaginatedResponse],
+    response_model=ApiResponse[PaginatedResponse | PaginatedDetailResponse],
     responses=ERROR_RESPONSES,
     operation_id="list_listings",
 )
@@ -40,10 +42,24 @@ async def list_listings(
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    include: str | None = Query(
+        None,
+        pattern="^detail$",
+        description="`detail` returns each item as the full detail record (media_assets, price_history, "
+        f"description…) so a client can sync a page in one call. Limited to page_size <= {MAX_DETAIL_PAGE_SIZE}.",
+    ),
 ):
     """List listings with filtering, sorting, and pagination."""
+    include_detail = include == "detail"
+    if include_detail and page_size > MAX_DETAIL_PAGE_SIZE:
+        raise HTTPException(
+            status_code=422,
+            detail=f"page_size must be <= {MAX_DETAIL_PAGE_SIZE} when include=detail",
+        )
     filter_kwargs = {**filters, "is_enriched": is_enriched, "is_exported_to_imodigi": is_exported_to_imodigi}
-    paginated, meta = await ListingService.get_all_listings(db, filter_kwargs, sort_by, sort_order, page, page_size)
+    paginated, meta = await ListingService.get_all_listings(
+        db, filter_kwargs, sort_by, sort_order, page, page_size, include_detail=include_detail
+    )
     return ok(paginated, "Listings listed successfully", request, meta=meta)
 @router.get(
     "/source-partners",
@@ -57,6 +73,21 @@ async def list_source_partners(
 ):
     partners = await ListingService.get_source_partners(db)
     return ok(partners, "Source partners listed successfully", request)
+
+@router.get(
+    "/vocabularies",
+    response_model=ApiResponse[dict[str, list[str]]],
+    responses=ERROR_RESPONSES,
+    operation_id="listing_vocabularies",
+)
+async def listing_vocabularies(request: Request):
+    """The closed sets `property_type` and `typology` are normalised to."""
+    return ok(
+        {"property_type": list(PROPERTY_TYPES), "typology": valid_typologies()},
+        "Vocabularies listed successfully",
+        request,
+    )
+
 
 @router.get(
     "/selector",

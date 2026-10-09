@@ -21,6 +21,102 @@ logger = get_logger(__name__)
 
 _BLOCKED_HOSTS = {"localhost", "0.0.0.0", "::1"}
 
+# "Similar/related properties" widgets show OTHER listings on the same page —
+# their price/typology/bedroom values look exactly like a real candidate to
+# the heuristics below, but describe a different property entirely. Observed
+# live on sothebysrealtypt.com: a related-listing card's price and bedroom
+# count outscored the actual listing's own (awkwardly embedded, no dedicated
+# element) price and got selected instead, silently mixing two properties'
+# data into one ingest. PT + EN patterns; matched against id/class tokens.
+_EXCLUDED_ANCESTOR_RE = re.compile(
+    r"similar|related|recommend|semelhant|relacionad|sugest[aã]o|sugestoes|"
+    r"you[-_]?may[-_]?also|also[-_]?like|voce[-_]?tambem",
+    re.IGNORECASE,
+)
+
+
+# A listing grid ("other properties", "featured", a category page's cards)
+# repeats one card per property, each with its own price. Keywords like
+# "similar"/"related" don't catch these (accer.pt: cards are plain
+# `div.post-col-6` with `div.property-price` inside, showing three OTHER
+# properties' prices — which one won depended on ordering, so the same URL
+# ingested as 1500 / 340k / 345k / 660k on different runs). Structural rule:
+# an element inside one of >=2 same-class sibling blocks that *each* contain a
+# currency amount belongs to a list of listings, not to the listing itself.
+_CARD_PRICE_RE = re.compile(
+    r"\d[\d.\s,]{2,}\s*(?:€|eur)|(?:€|eur)\s*\d|sob\s+consulta|price\s+on\s+request|on\s+request",
+    re.IGNORECASE,
+)
+
+
+def _similar_classes(a: list[str] | None, b: list[str] | None) -> bool:
+    """Cards in one grid rarely have byte-identical class lists (an extra
+    "last"/"featured"/"post-5454" token) — accer.pt's rental card differed from
+    its siblings and escaped an exact-match rule."""
+    sa, sb = set(a or []), set(b or [])
+    if not sa and not sb:
+        return True
+    if not sa or not sb:
+        return False
+    return len(sa & sb) / len(sa | sb) >= 0.5
+
+
+def _repeated_price_card(element: Tag, max_depth: int = 6) -> Tag | None:
+    """Return the listing-grid card containing `element`, or None.
+
+    A card is one of >=2 similar sibling blocks that each carry a currency
+    amount AND a link — the link is what separates listing cards (each leads to
+    another property) from a spec table whose rows ("Price 680 000 €", "Price
+    per m² 5 800 €") also repeat with amounts but are the listing's own data
+    (pearlsofportugal: an earlier link-less version deleted the real price).
+    """
+    node: Tag | None = element
+    for _ in range(max_depth):
+        if node is None:
+            return None
+        parent = node.parent
+        if not isinstance(parent, Tag) or parent.name in ("body", "html", "[document]"):
+            return None
+        classes = node.get("class")
+        siblings = [
+            s for s in parent.find_all(node.name, recursive=False)
+            if _similar_classes(s.get("class"), classes)
+        ]
+        if len(siblings) >= 2:
+            priced = sum(
+                1 for s in siblings
+                if s.find("a", href=True) and _CARD_PRICE_RE.search(s.get_text(" ", strip=True))
+            )
+            if priced >= 2:
+                return node
+        node = parent
+    return None
+
+
+def _is_form_control(element: Tag) -> bool:
+    """True for search-filter controls (accer.pt: `select.min-price` was chosen
+    as the *price* element, its whole option list parsed as "20.000,00 €")."""
+    if element.name in ("select", "option", "datalist", "input", "button", "label"):
+        return True
+    return element.find_parent(["select", "datalist"]) is not None
+
+
+def _is_in_excluded_region(element: Tag) -> bool:
+    """True if `element` sits inside a related/similar-listings widget."""
+    node: Tag | None = element
+    depth = 0
+    while node is not None and depth < 12:
+        for attr in ("id", "class"):
+            value = node.get(attr)
+            if not value:
+                continue
+            token = " ".join(value) if isinstance(value, list) else str(value)
+            if _EXCLUDED_ANCESTOR_RE.search(token):
+                return True
+        node = node.parent if isinstance(node.parent, Tag) else None
+        depth += 1
+    return False
+
 
 def _validate_url(url: str) -> None:
     """Raise ValueError if url resolves to a private/loopback address (SSRF guard)."""
@@ -464,7 +560,10 @@ def _collect_candidates(soup: BeautifulSoup, field: str, expected_values: list[s
     ranked: dict[str, dict[str, Any]] = {}
 
     for heuristic_index, heuristic_selector in enumerate(_FIELD_HEURISTICS[field]):
-        elements = _safe_select(soup, heuristic_selector)
+        elements = [
+            el for el in _safe_select(soup, heuristic_selector)
+            if not _is_in_excluded_region(el) and not _is_form_control(el) and _repeated_price_card(el) is None
+        ]
         element_count = len(elements)
         for element in elements[:5]:
             sample = _extract_sample_text(element, field)
@@ -872,6 +971,8 @@ def _collect_structured_field_candidates(
 
     for node in search_root.select("li, div, p, tr"):
         if len(node.get_text(" ", strip=True)) > 120:
+            continue
+        if _is_in_excluded_region(node):
             continue
         label_text = _find_structured_label(node, field)
         if not label_text:

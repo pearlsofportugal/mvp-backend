@@ -1,11 +1,13 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, asc, desc, exists, func, or_, select
+from sqlalchemy import and_, asc, desc, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 
+from app.core.lifecycle import STATUS_ACTIVE, STATUS_REMOVED
 from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
@@ -33,6 +35,35 @@ class ListingRepository:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def mark_removed(db: AsyncSession, listing: Listing) -> bool:
+        """Soft-delete: flag the listing as gone from the source. Returns True if it changed.
+
+        Bumps ``updated_at`` (via the column's ``onupdate``) on purpose, so sync
+        clients polling ``updated_after`` + ``status=removed`` see the removal.
+        """
+        if listing.status == STATUS_REMOVED:
+            return False
+        listing.status = STATUS_REMOVED
+        listing.removed_at = datetime.now(timezone.utc)
+        return True
+
+    @staticmethod
+    async def mark_missing_removed(db: AsyncSession, source_partner: str, seen_urls: set[str]) -> int:
+        """Soft-delete this partner's active listings whose URL was not seen in the crawl."""
+        result = await db.execute(
+            update(Listing)
+            .where(
+                Listing.source_partner == source_partner,
+                Listing.status == STATUS_ACTIVE,
+                Listing.source_url.notin_(seen_urls),
+            )
+            .values(status=STATUS_REMOVED, removed_at=datetime.now(timezone.utc))
+            .execution_options(synchronize_session=False)
+            .returning(Listing.id)
+        )
+        return len(result.scalars().all())
+
+    @staticmethod
     async def count_listings(db: AsyncSession, filters: dict) -> int:
         query = apply_listing_filters(select(func.count(Listing.id)), filters)
         return (await db.execute(query)).scalar_one()
@@ -57,6 +88,7 @@ class ListingRepository:
         sort_order: str,
         page: int,
         page_size: int,
+        with_detail: bool = False,
     ) -> tuple[list[Listing], int]:
         # COUNT(*) OVER() calcula o total sem query separada
         total_count = func.count().over().label("total_count")
@@ -66,6 +98,8 @@ class ListingRepository:
         )
         query = query.order_by(desc(sort_column) if sort_order == "desc" else asc(sort_column))
         query = query.offset((page - 1) * page_size).limit(page_size)
+        if with_detail:
+            query = query.options(selectinload(Listing.media_assets), selectinload(Listing.price_history))
     
         rows = (await db.execute(query)).all()
     
@@ -103,7 +137,7 @@ class ListingRepository:
         page: int,
         page_size: int,
     ) -> tuple[list[Listing], int]:
-        stmt = select(Listing)
+        stmt = select(Listing).where(Listing.status == STATUS_ACTIVE)
         if q:
             pattern = f"%{q.strip()}%"
             stmt = stmt.where(
@@ -151,12 +185,12 @@ class ListingRepository:
         source_partner: str | None,
         scrape_job_id: UUID | None,
     ) -> ListingStatsData:
-        base_filter = []
+        base_filter = [Listing.status == STATUS_ACTIVE]
         if source_partner:
             base_filter.append(Listing.source_partner == source_partner)
         if scrape_job_id:
             base_filter.append(Listing.scrape_job_id == scrape_job_id)
-        where_clause = and_(*base_filter) if base_filter else True
+        where_clause = and_(*base_filter)
 
         total, avg_price, min_price, max_price, avg_area = (await db.execute(
             select(
@@ -211,7 +245,7 @@ class ListingRepository:
     ) -> tuple[list[tuple[str, int]], int]:
         count_sub = (
             select(Listing.source_url)
-            .where(Listing.source_url.isnot(None))
+            .where(Listing.source_url.isnot(None), Listing.status == STATUS_ACTIVE)
             .group_by(Listing.source_url)
             .having(func.count(Listing.id) > 1)
             .subquery()
@@ -219,7 +253,7 @@ class ListingRepository:
         total = (await db.execute(select(func.count()).select_from(count_sub))).scalar_one()
         rows = (await db.execute(
             select(Listing.source_url, func.count(Listing.id).label("count"))
-            .where(Listing.source_url.isnot(None))
+            .where(Listing.source_url.isnot(None), Listing.status == STATUS_ACTIVE)
             .group_by(Listing.source_url)
             .having(func.count(Listing.id) > 1)
             .offset((page - 1) * page_size)

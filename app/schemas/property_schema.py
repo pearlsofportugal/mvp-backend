@@ -39,6 +39,8 @@ class MediaAsset(BaseModel):
         description="Asset type.",
     )
     position: int | None = Field(None, ge=0, description="Display order (0-indexed).")
+    width: int | None = Field(None, gt=0, description="Pixel width, when known.")
+    height: int | None = Field(None, gt=0, description="Pixel height, when known.")
 
 
 class ListingFlags(BaseModel):
@@ -73,7 +75,8 @@ class PropertySchema(BaseModel):
     )
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house', 'office').")
     condition: str | None = Field(None, description="Property condition (e.g. 'New', 'Used', 'Renovated').")
-    typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
+    typology: str | None = Field(None, description="Portuguese typology code (T0, T1, T2, ...).")
+    typology_extra: str | None = Field(None, description="Extra rooms of a T1+1 style typology, e.g. '+1'.")
 
     # ── Details ───────────────────────────────────────────────────────────
     title: str | None = Field(None, description="Listing headline.")
@@ -97,6 +100,12 @@ class PropertySchema(BaseModel):
     address: Address = Field(default_factory=Address)
     latitude: float | None = Field(None, ge=-90, le=90, description="WGS-84 latitude.")
     longitude: float | None = Field(None, ge=-180, le=180, description="WGS-84 longitude.")
+    district_code: str | None = Field(None, description="Official district code (2 digits).")
+    county_code: str | None = Field(None, description="Official municipality code, DICO (4 digits).")
+    parish_code: str | None = Field(None, description="Official parish code, DICOFRE (6 digits).")
+    location_precision: Literal["exact", "parish", "county"] | None = Field(
+        None, description="How precise latitude/longitude are; None when there are no coordinates."
+    )
 
     # ── Features ──────────────────────────────────────────────────────────
     features: ListingFlags = Field(default_factory=ListingFlags)

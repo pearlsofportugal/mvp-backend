@@ -254,6 +254,8 @@ class EthicalScraper:
         - HTTP 4xx (non-retriable)
         - All retries exhausted
         """
+        self._http.last_status = None
+
         # Deduplication
         if self.is_visited(url):
             logger.debug("Skipping already visited URL: %s", url)
@@ -270,6 +272,11 @@ class EthicalScraper:
         self.mark_visited(url)
 
         return self._http.get(url)
+
+    @property
+    def last_status(self) -> int | None:
+        """HTTP status of the last get(); None if skipped or no response."""
+        return self._http.last_status
 
     def close(self) -> None:
         """Close the HTTP session."""

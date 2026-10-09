@@ -96,6 +96,9 @@ def listing_filter_params(
     district: str | None = Query(None),
     county: str | None = Query(None),
     parish: str | None = Query(None),
+    district_code: str | None = Query(None, pattern="^[0-9]{2}$", description="Official district code (2 digits)."),
+    county_code: str | None = Query(None, pattern="^[0-9]{4}$", description="Official municipality code, DICO (4 digits)."),
+    parish_code: str | None = Query(None, pattern="^[0-9]{6}$", description="Official parish code, DICOFRE (6 digits)."),
     property_type: str | None = Query(None),
     typology: str | None = Query(None),
     business_type: str | None = Query(None, pattern="^(sale|rent|trespasse)$"),
@@ -118,11 +121,23 @@ def listing_filter_params(
     has_garden: bool | None = Query(None),
     created_after: datetime | None = Query(None),
     created_before: datetime | None = Query(None),
+    updated_after: datetime | None = Query(
+        None,
+        description="Only listings whose content (or status) changed at/after this instant. "
+        "`updated_at` only moves when the content hash changes, so this is safe for incremental sync.",
+    ),
+    updated_before: datetime | None = Query(None, description="Only listings last changed at/before this instant."),
+    status: str = Query(
+        "active",
+        pattern="^(active|removed|all)$",
+        description="Listing lifecycle: `active` (default), `removed` (gone from the source) or `all`.",
+    ),
     search: str | None = Query(None),
 ) -> dict:
     """Shared listing filter parameters used by /listings and /export endpoints."""
     return dict(
         district=district, county=county, parish=parish,
+        district_code=district_code, county_code=county_code, parish_code=parish_code,
         property_type=property_type, typology=typology, business_type=business_type,
         source_partner=source_partner, scrape_job_id=scrape_job_id,
         price_min=price_min, price_max=price_max,
@@ -134,5 +149,7 @@ def listing_filter_params(
         has_balcony=has_balcony, has_air_conditioning=has_air_conditioning,
         has_garden=has_garden,
         created_after=created_after, created_before=created_before,
+        updated_after=updated_after, updated_before=updated_before,
+        status=status,
         search=search,
     )

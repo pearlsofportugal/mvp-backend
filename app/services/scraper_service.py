@@ -19,13 +19,14 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
+from app.core.lifecycle import GONE_STATUSES, STATUS_ACTIVE
 from app.core.logging import get_logger, set_correlation_id
 from app.crawler.confidence import calculate_confidence, log_low_confidence_scores
 from app.database import async_session_factory, engine
@@ -40,11 +41,13 @@ from app.services.email_service import send_job_notification
 from app.services.ethics_service import EthicalScraper
 from app.services.playwright_scraper import PlaywrightScraper
 from app.services.mapper_service import (
+    is_junk_listing,
     missing_critical_schema_fields,
     normalize_partner_payload,
     schema_to_listing_dict,
 )
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
+from app.utils.content_hash import CONTENT_FIELDS, compute_content_hash
 from app.services.sitemap_service import fetch_sitemap_urls
 from app.services.scrape_job_event_service import record_event
 
@@ -423,7 +426,7 @@ async def _run_scrape_async(
             logger.info("Job %s: skipping auto-delete — %s", job_id, reason)
             job.add_log("info", f"Auto-delete skipped: {reason} before the crawl finished")
         else:
-            deleted_count = await _delete_missing_listings(
+            deleted_count = await _remove_missing_listings(
                 db=db,
                 job=job,
                 site_key=site_key,
@@ -561,7 +564,7 @@ async def _run_sitemap_scrape(
                 "Auto-delete skipped: job was cancelled before the crawl finished",
             )
         else:
-            deleted_count = await _delete_missing_listings(
+            deleted_count = await _remove_missing_listings(
                 db=db,
                 job=job,
                 site_key=site_key,
@@ -621,6 +624,18 @@ async def _process_listing_url(
         # ─────────────────────────────────────────────────────────────────
 
         detail_html = await _fetch_html(scraper, link)
+        if not detail_html and getattr(scraper, "last_status", None) in GONE_STATUSES:
+            # 404/410: the ad was taken down at the source. Flag the stored
+            # listing (if any) instead of treating this as a fetch failure, and
+            # remember the URL so the next crawls don't pay to re-fetch it.
+            existing = await ListingRepository.get_by_source_url(db, link)
+            if existing and await ListingRepository.mark_removed(db, existing):
+                logger.info("Listing gone at source (HTTP %s) — marked removed: %s", scraper.last_status, link)
+            job.add_log("info", f"Listing gone at source (HTTP {scraper.last_status}) — skipped", link)
+            await SoldListingRepository.mark_sold(db, site_key, link)
+            job.touch_heartbeat()
+            await db.commit()
+            return False, False, False, False
         if not detail_html:
             job.add_url("failed", link)
             job.add_log("warning", "Failed to fetch listing page", link)
@@ -635,9 +650,8 @@ async def _process_listing_url(
             job.add_log("info", "Listing marked as sold/reserved — skipped", link)
 
             existing = await ListingRepository.get_by_source_url(db, link)
-            if existing:
-                await db.delete(existing)
-                logger.info("Removed existing listing (now sold): %s", link)
+            if existing and await ListingRepository.mark_removed(db, existing):
+                logger.info("Marked existing listing removed (now sold): %s", link)
 
             await SoldListingRepository.mark_sold(db, site_key, link)
 
@@ -656,6 +670,16 @@ async def _process_listing_url(
         # derive these fields purely in the mapper (URL parsing, fixed
         # constants) rather than via an HTML selector, so they'd never appear
         # in raw_data even when correctly populated in the final schema.
+        if is_junk_listing(property_schema):
+            # A shell page (error page, empty template) — never store it, and
+            # never let it overwrite a good record from an earlier scrape.
+            logger.warning("Skipping junk page (no real title/type/price): %s", link)
+            job.add_log("warning", "Page has no listing data (numeric/empty title, no type, no price) — skipped", link)
+            job.add_url("failed", link)
+            job.touch_heartbeat()
+            await db.commit()
+            return False, False, True, False
+
         missing_fields = missing_critical_schema_fields(property_schema)
         if missing_fields:
             job.add_log(
@@ -718,6 +742,115 @@ async def _persist_listing(db: AsyncSession, job_id: str, schema, site_key: str)
     return await _persist_listing_legacy(db, job_id, schema, listing_data)
 
 
+def _hash_for_new(listing_data: dict[str, Any], schema) -> str:
+    return compute_content_hash(listing_data, [str(m.url) for m in (getattr(schema, "media", None) or [])])
+
+
+def _merged_content(existing: Listing, listing_data: dict[str, Any]) -> dict[str, Any]:
+    """Content the row would hold after this scrape: new non-None values win.
+
+    Mirrors the overwrite rule of the update loop (None never erases a stored
+    value, except the amenity flags), so the hash reflects the *effective* state
+    and a flaky extraction that drops a field does not register as a change.
+    """
+    merged = {f: getattr(existing, f) for f in CONTENT_FIELDS}
+    for field, value in listing_data.items():
+        if field in CONTENT_FIELDS and (value is not None or field in _FEATURE_FLAG_FIELDS):
+            merged[field] = value
+    return merged
+
+
+async def _stored_media_urls(db: AsyncSession, listing_id: UUID) -> list[str]:
+    rows = await db.execute(
+        select(MediaAsset.url)
+        .where(MediaAsset.listing_id == listing_id)
+        .order_by(MediaAsset.position.asc().nulls_last(), MediaAsset.created_at.asc())
+    )
+    return list(rows.scalars().all())
+
+
+async def _update_existing_listing(
+    db: AsyncSession,
+    job_id: str,
+    existing: Listing,
+    schema,
+    listing_data: dict[str, Any],
+) -> None:
+    """Apply a re-scrape to a stored listing, moving ``updated_at`` only on real change.
+
+    Every visit records ``last_seen_at``/``scrape_job_id``. ``updated_at`` (which
+    the API exposes and the WordPress sync keys on) only moves when the content
+    hash changes or the listing comes back from ``removed``.
+    """
+    source_url = listing_data.get("source_url")
+    now = datetime.now(timezone.utc)
+    new_media_urls = [str(m.url) for m in (getattr(schema, "media", None) or [])]
+
+    merged = _merged_content(existing, listing_data)
+    new_hash = compute_content_hash(merged, new_media_urls)
+    # The "before" hash is recomputed from the stored row rather than read from
+    # content_hash: other writers (PATCH, AI enrichment, rows predating the
+    # column) change content without refreshing it, and trusting a stale hash
+    # would hide a scrape that reverts their edit. One small SELECT per visit.
+    old_hash = compute_content_hash(
+        {f: getattr(existing, f) for f in CONTENT_FIELDS},
+        await _stored_media_urls(db, existing.id),
+    )
+    reactivated = existing.status != STATUS_ACTIVE
+
+    if new_hash == old_hash and not reactivated:
+        # Core UPDATE with an explicit updated_at: the column's onupdate would
+        # otherwise bump it for any write to the row.
+        await db.execute(
+            update(Listing)
+            .where(Listing.id == existing.id)
+            .values(
+                last_seen_at=now,
+                scrape_job_id=UUID(job_id),
+                content_hash=new_hash,
+                updated_at=Listing.updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _replace_media_assets(db, existing.id, schema)
+        logger.debug("Listing unchanged: %s", source_url)
+        return
+
+    new_price = listing_data.get("price_amount")
+    if (
+        new_price is not None
+        and existing.price_amount is not None
+        and existing.price_amount != new_price
+    ):
+        db.add(
+            PriceHistory(
+                listing_id=existing.id,
+                price_amount=existing.price_amount,
+                price_currency=existing.price_currency or "EUR",
+            )
+        )
+        logger.info("Price change for %s: %s → %s", source_url, existing.price_amount, new_price)
+
+    if reactivated:
+        logger.info("Reactivating previously removed listing: %s", source_url)
+        existing.status = STATUS_ACTIVE
+        existing.removed_at = None
+
+    logger.info("Updating existing listing: %s", source_url)
+    for field, value in listing_data.items():
+        if field == "scrape_job_id":
+            continue
+        if value is not None or field in _FEATURE_FLAG_FIELDS:
+            setattr(existing, field, value)
+
+    existing.content_hash = new_hash
+    existing.updated_at = now
+    existing.last_seen_at = now
+    existing.scrape_job_id = UUID(job_id)
+
+    await _replace_media_assets(db, existing.id, schema)
+
+
 async def _persist_listing_with_postgres_upsert(
     db: AsyncSession,
     job_id: str,
@@ -738,7 +871,7 @@ async def _persist_listing_with_postgres_upsert(
         inserted_id = (
             await db.execute(
                 pg_insert(Listing)
-                .values(**listing_data)
+                .values(**listing_data, content_hash=_hash_for_new(listing_data, schema))
                 .on_conflict_do_nothing(index_elements=[Listing.source_url])
                 .returning(Listing.id)
             )
@@ -761,38 +894,7 @@ async def _persist_listing_with_postgres_upsert(
     if existing is None:
         raise RuntimeError(f"Failed to resolve listing persistence target for {source_url}")
 
-    new_price = listing_data.get("price_amount")
-    if (
-        new_price is not None
-        and existing.price_amount is not None
-        and existing.price_amount != new_price
-    ):
-        db.add(
-            PriceHistory(
-                listing_id=existing.id,
-                price_amount=existing.price_amount,
-                price_currency=existing.price_currency or "EUR",
-            )
-        )
-        logger.info(
-            "Price change for %s: %s → %s",
-            source_url,
-            existing.price_amount,
-            new_price,
-        )
-
-    logger.info("Updating existing listing: %s", source_url)
-    for field, value in listing_data.items():
-        if field == "scrape_job_id":
-            continue
-        if value is not None or field in _FEATURE_FLAG_FIELDS:
-            setattr(existing, field, value)
-
-    existing.updated_at = datetime.now(timezone.utc)
-    existing.scrape_job_id = UUID(job_id)
-
-    await _replace_media_assets(db, existing.id, schema)
-
+    await _update_existing_listing(db, job_id, existing, schema, listing_data)
     return False
 
 
@@ -811,39 +913,11 @@ async def _persist_listing_legacy(
         existing = result.scalar_one_or_none()
 
     if existing:
-        logger.info("Updating existing listing: %s", listing_data["source_url"])
-
-        new_price = listing_data.get("price_amount")
-        if (
-            new_price is not None
-            and existing.price_amount is not None
-            and existing.price_amount != new_price
-        ):
-            price_record = PriceHistory(
-                listing_id=existing.id,
-                price_amount=existing.price_amount,
-                price_currency=existing.price_currency or "EUR",
-            )
-            db.add(price_record)
-            logger.info(
-                "Price change for %s: %s → %s",
-                listing_data["source_url"],
-                existing.price_amount,
-                new_price,
-            )
-
-        for field, value in listing_data.items():
-            if field == "scrape_job_id":
-                continue
-            if value is not None or field in _FEATURE_FLAG_FIELDS:
-                setattr(existing, field, value)
-        existing.updated_at = datetime.now(timezone.utc)
-        existing.scrape_job_id = UUID(job_id)
-        await _replace_media_assets(db, existing.id, schema)
+        await _update_existing_listing(db, job_id, existing, schema, listing_data)
         return False
 
     else:
-        listing = Listing(**listing_data)
+        listing = Listing(**listing_data, content_hash=_hash_for_new(listing_data, schema))
         db.add(listing)
         await db.flush()  # Flush necessari per obtenir l'ID abans d'afegir fitxers multimèdia
 
@@ -851,34 +925,47 @@ async def _persist_listing_legacy(
         return True
 
 
-async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> None:
-    """Replace listing media atomically so retries and upserts do not duplicate assets."""
-    # 1. Clear out any old assets
-    logger.warning("media assets found in schema : %s", schema.media)
-    await db.execute(delete(MediaAsset).where(MediaAsset.listing_id == listing_id))
+def _media_rows(schema) -> list[dict[str, Any]]:
+    """The schema's gallery as plain dicts, in display order."""
+    media_list = getattr(schema, "media", None) or []
+    return [
+        {
+            "url": str(m.url),
+            "alt_text": getattr(m, "alt_text", None),
+            "type": getattr(m, "type", None) or "photo",
+            "position": m.position if getattr(m, "position", None) is not None else i,
+            "width": getattr(m, "width", None),
+            "height": getattr(m, "height", None),
+        }
+        for i, m in enumerate(media_list)
+    ]
 
-    # 2. Extract media safely (handling potential fallback names like 'images')
-    media_list = getattr(schema, "media", None) or getattr(schema, "images", [])
-    
-    if not media_list:
-        logger.warning("No media assets found in schema for listing ID: %s", listing_id)
+
+async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> None:
+    """Make the stored gallery match the schema's, touching the table only if it differs."""
+    wanted = _media_rows(schema)
+    stored = (
+        await db.execute(
+            select(MediaAsset)
+            .where(MediaAsset.listing_id == listing_id)
+            .order_by(MediaAsset.position.asc().nulls_last(), MediaAsset.created_at.asc())
+        )
+    ).scalars().all()
+    current = [
+        {k: getattr(a, k) for k in ("url", "alt_text", "type", "position", "width", "height")}
+        for a in stored
+    ]
+    if current == wanted:
         return
 
-    for media in media_list:
-        db.add(
-            MediaAsset(
-                listing_id=listing_id,
-                url=str(media.url),
-                alt_text=getattr(media, "alt_text", None),
-                type=getattr(media, "type", "photo") or "photo",
-                position=getattr(media, "position", 0),
-            )
-        )
-    
-    # 3. Force an immediate flush of the added media assets to the database transaction
+    await db.execute(delete(MediaAsset).where(MediaAsset.listing_id == listing_id))
+    for row in wanted:
+        db.add(MediaAsset(listing_id=listing_id, **row))
     await db.flush()
-    logger.info("Successfully flushed %d media assets for listing %s", len(media_list), listing_id)
-async def _delete_missing_listings(
+    logger.info("Stored %d media assets for listing %s (was %d)", len(wanted), listing_id, len(current))
+
+
+async def _remove_missing_listings(
     db: AsyncSession,
     job: ScrapeJob,
     site_key: str,
@@ -887,69 +974,65 @@ async def _delete_missing_listings(
     min_discovered: int = 10,
     max_delete_ratio: float = 0.40,
 ) -> int:
-    """Hard delete listings for this partner that were not seen in this crawl.
+    """Soft-delete (status=removed) active listings of this partner not seen in this crawl.
+
+    Rows are kept so history survives and the listing is reactivated if it
+    reappears; list endpoints hide them by default.
 
     Safeguards:
     - Aborts if discovered_urls is suspiciously small (failed crawl).
-    - Aborts if the delete ratio exceeds max_delete_ratio (site restructure / bug).
+    - Aborts if the removal ratio exceeds max_delete_ratio (site restructure / bug).
     """
     if len(discovered_urls) < min_discovered:
         logger.warning(
-            "Job %s: skipping delete — only %d URLs discovered (min: %d)",
+            "Job %s: skipping removal — only %d URLs discovered (min: %d)",
             job.id, len(discovered_urls), min_discovered,
         )
         job.add_log(
             "warning",
-            f"Auto-delete skipped: only {len(discovered_urls)} URLs discovered (min: {min_discovered})",
+            f"Auto-remove skipped: only {len(discovered_urls)} URLs discovered (min: {min_discovered})",
         )
         return 0
 
-    total_in_db = await db.scalar(
-        select(func.count()).where(Listing.source_partner == site_key)
+    total_active = await db.scalar(
+        select(func.count()).where(Listing.source_partner == site_key, Listing.status == STATUS_ACTIVE)
     )
 
-    if total_in_db and total_in_db > 0:
-        to_delete_count = await db.scalar(
+    if total_active and total_active > 0:
+        to_remove_count = await db.scalar(
             select(func.count()).where(
                 Listing.source_partner == site_key,
+                Listing.status == STATUS_ACTIVE,
                 Listing.source_url.notin_(discovered_urls),
             )
         )
-        ratio = (to_delete_count or 0) / total_in_db
+        ratio = (to_remove_count or 0) / total_active
         if ratio > max_delete_ratio:
             logger.error(
-                "Job %s: skipping delete — would delete %d/%d listings (%.0f%% > limit %.0f%%)",
-                job.id, to_delete_count, total_in_db, ratio * 100, max_delete_ratio * 100,
+                "Job %s: skipping removal — would remove %d/%d listings (%.0f%% > limit %.0f%%)",
+                job.id, to_remove_count, total_active, ratio * 100, max_delete_ratio * 100,
             )
             job.add_log(
                 "warning",
-                f"Auto-delete skipped: {to_delete_count}/{total_in_db} listings would be deleted "
+                f"Auto-remove skipped: {to_remove_count}/{total_active} listings would be removed "
                 f"({ratio:.0%} exceeds {max_delete_ratio:.0%} safety limit)",
             )
             return 0
 
-    result = await db.execute(
-        delete(Listing)
-        .where(
-            Listing.source_partner == site_key,
-            Listing.source_url.notin_(discovered_urls),
-        )
-        .returning(Listing.id)
-    )
-    deleted_ids = result.scalars().all()
-    deleted_count = len(deleted_ids)
+    removed_count = await ListingRepository.mark_missing_removed(db, site_key, discovered_urls)
 
-    if deleted_count:
+    if removed_count:
         logger.info(
-            "Job %s: hard deleted %d stale listings for partner '%s'",
-            job.id, deleted_count, site_key,
+            "Job %s: marked %d stale listings removed for partner '%s'",
+            job.id, removed_count, site_key,
         )
         job.add_log(
             "info",
-            f"Auto-deleted {deleted_count} listings no longer present on site",
+            f"Marked {removed_count} listings removed (no longer present on site)",
         )
 
-    return deleted_count
+    return removed_count
+
 
 async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:
     """Marca o job como completo."""

@@ -42,6 +42,7 @@ class Listing(Base):
     property_type: Mapped[str | None] = mapped_column(String(50), comment="apartment, house, land, etc.")
     condition: Mapped[str | None] = mapped_column(String(50), comment="New, Used, Renovated, Novo, Usado, etc.")
     typology: Mapped[str | None] = mapped_column(String(10), comment="T0, T1, T2, T3, etc.")
+    typology_extra: Mapped[str | None] = mapped_column(String(5), comment="Extra rooms of a T1+1 style typology, e.g. +1")
     bedrooms: Mapped[int | None] = mapped_column(Integer)
     bathrooms: Mapped[int | None] = mapped_column(Integer)
     floor: Mapped[str | None] = mapped_column(String(20))
@@ -61,8 +62,15 @@ class Listing(Base):
     county: Mapped[str | None] = mapped_column(String(100), index=True)
     parish: Mapped[str | None] = mapped_column(String(100))
     full_address: Mapped[str | None] = mapped_column(String(500))
+    # Official codes (INE/DGT): district = DD, county/DICO = DDCC, parish/DICOFRE = DDCCFF
+    district_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    county_code: Mapped[str | None] = mapped_column(String(4), index=True)
+    parish_code: Mapped[str | None] = mapped_column(String(6), index=True)
     latitude: Mapped[float | None] = mapped_column(Float)
     longitude: Mapped[float | None] = mapped_column(Float)
+    location_precision: Mapped[str | None] = mapped_column(
+        String(10), comment="exact | parish | county — None when there are no coordinates"
+    )
 
     # Features (boolean flags)
     has_garage: Mapped[bool | None] = mapped_column(Boolean)
@@ -83,6 +91,9 @@ class Listing(Base):
     # Descriptions
     raw_description: Mapped[str | None] = mapped_column(Text, comment="Original unmodified description")
     description: Mapped[str | None] = mapped_column(Text, comment="Cleaned description")
+    description_clean: Mapped[str | None] = mapped_column(
+        Text, comment="Display-ready description: agency boilerplate removed, formatting repaired"
+    )
     enriched_translations: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True),
         nullable=True,
@@ -106,6 +117,21 @@ class Listing(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+    # Lifecycle: `removed` rows are kept (history, price history, reactivation)
+    # but hidden from list endpoints by default. `last_seen_at` moves on every
+    # crawl visit; `updated_at` only when the content (or status) changes.
+    status: Mapped[str] = mapped_column(
+        String(10), default="active", server_default="active", nullable=False, index=True,
+        comment="active | removed",
+    )
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # SHA-256 of the normalised content fields + gallery URLs (see utils/content_hash).
+    # updated_at only moves when this changes.
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+
     # Foreign key to scrape job
     scrape_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
 
@@ -119,7 +145,9 @@ class Listing(Base):
     price_on_request: Mapped[bool] = mapped_column(Boolean, default=False, nullable=True)
 
     # Relationships
-    media_assets: Mapped[list["MediaAsset"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="raise")
+    media_assets: Mapped[list["MediaAsset"]] = relationship(
+        back_populates="listing", cascade="all, delete-orphan", lazy="raise", order_by="MediaAsset.position"
+    )
     price_history: Mapped[list["PriceHistory"]] = relationship(back_populates="listing", cascade="all, delete-orphan", lazy="raise")
 
     # Indexes

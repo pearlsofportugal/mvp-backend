@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-3-flash-preview"
     google_genai_temperature: float = 0.7
+    # Per-request HTTP timeout for the Gemini SDK, in milliseconds. Without
+    # this the SDK has no timeout at all — a stalled call (seen live: a
+    # generate_content() that never returned and never raised) hangs the
+    # request indefinitely instead of failing fast so a caller's own
+    # try/except (e.g. the generic-extract LLM fallback) can move on.
+    google_genai_timeout_ms: int = 45000
     ai_rate_limit_requests: int = 20
     ai_rate_limit_window: int = 60
 

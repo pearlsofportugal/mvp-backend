@@ -30,6 +30,8 @@ class MediaAssetRead(BaseModel):
     alt_text: str | None = None
     type: Literal["photo", "floorplan", "video"] | None = None
     position: int | None = Field(None, ge=0)
+    width: int | None = Field(None, gt=0, description="Pixel width, when known.")
+    height: int | None = Field(None, gt=0, description="Pixel height, when known.")
 
 
 class MediaAssetCreate(BaseModel):
@@ -42,6 +44,8 @@ class MediaAssetCreate(BaseModel):
         description="Asset type: photo, floorplan, or video.",
     )
     position: int | None = Field(None, ge=0, description="Display order (0-indexed).")
+    width: int | None = Field(None, gt=0, description="Pixel width, when known.")
+    height: int | None = Field(None, gt=0, description="Pixel height, when known.")
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +78,8 @@ class ListingBase(BaseModel):
     business_type: Literal["sale", "rent", "trespasse"] | None = Field(None, description="Listing transaction type.")
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house').")
     condition: str | None = Field(None, description="Property condition (e.g. 'New', 'Used', 'Renovated').")
-    typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
+    typology: str | None = Field(None, description="Portuguese typology code: T0, T1, T2, ... (see GET /listings/vocabularies).")
+    typology_extra: str | None = Field(None, description="Extra rooms of a T1+1 style typology, e.g. '+1'.")
 
     # ── Details ───────────────────────────────────────────────────────────
     title: str | None = Field(None, description="Listing headline.")
@@ -99,8 +104,14 @@ class ListingBase(BaseModel):
     county: str | None = None
     parish: str | None = None
     full_address: str | None = None
+    district_code: str | None = Field(None, description="Official district code (2 digits); null when the place could not be matched.")
+    county_code: str | None = Field(None, description="Official municipality code, DICO (4 digits).")
+    parish_code: str | None = Field(None, description="Official parish code, DICOFRE (6 digits).")
     latitude: float | None = Field(None, ge=-90, le=90, description="WGS-84 latitude.")
     longitude: float | None = Field(None, ge=-180, le=180, description="WGS-84 longitude.")
+    location_precision: Literal["exact", "parish", "county"] | None = Field(
+        None, description="Precision of latitude/longitude: `exact` = declared by the source page."
+    )
 
     # ── Features ──────────────────────────────────────────────────────────
     has_garage: bool | None = None
@@ -116,7 +127,10 @@ class ListingBase(BaseModel):
 
     # ── Content ───────────────────────────────────────────────────────────
     raw_description: str | None = Field(None, description="Raw description as scraped (unprocessed).")
-    description: str | None = Field(None, description="Cleaned / normalised description.")
+    description: str | None = Field(None, description="Description as the partner wrote it (whitespace-normalised).")
+    description_clean: str | None = Field(
+        None, description="Display-ready description: agency boilerplate removed, formatting repaired."
+    )
     description_quality_score: int | None = Field(None, ge=0, le=100, description="AI quality score (0–100).")
     meta_description: str | None = Field(None, description="SEO meta description (scraped).")
     enriched_translations: dict[str, Any] | None = Field(
@@ -156,6 +170,7 @@ class ListingUpdate(BaseModel):
     property_type: str | None = None
     condition: str | None = None
     typology: str | None = None
+    typology_extra: str | None = None
     title: str | None = None
     bedrooms: int | None = Field(None, ge=0)
     bathrooms: int | None = Field(None, ge=0)
@@ -174,6 +189,7 @@ class ListingUpdate(BaseModel):
     full_address: str | None = None
     latitude: float | None = Field(None, ge=-90, le=90)
     longitude: float | None = Field(None, ge=-180, le=180)
+    location_precision: Literal["exact", "parish", "county"] | None = None
     has_garage: bool | None = None
     has_elevator: bool | None = None
     has_balcony: bool | None = None
@@ -207,6 +223,10 @@ class ListingDetailRead(ListingBase):
     scrape_job_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
+    status: Literal["active", "removed"] = Field("active", description="Lifecycle: `removed` = gone from the source.")
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    removed_at: datetime | None = None
     media_assets: list[MediaAssetRead] = Field(default_factory=list)
     price_history: list[PriceHistoryRead] = Field(default_factory=list)
     is_enriched: bool = Field(
@@ -253,17 +273,22 @@ class ListingListRead(BaseModel):
     business_type: Literal["sale", "rent", "trespasse"] | None = None
     property_type: str | None = None
     typology: str | None = None
+    typology_extra: str | None = None
     price_amount: Decimal | None = None
     price_currency: str | None = None
     price_per_m2: Decimal | None = None
     district: str | None = None
     county: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    location_precision: Literal["exact", "parish", "county"] | None = None
     area_useful_m2: float | None = None
     bedrooms: int | None = None
     bathrooms: int | None = None
     source_url: str | None = None
     created_at: datetime
     updated_at: datetime
+    status: Literal["active", "removed"] = Field("active", description="Lifecycle: `removed` = gone from the source.")
 
     @model_validator(mode="after")
     def _apply_enriched_title(self) -> "ListingListRead":
@@ -300,6 +325,16 @@ class PaginatedResponse(BaseModel):
     """
 
     items: list[ListingListRead] = Field(default_factory=list)
+
+
+class PaginatedDetailResponse(BaseModel):
+    """Same envelope as PaginatedResponse, with each item as the full detail record.
+
+    Returned by ``GET /listings?include=detail`` so a sync client can read a whole
+    page in one call instead of one ``GET /listings/{id}`` per listing.
+    """
+
+    items: list[ListingDetailRead] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

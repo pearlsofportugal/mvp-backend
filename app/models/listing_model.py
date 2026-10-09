@@ -62,6 +62,10 @@ class Listing(Base):
     county: Mapped[str | None] = mapped_column(String(100), index=True)
     parish: Mapped[str | None] = mapped_column(String(100))
     full_address: Mapped[str | None] = mapped_column(String(500))
+    # Official codes (INE/DGT): district = DD, county/DICO = DDCC, parish/DICOFRE = DDCCFF
+    district_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    county_code: Mapped[str | None] = mapped_column(String(4), index=True)
+    parish_code: Mapped[str | None] = mapped_column(String(6), index=True)
     latitude: Mapped[float | None] = mapped_column(Float)
     longitude: Mapped[float | None] = mapped_column(Float)
     location_precision: Mapped[str | None] = mapped_column(

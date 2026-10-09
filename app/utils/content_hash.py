@@ -19,7 +19,7 @@ CONTENT_FIELDS: tuple[str, ...] = (
     "bedrooms", "bathrooms", "floor",
     "price_amount", "price_currency", "price_per_m2", "price_on_request",
     "area_useful_m2", "area_gross_m2", "area_land_m2",
-    "district", "county", "parish", "full_address", "latitude", "longitude",
+    "district", "county", "parish", "full_address", "district_code", "county_code", "parish_code", "latitude", "longitude",
     "has_garage", "has_elevator", "has_balcony", "has_air_conditioning", "has_pool", "has_garden",
     "energy_certificate", "construction_year", "advertiser", "contacts",
     "raw_description", "description", "description_clean", "description_quality_score", "meta_description",

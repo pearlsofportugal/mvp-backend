@@ -96,6 +96,9 @@ def listing_filter_params(
     district: str | None = Query(None),
     county: str | None = Query(None),
     parish: str | None = Query(None),
+    district_code: str | None = Query(None, pattern="^[0-9]{2}$", description="Official district code (2 digits)."),
+    county_code: str | None = Query(None, pattern="^[0-9]{4}$", description="Official municipality code, DICO (4 digits)."),
+    parish_code: str | None = Query(None, pattern="^[0-9]{6}$", description="Official parish code, DICOFRE (6 digits)."),
     property_type: str | None = Query(None),
     typology: str | None = Query(None),
     business_type: str | None = Query(None, pattern="^(sale|rent|trespasse)$"),
@@ -134,6 +137,7 @@ def listing_filter_params(
     """Shared listing filter parameters used by /listings and /export endpoints."""
     return dict(
         district=district, county=county, parish=parish,
+        district_code=district_code, county_code=county_code, parish_code=parish_code,
         property_type=property_type, typology=typology, business_type=business_type,
         source_partner=source_partner, scrape_job_id=scrape_job_id,
         price_min=price_min, price_max=price_max,

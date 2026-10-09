@@ -114,6 +114,38 @@ async def backfill_description_clean(db: AsyncSession, *, apply: bool) -> dict:
     return {"scanned": len(rows), "changed": changed}
 
 
+# ── geo codes backfill ────────────────────────────────────────────────────
+
+async def backfill_geo_codes(db: AsyncSession, *, apply: bool) -> dict:
+    """Resolve district/county/parish codes for stored rows. Text columns are never changed."""
+    from collections import Counter
+
+    from app.services import geo_normalizer
+
+    index = geo_normalizer.get_geo_index()
+    if index is None:
+        return {"scanned": 0, "changed": 0, "unmatched": {}, "dataset": False}
+
+    changed = 0
+    unmatched: Counter[str] = Counter()
+    rows = (await db.execute(select(Listing))).scalars().all()
+    for row in rows:
+        if not (row.district or row.county or row.parish):
+            continue
+        match = index.normalize(row.district, row.county, row.parish)
+        new = (match.district_code, match.county_code, match.parish_code)
+        if row.county and not match.county_code:
+            unmatched[f"{row.district} / {row.county}"] += 1
+        if new == (row.district_code, row.county_code, row.parish_code) or not any(new):
+            continue
+        changed += 1
+        if apply:
+            row.district_code, row.county_code, row.parish_code = new
+    if apply and changed:
+        await db.commit()
+    return {"scanned": len(rows), "changed": changed, "unmatched": dict(unmatched.most_common(50)), "dataset": True}
+
+
 # ── attribute backfill ────────────────────────────────────────────────────
 
 _FLAG_COLUMNS = {

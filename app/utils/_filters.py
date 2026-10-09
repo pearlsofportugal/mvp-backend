@@ -23,6 +23,9 @@ class ListingFilters(TypedDict, total=False):
     district: str | None
     county: str | None
     parish: str | None
+    district_code: str | None
+    county_code: str | None
+    parish_code: str | None
     property_type: str | None
     typology: str | None
     business_type: str | None
@@ -77,6 +80,9 @@ def apply_listing_filters(query: Select, filters: ListingFilters) -> Select:
         conds.append(Listing.county.ilike(f"%{filters['county']}%"))
     if filters.get("parish"):
         conds.append(Listing.parish.ilike(f"%{filters['parish']}%"))
+    for code_field in ("district_code", "county_code", "parish_code"):
+        if filters.get(code_field):
+            conds.append(getattr(Listing, code_field) == filters[code_field])
     if filters.get("property_type"):
         conds.append(Listing.property_type.ilike(f"%{filters['property_type']}%"))
     if filters.get("typology"):

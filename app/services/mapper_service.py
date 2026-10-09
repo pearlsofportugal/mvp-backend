@@ -27,6 +27,7 @@ from uuid import UUID
 from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.services.geo_normalizer import normalize_geo
 from app.services.attribute_extractor import extract_attributes
 from app.services.description_cleaner import clean_description, score_description
 from app.core.vocabularies import PROPERTY_TYPE_OTHER, normalize_property_type, normalize_typology
@@ -764,6 +765,9 @@ def _build_base_schema(
 
     media = _build_gallery(raw.get("images"), raw.get("alt_texts"), raw.get("image_sizes"))
 
+    # Official codes for the stated district / county / parish (text fields are left as scraped).
+    geo = normalize_geo(address.region, address.city, address.area)
+
     # Coordinates are only ever the ones the source page declared (see utils/coordinates).
     latitude, longitude = parse_coordinates(raw.get("latitude"), raw.get("longitude"))
 
@@ -794,6 +798,9 @@ def _build_base_schema(
         latitude=latitude,
         longitude=longitude,
         location_precision="exact" if latitude is not None else None,
+        district_code=geo.district_code,
+        county_code=geo.county_code,
+        parish_code=geo.parish_code,
         media=media,
         features=ListingFlags(
             # Parsers are inconsistent about the key prefix — the feature keyword
@@ -1504,6 +1511,9 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "full_address": schema.address.full_address,
         "latitude": schema.latitude,
         "longitude": schema.longitude,
+        "district_code": schema.district_code,
+        "county_code": schema.county_code,
+        "parish_code": schema.parish_code,
         "location_precision": schema.location_precision,
         "has_garage": schema.features.has_garage,
         "has_elevator": schema.features.has_elevator,

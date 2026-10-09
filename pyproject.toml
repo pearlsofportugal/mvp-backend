@@ -8,14 +8,17 @@ version = "0.1.0"
 description = "Real Estate Scraper Backend API"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "fastapi>=0.110.0",
+    "fastapi>=0.110.0,<1",
     "uvicorn[standard]>=0.27.0",
-    "sqlalchemy[asyncio]>=2.0.25",
-    "asyncpg>=0.29.0",
-    "psycopg2-binary>=2.9.9",
-    "alembic>=1.13.0",
-    "pydantic>=2.5.0",
-    "pydantic-settings>=2.1.0",
+    # <2.2: unpinned builds picked up 2.1, which changed the default psycopg driver and broke
+    # "alembic upgrade head" at container start. 2.1 is supported (see Settings.database_url_sync_explicit);
+    # raise this bound deliberately, after running the suite on the new major/minor.
+    "sqlalchemy[asyncio]>=2.0.25,<2.2",
+    "asyncpg>=0.29.0,<1",
+    "psycopg2-binary>=2.9.9,<3",
+    "alembic>=1.13.0,<2",
+    "pydantic>=2.5.0,<3",
+    "pydantic-settings>=2.1.0,<3",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
@@ -23,7 +26,7 @@ dependencies = [
     "openpyxl>=3.1.0",
     "httpx>=0.27.0",
     "google-genai>=1.63.0",
-    "playwright>=1.44.0",
+    "playwright>=1.44.0,<2",
     "defusedxml>=0.7.1",
     "google-cloud-scheduler>=2.13.0",
     "google-cloud-tasks>=2.16.0",

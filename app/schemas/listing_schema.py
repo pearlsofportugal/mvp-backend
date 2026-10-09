@@ -124,7 +124,10 @@ class ListingBase(BaseModel):
 
     # ── Content ───────────────────────────────────────────────────────────
     raw_description: str | None = Field(None, description="Raw description as scraped (unprocessed).")
-    description: str | None = Field(None, description="Cleaned / normalised description.")
+    description: str | None = Field(None, description="Description as the partner wrote it (whitespace-normalised).")
+    description_clean: str | None = Field(
+        None, description="Display-ready description: agency boilerplate removed, formatting repaired."
+    )
     description_quality_score: int | None = Field(None, ge=0, le=100, description="AI quality score (0–100).")
     meta_description: str | None = Field(None, description="SEO meta description (scraped).")
     enriched_translations: dict[str, Any] | None = Field(

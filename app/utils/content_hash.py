@@ -22,7 +22,7 @@ CONTENT_FIELDS: tuple[str, ...] = (
     "district", "county", "parish", "full_address", "latitude", "longitude",
     "has_garage", "has_elevator", "has_balcony", "has_air_conditioning", "has_pool", "has_garden",
     "energy_certificate", "construction_year", "advertiser", "contacts",
-    "raw_description", "description", "description_quality_score", "meta_description",
+    "raw_description", "description", "description_clean", "description_quality_score", "meta_description",
 )
 
 _CENT = Decimal("0.01")

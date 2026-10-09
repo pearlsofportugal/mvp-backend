@@ -87,6 +87,9 @@ class Listing(Base):
     # Descriptions
     raw_description: Mapped[str | None] = mapped_column(Text, comment="Original unmodified description")
     description: Mapped[str | None] = mapped_column(Text, comment="Cleaned description")
+    description_clean: Mapped[str | None] = mapped_column(
+        Text, comment="Display-ready description: agency boilerplate removed, formatting repaired"
+    )
     enriched_translations: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True),
         nullable=True,

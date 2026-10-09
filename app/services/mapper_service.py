@@ -27,6 +27,7 @@ from uuid import UUID
 from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.services.description_cleaner import clean_description, score_description
 from app.core.vocabularies import PROPERTY_TYPE_OTHER, normalize_property_type, normalize_typology
 from app.utils.coordinates import is_plausible_portugal
 from app.utils.images import dimensions_from_url
@@ -745,6 +746,9 @@ def _build_base_schema(
     raw_description = raw.get("raw_description")
     is_on_request = price_amount == PRICE_ON_REQUEST
 
+    # Display-ready copy; `description` stays as the partner wrote it.
+    description_clean = clean_description(raw_description, source_partner)
+
     media = _build_gallery(raw.get("images"), raw.get("alt_texts"), raw.get("image_sizes"))
 
     # Coordinates are only ever the ones the source page declared (see utils/coordinates).
@@ -793,7 +797,9 @@ def _build_base_schema(
         descriptions={k: v for k, v in {
             "raw": raw_description,
             "pt": _normalize_description_text(raw_description),
+            "clean": description_clean,
         }.items() if v},
+        description_quality_score=score_description(description_clean),
         seo=seo or None,
         energy_certificate=normalize_energy_certificate(
             raw.get("energy_certificate"),
@@ -1498,6 +1504,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "contacts": schema.contacts,
         "raw_description": schema.descriptions.get("raw"),
         "description": schema.descriptions.get("pt"),
+        "description_clean": schema.descriptions.get("clean"),
         "description_quality_score": schema.description_quality_score,
         "page_title": schema.seo.get("page_title") if schema.seo else None,
         "headers": schema.seo.get("headers") if schema.seo else None,

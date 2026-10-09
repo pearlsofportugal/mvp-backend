@@ -91,3 +91,24 @@ async def normalize_stored_vocabularies(db: AsyncSession, *, apply: bool) -> dic
     if apply and changed:
         await db.commit()
     return {"scanned": len(rows), "changed": changed, "unrecognised": dict(unrecognised.most_common())}
+
+
+# ── description backfill ──────────────────────────────────────────────────
+
+async def backfill_description_clean(db: AsyncSession, *, apply: bool) -> dict:
+    """Fill description_clean / description_quality_score for stored rows from their raw text."""
+    from app.services.description_cleaner import clean_description, score_description
+
+    changed = 0
+    rows = (await db.execute(select(Listing))).scalars().all()
+    for row in rows:
+        clean = clean_description(row.raw_description or row.description, row.source_partner)
+        score = score_description(clean)
+        if (clean, score) == (row.description_clean, row.description_quality_score):
+            continue
+        changed += 1
+        if apply:
+            row.description_clean, row.description_quality_score = clean, score
+    if apply and changed:
+        await db.commit()
+    return {"scanned": len(rows), "changed": changed}

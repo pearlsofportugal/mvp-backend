@@ -94,3 +94,42 @@ async def test_list_and_detail_expose_coordinates(client: AsyncClient, db_sessio
     assert (item["latitude"], item["longitude"], item["location_precision"]) == (41.1579, -8.6291, "exact")
     detail = (await client.get(f"/api/v1/listings/{listing.id}")).json()["data"]
     assert detail["location_precision"] == "exact"
+
+
+# ── include=detail ──────────────────────────────────────────────────────────
+
+async def test_include_detail_returns_full_records_in_one_call(client: AsyncClient, db_session):
+    from app.models.media_model import MediaAsset
+
+    for i in range(3):
+        listing = await _make(db_session, f"https://x.pt/d{i}", description_clean="Texto limpo.")
+        for pos in (1, 0):
+            db_session.add(MediaAsset(listing_id=listing.id, url=f"https://x.pt/d{i}/{pos}.jpg", type="photo", position=pos))
+    await db_session.commit()
+
+    plain = (await client.get("/api/v1/listings")).json()
+    assert "media_assets" not in plain["data"]["items"][0]          # default format unchanged
+
+    resp = await client.get("/api/v1/listings", params={"include": "detail", "page_size": 50})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["meta"]["total"] == 3
+    item = body["data"]["items"][0]
+    assert [m["position"] for m in item["media_assets"]] == [0, 1]
+    assert item["description_clean"] == "Texto limpo."
+    assert {"price_history", "status", "latitude", "is_enriched"} <= set(item)
+
+
+async def test_include_detail_page_size_is_capped_and_validated(client: AsyncClient):
+    too_big = await client.get("/api/v1/listings", params={"include": "detail", "page_size": 51})
+    assert too_big.status_code == 422
+    assert (await client.get("/api/v1/listings", params={"include": "everything"})).status_code == 422
+    assert (await client.get("/api/v1/listings", params={"page_size": 100})).status_code == 200  # unchanged without include
+
+
+async def test_include_detail_is_documented(client: AsyncClient):
+    resp = await client.get("/openapi.json")
+    if resp.status_code != 200:
+        return
+    params = {p["name"]: p for p in resp.json()["paths"]["/api/v1/listings"]["get"]["parameters"]}
+    assert "detail" in params["include"]["description"]

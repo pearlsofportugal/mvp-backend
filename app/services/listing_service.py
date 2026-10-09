@@ -14,13 +14,18 @@ from app.schemas.listing_schema import (
     DuplicateEntry,
     DuplicatesResponse,
     ListingCreate,
+    ListingDetailRead,
     ListingListRead,
     ListingStats,
     ListingUpdate,
+    PaginatedDetailResponse,
     PaginatedResponse,
     resolve_enriched_title,
 )
 from app.schemas.listing_search_schema import ListingSearchItem, ListingSearchResponse
+
+# include=detail loads media and price history for every item, so pages are kept smaller.
+MAX_DETAIL_PAGE_SIZE = 50
 
 SORT_FIELDS = {
     "price": Listing.price_amount,
@@ -49,16 +54,19 @@ class ListingService:
         sort_order: str,
         page: int,
         page_size: int,
-    ) -> tuple[PaginatedResponse, Meta]:
+        include_detail: bool = False,
+    ) -> tuple[PaginatedResponse | PaginatedDetailResponse, Meta]:
         sort_column = SORT_FIELDS.get(sort_by, Listing.created_at)
 
         listings, total = await ListingRepository.get_all_listings(
-            db, filters, sort_column, sort_order, page, page_size
+            db, filters, sort_column, sort_order, page, page_size, with_detail=include_detail
         )
 
         pages = math.ceil(total / page_size) if total else 0
         meta = Meta(page=page, page_size=page_size, total=total, pages=pages)
 
+        if include_detail:
+            return PaginatedDetailResponse(items=[ListingDetailRead.model_validate(l) for l in listings]), meta
         return PaginatedResponse(
             items=[ListingListRead.model_validate(l) for l in listings]
         ), meta

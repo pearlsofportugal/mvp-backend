@@ -88,6 +88,7 @@ class ListingRepository:
         sort_order: str,
         page: int,
         page_size: int,
+        with_detail: bool = False,
     ) -> tuple[list[Listing], int]:
         # COUNT(*) OVER() calcula o total sem query separada
         total_count = func.count().over().label("total_count")
@@ -97,6 +98,8 @@ class ListingRepository:
         )
         query = query.order_by(desc(sort_column) if sort_order == "desc" else asc(sort_column))
         query = query.offset((page - 1) * page_size).limit(page_size)
+        if with_detail:
+            query = query.options(selectinload(Listing.media_assets), selectinload(Listing.price_history))
     
         rows = (await db.execute(query)).all()
     

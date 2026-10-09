@@ -324,6 +324,16 @@ class PaginatedResponse(BaseModel):
     items: list[ListingListRead] = Field(default_factory=list)
 
 
+class PaginatedDetailResponse(BaseModel):
+    """Same envelope as PaginatedResponse, with each item as the full detail record.
+
+    Returned by ``GET /listings?include=detail`` so a sync client can read a whole
+    page in one call instead of one ``GET /listings/{id}`` per listing.
+    """
+
+    items: list[ListingDetailRead] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Duplicates
 # ---------------------------------------------------------------------------

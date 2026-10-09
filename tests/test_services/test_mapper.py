@@ -375,7 +375,7 @@ class TestNormalizeBpapropertyPayload:
 
         assert schema.source_partner == "bpaproperty"
         assert schema.business_type == "sale"
-        assert schema.property_type == "Townhouse"
+        assert schema.property_type == "Moradia"  # closed vocabulary (was the raw "Townhouse" slug)
         assert schema.partner_id == "BPA5646"
         assert schema.condition == "Used"
         assert schema.address.region == "Faro"
@@ -403,7 +403,7 @@ class TestNormalizeBpapropertyPayload:
 
         schema = normalize_bpaproperty_payload(raw)
 
-        assert schema.property_type == "Plot"
+        assert schema.property_type == "Terreno"  # closed vocabulary (was the raw "Plot" slug)
         assert schema.bedrooms is None
         assert schema.address.city == "Lagos"
         assert schema.address.area is None

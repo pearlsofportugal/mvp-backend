@@ -42,6 +42,7 @@ class Listing(Base):
     property_type: Mapped[str | None] = mapped_column(String(50), comment="apartment, house, land, etc.")
     condition: Mapped[str | None] = mapped_column(String(50), comment="New, Used, Renovated, Novo, Usado, etc.")
     typology: Mapped[str | None] = mapped_column(String(10), comment="T0, T1, T2, T3, etc.")
+    typology_extra: Mapped[str | None] = mapped_column(String(5), comment="Extra rooms of a T1+1 style typology, e.g. +1")
     bedrooms: Mapped[int | None] = mapped_column(Integer)
     bathrooms: Mapped[int | None] = mapped_column(Integer)
     floor: Mapped[str | None] = mapped_column(String(20))

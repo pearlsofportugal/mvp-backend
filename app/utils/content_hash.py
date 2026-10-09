@@ -15,7 +15,7 @@ from typing import Any
 # Order is irrelevant (keys are sorted when serialised) but the set is part of
 # the hash contract: adding a field here changes every hash exactly once.
 CONTENT_FIELDS: tuple[str, ...] = (
-    "title", "business_type", "property_type", "condition", "typology",
+    "title", "business_type", "property_type", "condition", "typology", "typology_extra",
     "bedrooms", "bathrooms", "floor",
     "price_amount", "price_currency", "price_per_m2", "price_on_request",
     "area_useful_m2", "area_gross_m2", "area_land_m2",

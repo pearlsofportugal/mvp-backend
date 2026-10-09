@@ -60,6 +60,7 @@ _PROPERTY_TYPE_MAP: dict[str, str] = {
     "lote": "Lot",
     "lote de terreno": "Lot",
     "commercial": "Commercial",
+    "comercial": "Commercial",
     "loja": "Commercial",
     # "escritório" (PT, what property_type actually contains) was previously
     # mapped to "Commercial" while only the English "office" (never produced

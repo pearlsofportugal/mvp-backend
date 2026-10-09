@@ -78,7 +78,8 @@ class ListingBase(BaseModel):
     business_type: Literal["sale", "rent", "trespasse"] | None = Field(None, description="Listing transaction type.")
     property_type: str | None = Field(None, description="Property type (e.g. 'apartment', 'house').")
     condition: str | None = Field(None, description="Property condition (e.g. 'New', 'Used', 'Renovated').")
-    typology: str | None = Field(None, description="Portuguese typology code (e.g. 'T2', 'T3+1').")
+    typology: str | None = Field(None, description="Portuguese typology code: T0, T1, T2, ... (see GET /listings/vocabularies).")
+    typology_extra: str | None = Field(None, description="Extra rooms of a T1+1 style typology, e.g. '+1'.")
 
     # ── Details ───────────────────────────────────────────────────────────
     title: str | None = Field(None, description="Listing headline.")
@@ -163,6 +164,7 @@ class ListingUpdate(BaseModel):
     property_type: str | None = None
     condition: str | None = None
     typology: str | None = None
+    typology_extra: str | None = None
     title: str | None = None
     bedrooms: int | None = Field(None, ge=0)
     bathrooms: int | None = Field(None, ge=0)
@@ -265,6 +267,7 @@ class ListingListRead(BaseModel):
     business_type: Literal["sale", "rent", "trespasse"] | None = None
     property_type: str | None = None
     typology: str | None = None
+    typology_extra: str | None = None
     price_amount: Decimal | None = None
     price_currency: str | None = None
     price_per_m2: Decimal | None = None

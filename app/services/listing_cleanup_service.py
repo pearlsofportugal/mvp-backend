@@ -58,3 +58,36 @@ async def archive_junk_listings(db: AsyncSession, backup_path: Path, *, apply: b
     )
     await db.commit()
     return junk
+
+
+# ── vocabulary backfill ───────────────────────────────────────────────────
+
+async def normalize_stored_vocabularies(db: AsyncSession, *, apply: bool) -> dict:
+    """Re-normalise property_type / typology of stored rows to the closed vocabularies.
+
+    Returns counts plus the raw values that fell into "Outro", so gaps in the
+    vocabulary are visible. With ``apply`` the rows are updated through the ORM,
+    which bumps ``updated_at`` — the content really did change for consumers.
+    """
+    from collections import Counter
+
+    from app.core.vocabularies import PROPERTY_TYPE_OTHER, normalize_property_type, normalize_typology
+
+    changed = 0
+    unrecognised: Counter[str] = Counter()
+    rows = (await db.execute(select(Listing))).scalars().all()
+    for row in rows:
+        new_type = normalize_property_type(row.property_type)
+        new_typology, new_extra = normalize_typology(row.typology)
+        if new_extra is None and new_typology == row.typology:
+            new_extra = row.typology_extra  # already split on a previous run: keep the "+1"
+        if new_type == PROPERTY_TYPE_OTHER and row.property_type:
+            unrecognised[row.property_type] += 1
+        if (new_type, new_typology, new_extra) == (row.property_type, row.typology, row.typology_extra):
+            continue
+        changed += 1
+        if apply:
+            row.property_type, row.typology, row.typology_extra = new_type, new_typology, new_extra
+    if apply and changed:
+        await db.commit()
+    return {"scanned": len(rows), "changed": changed, "unrecognised": dict(unrecognised.most_common())}

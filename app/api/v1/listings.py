@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.vocabularies import PROPERTY_TYPES, valid_typologies
 from app.api.deps import get_db, listing_filter_params
 from app.api.responses import ERROR_RESPONSES, ok
 from app.schemas.base_schema import ApiResponse
@@ -57,6 +58,21 @@ async def list_source_partners(
 ):
     partners = await ListingService.get_source_partners(db)
     return ok(partners, "Source partners listed successfully", request)
+
+@router.get(
+    "/vocabularies",
+    response_model=ApiResponse[dict[str, list[str]]],
+    responses=ERROR_RESPONSES,
+    operation_id="listing_vocabularies",
+)
+async def listing_vocabularies(request: Request):
+    """The closed sets `property_type` and `typology` are normalised to."""
+    return ok(
+        {"property_type": list(PROPERTY_TYPES), "typology": valid_typologies()},
+        "Vocabularies listed successfully",
+        request,
+    )
+
 
 @router.get(
     "/selector",

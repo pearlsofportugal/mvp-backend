@@ -27,6 +27,7 @@ from uuid import UUID
 from app.core.normalizer import normalize_energy_certificate
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.core.vocabularies import PROPERTY_TYPE_OTHER, normalize_property_type, normalize_typology
 from app.utils.coordinates import is_plausible_portugal
 from app.utils.images import dimensions_from_url
 from app.schemas.property_schema import (
@@ -107,6 +108,14 @@ def parse_coordinates(lat: Any, lng: Any) -> tuple[float | None, float | None]:
     except (TypeError, ValueError):
         return None, None
     return (la, lo) if is_plausible_portugal(la, lo) else (None, None)
+
+
+def _canonical_property_type(raw: str | None, source_partner: str) -> str | None:
+    canonical = normalize_property_type(raw)
+    if canonical == PROPERTY_TYPE_OTHER:
+        # Surfaces vocabulary gaps instead of silently burying them in "Outro".
+        logger.info("Unrecognised property_type %r from %s → %s", raw, source_partner, PROPERTY_TYPE_OTHER)
+    return canonical
 
 
 def is_junk_listing(schema: PropertySchema) -> bool:
@@ -721,6 +730,10 @@ def _build_base_schema(
     if title is _NOT_SET:
         title = raw.get("title")
 
+    # Closed vocabularies (core/vocabularies): the raw wording is still in raw_partner_payload.
+    property_type = _canonical_property_type(property_type, source_partner)
+    typology, typology_extra = normalize_typology(raw.get("typology"))
+
     if condition is _NOT_SET:
         condition = _normalize_whitespace(raw.get("condition"))
 
@@ -745,7 +758,8 @@ def _build_base_schema(
         business_type=business_type,
         property_type=property_type,
         condition=condition,  # type: ignore[arg-type]
-        typology=raw.get("typology"),
+        typology=typology,
+        typology_extra=typology_extra,
         bedrooms=bedrooms,  # type: ignore[arg-type]
         bathrooms=parse_int(raw.get("bathrooms")),
         floor=floor,
@@ -1454,6 +1468,7 @@ def schema_to_listing_dict(schema: PropertySchema, scrape_job_id: UUID | None = 
         "property_type": schema.property_type,
         "condition": schema.condition,
         "typology": schema.typology,
+        "typology_extra": schema.typology_extra,
         "bedrooms": schema.bedrooms,
         "bathrooms": schema.bathrooms,
         "floor": schema.floor,

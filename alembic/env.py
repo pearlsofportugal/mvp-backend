@@ -15,7 +15,7 @@ from app.models import listing_model, media_model, price_history_model, scrape_j
 config = context.config
 
 # Override sqlalchemy.url from settings
-config.set_main_option("sqlalchemy.url", settings.database_url_sync)
+config.set_main_option("sqlalchemy.url", settings.database_url_sync_explicit)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

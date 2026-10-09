@@ -130,6 +130,19 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL_SYNC must use a sync driver")
         return value
     
+    @property
+    def database_url_sync_explicit(self) -> str:
+        """DATABASE_URL_SYNC with an explicit PostgreSQL driver.
+
+        SQLAlchemy 2.1 changed the default driver of ``postgresql://`` from psycopg2 to
+        psycopg (v3). This project ships psycopg2, so name it instead of relying on the
+        default; otherwise every Alembic run fails with "No module named 'psycopg'".
+        """
+        url = self.database_url_sync
+        if url.startswith("postgresql://"):
+            return "postgresql+psycopg2://" + url[len("postgresql://"):]
+        return url
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value):

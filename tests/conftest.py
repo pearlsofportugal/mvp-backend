@@ -13,6 +13,11 @@ from app.config import settings
 from app.main import app
 
 
+# Tests must never reach Google Cloud: a developer's .env usually sets GOOGLE_CLOUD_PROJECT, which
+# turns the Cloud Scheduler sync (create/delete jobs on site changes) from a no-op into real API calls.
+settings.google_cloud_project = ""
+
+
 # Use SQLite for tests (fast, no external deps)
 TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
 

@@ -125,3 +125,46 @@ def test_gallery_prefers_original_jpeg_over_webp_variant():
         "https://images.egorealestate.com/Z1280x960/S5/C1/P1/Tphoto/IDbbbb2222.png",
         "https://images.egorealestate.com/Z1280x960/S5/C1/P1/Tphoto/IDcccc3333.jpg",
     ]
+
+
+def test_partner_parser_uses_full_ego_gallery_when_selector_finds_only_the_cover():
+    """eGO partner configs use ``img.propertyImage`` (cover only); the scraper must
+    still return the whole gallery, largest rendition, related listings dropped."""
+    from app.services.parser_service import parse_listing_page
+
+    page = _EGO_PAGE.replace(
+        "</body>",
+        '<img class="propertyImage" src="https://images.egorealestate.com/Z1280x960/S5/C1/P30297842/Tphoto/IDaaaa1111.jpg"></body>',
+    )
+    raw = parse_listing_page(page, "https://www.example-ego.pt/imovel/x/1", {"images_selector": "img.propertyImage"})
+    assert raw["images"] == [
+        "https://images.egorealestate.com/Z1280x960/S5/C1/P30297842/Tphoto/IDaaaa1111.jpg",
+        "https://images.egorealestate.com/Z1280x960/S5/C1/P30297842/Tphoto/IDbbbb2222.jpg",
+    ]
+    assert len(raw["alt_texts"]) == 2
+
+
+def test_partner_parser_leaves_non_ego_pages_alone():
+    from app.services.parser_service import parse_listing_page
+
+    page = '<html><body><img class="Streamed" data-imgthumb="https://images.egorealestate.com/Z1/P1/Tphoto/IDaaaa1111.jpg"></body></html>'
+    raw = parse_listing_page(page, "https://x.pt/a", {"images_selector": "img.nothing"})
+    assert not raw.get("images")
+
+
+def test_partner_parser_drops_thumbnail_duplicates_from_a_noisy_selector():
+    """habita's ``#mediaGallery img`` lists every photo at several sizes; the gallery
+    extractor must replace that with one largest rendition per photo."""
+    from app.services.parser_service import parse_listing_page
+
+    page = _EGO_PAGE.replace(
+        "</body>",
+        '<div id="mediaGallery">'
+        '<img src="https://images.egorealestate.com/Z320x240/S5/C1/P30297842/Tphoto/IDaaaa1111.jpg">'
+        '<img src="https://images.egorealestate.com/Z320x240/S5/C1/P30297842/Tphoto/IDbbbb2222.jpg">'
+        '<img src="https://images.egorealestate.com/Z1280x960/S5/C1/P30297842/Tphoto/IDaaaa1111.jpg">'
+        '</div></body>',
+    )
+    raw = parse_listing_page(page, "https://www.example-ego.pt/imovel/x/1", {"images_selector": "#mediaGallery img"})
+    assert len(raw["images"]) == 2
+    assert all("/Z1280x960/" in u for u in raw["images"])

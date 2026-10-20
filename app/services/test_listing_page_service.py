@@ -1,6 +1,6 @@
 """Service — test a listing/search results page without persisting.
 
-Fetches the page with EthicalScraper, extracts listing links (separated into
+Fetches the page the way the real job does (EthicalScraper, or Playwright for JS sites), extracts listing links (separated into
 matched/rejected), detects the next page URL, and optionally samples thumbnail
 images. No DB writes.
 """
@@ -14,6 +14,8 @@ from app.models.site_config_model import SiteConfig
 from app.schemas.site_config_schema import TestListingPageRequest, TestListingPageResponse
 from app.services.ethics_service import EthicalScraper
 from app.services.parser_service import extract_listing_links, parse_next_page
+from app.services.playwright_scraper import PlaywrightScraper
+from app.utils.site_selectors import effective_selectors
 
 logger = get_logger(__name__)
 
@@ -28,7 +30,8 @@ async def run_test_listing_page(
     provided in the payload. Never writes to the database.
     """
     url = str(payload.url)
-    selectors: dict = site.selectors or {}
+    # Same selectors the real job runs with (site-level link_pattern included).
+    selectors: dict = effective_selectors(site.selectors, site.link_pattern, site.image_filter, site.image_exclude_filter)
 
     # Payload overrides trump site config —————————————————————————————————
     link_selector: str = selectors.get("listing_link_selector", "a")
@@ -36,9 +39,27 @@ async def run_test_listing_page(
     thumbnail_selector: str | None = payload.thumbnail_selector or selectors.get("thumbnail_selector")
 
     # ── Fetch ─────────────────────────────────────────────────────────────
-    scraper = EthicalScraper(user_agent="MVPScraper/1.0 (+test-listing-page)")
+    # JS-rendered sites (the eGO ones) show no listing cards in the static HTML,
+    # so the dry run must render the page like the real job does.
+    headers = site.request_headers or {}
+    html: str | None = None
     try:
-        response = await asyncio.to_thread(scraper.get, url)
+        if site.use_js_render:
+            browser = PlaywrightScraper(
+                min_delay=1.0, max_delay=2.0, timeout=30, extra_headers=headers,
+                content_ready_selector=link_selector if link_selector != "a" else None,
+            )
+            try:
+                html = await browser.get_html(url)
+            finally:
+                await browser.close()
+        else:
+            scraper = EthicalScraper(user_agent="MVPScraper/1.0 (+test-listing-page)", extra_headers=headers)
+            try:
+                response = await asyncio.to_thread(scraper.get, url)
+                html = response.text if response else None
+            finally:
+                scraper.close()
     except Exception as exc:
         logger.error("test-listing-page fetch failed for %s: %s", url, exc)
         return TestListingPageResponse(
@@ -48,10 +69,8 @@ async def run_test_listing_page(
             links_matched=0,
             error=str(exc),
         )
-    finally:
-        scraper.close()
 
-    if not response:
+    if not html:
         return TestListingPageResponse(
             url=url,
             success=False,
@@ -59,8 +78,6 @@ async def run_test_listing_page(
             links_matched=0,
             error="Failed to fetch page — blocked by robots.txt, rate limit, or HTTP error.",
         )
-
-    html = response.text
 
     # ── Link extraction (matched vs rejected) ─────────────────────────────
     soup = BeautifulSoup(html, "lxml")

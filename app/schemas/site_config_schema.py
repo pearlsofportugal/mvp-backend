@@ -1,6 +1,7 @@
 ﻿"""Pydantic schemas for SiteConfig API requests and responses."""
 
 import ipaddress
+import re
 import socket
 from datetime import datetime
 from typing import Any, Literal
@@ -8,6 +9,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.utils.site_selectors import repair_regex
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _SSRF_BLOCKED_HOSTS = frozenset({
@@ -53,6 +55,14 @@ PaginationType = Literal["html_next", "query_param", "incremental_path", "sitema
 # ---------------------------------------------------------------------------
 # Base (shared fields)
 # ---------------------------------------------------------------------------
+
+def _clean_url_pattern(v: str | None) -> str | None:
+    """Reject regexes that do not compile; undo double-escaped backslashes."""
+    try:
+        return repair_regex(v)
+    except re.error as exc:
+        raise ValueError(f"Invalid regular expression: {exc}") from exc
+
 
 class SiteConfigBase(BaseModel):
     """Fields shared across create, update, and read schemas."""
@@ -115,6 +125,11 @@ class SiteConfigBase(BaseModel):
             raise ValueError(f"Invalid IANA timezone: '{v}'")
         return v
 
+    @field_validator("link_pattern", "image_filter", "image_exclude_filter")
+    @classmethod
+    def _validate_url_patterns(cls, v: str | None) -> str | None:
+        return _clean_url_pattern(v)
+
 
 # ---------------------------------------------------------------------------
 # Create
@@ -174,6 +189,11 @@ class SiteConfigUpdate(BaseModel):
         except ZoneInfoNotFoundError:
             raise ValueError(f"Invalid IANA timezone: '{v}'")
         return v
+
+    @field_validator("link_pattern", "image_filter", "image_exclude_filter")
+    @classmethod
+    def _validate_url_patterns(cls, v: str | None) -> str | None:
+        return _clean_url_pattern(v)
 
 
 # ---------------------------------------------------------------------------

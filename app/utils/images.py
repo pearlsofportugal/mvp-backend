@@ -1,4 +1,5 @@
 """Helpers for working out image URLs and (when the source states them) sizes."""
+import base64
 import re
 
 # WordPress and many CMSes name generated renditions "photo-1024x768.jpg": the
@@ -37,3 +38,25 @@ def largest_srcset_candidate(srcset: str | None) -> tuple[str, int | None] | Non
         return None
     with_width = [c for c in candidates if c[1]]
     return max(with_width, key=lambda c: c[1]) if with_width else candidates[-1]
+
+
+_XIMO_OPTIMIZER_RE = re.compile(r"^https?://[^/]*ximocrm\.com/image-optimizer/[^/]+/([A-Za-z0-9_-]{16,})(?:\.[a-z0-9]+)?(?:\?.*)?$", re.IGNORECASE)
+
+
+def ximo_original_url(url: str) -> str:
+    """Original image URL behind a ximocrm ``image-optimizer`` link.
+
+    The optimizer serves a resized WebP and carries the source address as
+    unpadded urlsafe base64 in the last path segment; the source is the
+    full-size JPEG on the agency's media host. Anything that is not such a
+    link (or does not decode to an http(s) URL) is returned unchanged.
+    """
+    m = _XIMO_OPTIMIZER_RE.match(url or "")
+    if not m:
+        return url
+    token = m.group(1)
+    try:
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return url
+    return decoded if decoded.startswith(("http://", "https://")) else url

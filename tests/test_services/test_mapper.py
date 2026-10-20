@@ -330,7 +330,7 @@ class TestNormalizeImoAtlanticoPayload:
 
         schema = normalize_imo_atlantico_payload(raw)
 
-        assert schema.source_partner == "imo_atlantico"
+        assert schema.source_partner == "imoantlantico"
         assert schema.title == "EMPREENDIMENTO - MORADIA E"
         assert schema.business_type == "sale"
         assert schema.property_type == "Moradia"
@@ -457,3 +457,32 @@ class TestMissingCriticalSchemaFields:
         })
 
         assert missing_critical_schema_fields(schema) == []
+
+
+class TestMysquareNormalizer:
+    def test_uses_area_field_and_url_id(self):
+        from app.services.mapper_service import normalize_partner_payload
+
+        raw = {
+            "url": "https://www.mysquare.pt/pt/imoveis/apartamento-t3-com-varanda_1251026/",
+            "title": "Apartamento T3 com Varanda e Garagem",
+            "price": "665 000 €",
+            "property_type": "Apartamento",
+            "area": "116 m²",
+            "gross_area": "136,8 m²",
+            "district": "Porto",
+            "county": "Vila Nova de Gaia",
+            "parish": "Canidelo",
+        }
+        schema = normalize_partner_payload(raw, "mysquare")
+        assert schema.area_useful_m2 == 116
+        assert schema.area_gross_m2 == 136.8
+        assert schema.partner_id == "1251026"
+
+
+def test_imoantlantico_is_registered_under_its_site_key():
+    """The site key and the normalizer key must match, or every scrape fails with
+    "No normalizer registered for partner"."""
+    from app.services.mapper_service import _PARTNER_NORMALIZERS
+
+    assert "imoantlantico" in _PARTNER_NORMALIZERS

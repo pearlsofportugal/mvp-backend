@@ -39,7 +39,7 @@ from app.repositories.listings_repository import ListingRepository
 from app.repositories.sold_listing_repository import SoldListingRepository
 from app.services.email_service import send_job_notification
 from app.services.ethics_service import EthicalScraper
-from app.services.playwright_scraper import PlaywrightScraper
+from app.services.playwright_scraper import BROWSER_USER_AGENT, PlaywrightScraper
 from app.services.mapper_service import (
     is_junk_listing,
     missing_critical_schema_fields,
@@ -47,6 +47,7 @@ from app.services.mapper_service import (
     schema_to_listing_dict,
 )
 from app.services.parser_service import parse_listing_links, parse_listing_page, parse_next_page
+from app.utils.site_selectors import effective_selectors
 from app.utils.content_hash import CONTENT_FIELDS, compute_content_hash
 from app.services.sitemap_service import fetch_sitemap_urls
 from app.services.scrape_job_event_service import record_event
@@ -241,13 +242,7 @@ async def _run_scrape_async(
             logger.error("Job %s not found at scrape start", job_id)
             return
 
-        full_selectors = {**selectors}
-        if link_pattern:
-            full_selectors["listing_link_pattern"] = link_pattern
-        if image_filter:
-            full_selectors["image_filter"] = image_filter
-        if image_exclude_filter:
-            full_selectors["image_exclude_filter"] = image_exclude_filter
+        full_selectors = effective_selectors(selectors, link_pattern, image_filter, image_exclude_filter)
 
         current_url = start_url
         pages_visited = 0
@@ -481,12 +476,15 @@ async def _run_sitemap_scrape(
 
     # Sitemap XML is always static — use EthicalScraper regardless of JS mode.
     # If scraper is a PlaywrightScraper, create a dedicated EthicalScraper for the
-    # sitemap fetch and close it when done (owned_sitemap_scraper=True).
+    # sitemap fetch and close it when done (owned_sitemap_scraper=True). That one
+    # presents the same browser User-Agent and headers as the Playwright scraper
+    # fetching this site's pages: sites that block a bot UA (mysquare answers 403
+    # to robots.txt and the sitemap) would otherwise yield zero URLs.
     owned_sitemap_scraper = not isinstance(scraper, EthicalScraper)
     sitemap_scraper: EthicalScraper = (
         scraper  # type: ignore[assignment]
         if isinstance(scraper, EthicalScraper)
-        else EthicalScraper(user_agent=settings.default_user_agent)
+        else EthicalScraper(user_agent=BROWSER_USER_AGENT, extra_headers=scraper.extra_headers)
     )
     try:
         try:

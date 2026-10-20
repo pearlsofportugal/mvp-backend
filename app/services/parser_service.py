@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup, Tag
 
 from app.core.logging import get_logger
 from app.database import async_session_factory
+from app.services.ego_extract_service import extract_ego_gallery, looks_like_ego_platform
 from app.utils.coordinates import extract_coordinates
 from app.utils.images import largest_srcset_candidate, parse_srcset
 from app.crawler.selector_suggester import (
@@ -384,6 +385,7 @@ def parse_listing_page(
 
     # Common extractions
     data.update(_parse_images(soup, selectors, url))
+    _prefer_ego_gallery(soup, html, data, selectors)
     _add_og_image_size(soup, data, url)
     data.update(_parse_seo(soup))
     _fill_missing_listing_fields_from_page(soup, data)
@@ -401,6 +403,33 @@ def parse_listing_page(
 
 # ═══════════════════════════════════════════════════════════
 # Fallbacks and post-processing
+
+def _prefer_ego_gallery(
+    soup: BeautifulSoup,
+    html: str,
+    data: dict[str, Any],
+    selectors: dict[str, Any],
+) -> None:
+    """On eGO Real Estate sites use the platform gallery instead of the site selector.
+
+    The per-site ``images_selector`` of eGO sites either matches only the cover
+    (``img.propertyImage``) or lists every photo several times in different
+    sizes (``#mediaGallery img``, thumbnails included). The eGO gallery extractor
+    drops the related-listings carousel and returns each photo once, in its
+    largest rendition, so it wins whenever it finds anything.
+    """
+    if not looks_like_ego_platform(html):
+        return
+    gallery = extract_ego_gallery(soup)
+    exclude = selectors.get("image_exclude_filter")
+    if exclude:
+        gallery = [u for u in gallery if not re.search(exclude, u)]
+    if not gallery:
+        return
+    data["images"] = gallery
+    data["alt_texts"] = [""] * len(gallery)
+    data["image_sizes"] = {}
+
 
 def _fill_missing_listing_fields_from_page(
     soup: BeautifulSoup,

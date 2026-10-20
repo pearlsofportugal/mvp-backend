@@ -32,7 +32,7 @@ from app.services.attribute_extractor import extract_attributes
 from app.services.description_cleaner import clean_description, score_description
 from app.core.vocabularies import PROPERTY_TYPE_OTHER, normalize_property_type, normalize_typology
 from app.utils.coordinates import is_plausible_portugal
-from app.utils.images import dimensions_from_url
+from app.utils.images import dimensions_from_url, ximo_original_url
 from app.schemas.property_schema import (
     Address,
     ListingFlags,
@@ -1130,7 +1130,7 @@ def normalize_sottomayor_payload(raw: dict[str, Any]) -> PropertySchema:
 # Imo Atlântico Normalizer
 # ═══════════════════════════════════════════════════════════
 
-@partner_normalizer("imo_atlantico")
+@partner_normalizer("imoantlantico")
 def normalize_imo_atlantico_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw IMO Atlântico payload into the canonical PropertySchema."""
     property_type = _normalize_whitespace(raw.get("property_type"))
@@ -1150,16 +1150,17 @@ def normalize_imo_atlantico_payload(raw: dict[str, Any]) -> PropertySchema:
 
     return _build_base_schema(
         raw,
-        source_partner="imo_atlantico",
+        source_partner="imoantlantico",
         business_type=business_type,
         property_type=property_type,
         partner_id=_normalize_whitespace(raw.get("property_id")) or None,
         address=address,
-        area_useful=parse_area(raw.get("useful_area")),
+        area_useful=parse_area(raw.get("area") or raw.get("useful_area")),
         area_gross=parse_area(raw.get("gross_area")),
         area_land=parse_area(raw.get("land_area")),
         bedrooms=typology_to_bedrooms(raw.get("typology")) or parse_int(raw.get("bedrooms")),
         title=title,
+        construction_year=parse_int(raw.get("construction_year")),
         advertiser=_normalize_whitespace(raw.get("advertiser")) or None,
         contacts=_normalize_whitespace(raw.get("contacts")) or None,
     )
@@ -1259,6 +1260,15 @@ def normalize_realkey_payload(raw: dict[str, Any]) -> PropertySchema:
         raw_partner_payload={**raw, "condition": condition, "typology": typology} if (condition or typology) else None,
     )
 
+_MYSQUARE_URL_ID_RE = re.compile(r"_(\d+)/?(?:[?#].*)?$")
+
+
+def _mysquare_id_from_url(url: str | None) -> str | None:
+    """mysquare listing URLs end in ``..._<id>/`` — the page has no reference field."""
+    m = _MYSQUARE_URL_ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+
 @partner_normalizer("mysquare")
 def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
     """Normalize a raw mysquare payload into canonical PropertySchema."""
@@ -1275,6 +1285,10 @@ def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
         "headers": raw.get("headers"),
     }.items() if v}
 
+    # The gallery links point at ximocrm's resizing proxy (WebP); the full-size
+    # JPEG is the address encoded in the link.
+    raw = {**raw, "images": [ximo_original_url(u) for u in raw.get("images") or []]}
+
     return _build_base_schema(
         raw,
         source_partner="mysquare",
@@ -1283,7 +1297,7 @@ def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
             raw.get("property_type")
             or _infer_property_type_from_title(raw.get("title"), _HABINEDITA_PROPERTY_TYPES)
         ),
-        partner_id=raw.get("property_id"),
+        partner_id=raw.get("property_id") or _mysquare_id_from_url(raw.get("url")),
         address=Address(
             country="Portugal",
             region=district,
@@ -1291,7 +1305,7 @@ def normalize_mysquare_payload(raw: dict[str, Any]) -> PropertySchema:
             area=parish,
             full_address=_truncate_text(raw.get("full_address"), 500),
         ),
-        area_useful=parse_area(raw.get("useful_area")),
+        area_useful=parse_area(raw.get("area") or raw.get("useful_area")),
         area_gross=parse_area(raw.get("gross_area")),
         area_land=parse_area(raw.get("land_area")),
         condition=condition,

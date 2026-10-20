@@ -1507,7 +1507,10 @@ def _parse_images(soup: BeautifulSoup, selectors: dict[str, Any], base_url: str)
             nested_img = img.select_one("img")
             return _normalize_image_url(nested_img) if nested_img else None
 
-        for attr in ("src", "data-src", "data-lazy-src", "data-imgthumb", "data-original"):
+        # Lazy-load attributes first: they hold the real photo, while ``src`` is
+        # often a placeholder or a small thumbnail (Realkey: src="x_s.jpg",
+        # data-src="x.jpg").
+        for attr in ("data-original", "data-src", "data-lazy-src", "src", "data-imgthumb"):
             value = img.get(attr)
             if value and not value.startswith("data:"):
                 return value.strip()

@@ -110,3 +110,39 @@ async def test_detail_returns_all_photos_in_position_order(client, db_session):
     assert [m["position"] for m in body["media_assets"]] == [0, 1, 2]
     assert (body["media_assets"][0]["width"], body["media_assets"][0]["height"]) == (800, 600)
     assert set(body["media_assets"][1]) >= {"id", "url", "alt_text", "type", "position"}  # old fields intact
+
+
+def test_ximo_optimizer_link_decodes_to_the_full_size_original():
+    from app.utils.images import ximo_original_url
+
+    optimized = (
+        "https://cdr1.ximocrm.com/image-optimizer/resize:fit:1920:1080:0/"
+        "aHR0cHM6Ly9tZWRpYW15c3F1YXJlLnhpbW8ucHQvL2ltb3ZlaXMvMTI1MTAyNi8wYmZlMGQwYS1hOTQyLTQ5YTktYmM2OC0wNjkwN2M3OTE3ZjAuanBn.webp"
+    )
+    assert ximo_original_url(optimized) == (
+        "https://mediamysquare.ximo.pt//imoveis/1251026/0bfe0d0a-a942-49a9-bc68-06907c7917f0.jpg"
+    )
+
+
+def test_ximo_original_url_leaves_other_urls_alone():
+    from app.utils.images import ximo_original_url
+
+    for url in ("https://imgs.centralimo.pt/1/properties/a.jpg", "https://cdr1.ximocrm.com/image-optimizer/x/notbase64!.webp", ""):
+        assert ximo_original_url(url) == url
+
+
+def test_mysquare_normalizer_uses_the_original_jpeg():
+    from app.services.mapper_service import normalize_partner_payload
+
+    raw = {
+        "url": "https://www.mysquare.pt/pt/imoveis/apartamento-t3_1251026/",
+        "title": "Apartamento T3 com varanda",
+        "price": "665 000 €",
+        "images": [
+            "https://cdr1.ximocrm.com/image-optimizer/resize:fit:1920:1080:0/"
+            "aHR0cHM6Ly9tZWRpYW15c3F1YXJlLnhpbW8ucHQvL2ltb3ZlaXMvMTI1MTAyNi8wYmZlMGQwYS1hOTQyLTQ5YTktYmM2OC0wNjkwN2M3OTE3ZjAuanBn.webp"
+        ],
+        "alt_texts": [""],
+    }
+    schema = normalize_partner_payload(raw, "mysquare")
+    assert [m.url for m in schema.media] == ["https://mediamysquare.ximo.pt//imoveis/1251026/0bfe0d0a-a942-49a9-bc68-06907c7917f0.jpg"]

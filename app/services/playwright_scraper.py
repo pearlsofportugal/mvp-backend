@@ -15,6 +15,7 @@ import time
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
+import requests
 from playwright.async_api import async_playwright
 
 from app.core.lifecycle import GONE_STATUSES
@@ -26,7 +27,7 @@ USER_AGENT_PATTERN = re.compile(r".+/.+\s*\(\+.+\)")
 
 # Default browser UA to pass to Playwright — looks like a real browser to the site
 # but still identifies the bot through a custom header
-_DEFAULT_BROWSER_UA = (
+BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
@@ -161,6 +162,33 @@ class PlaywrightScraper:
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}"
 
+    _ROBOTS_FETCH_ATTEMPTS = 3
+    _ROBOTS_RETRY_DELAY_SECONDS = 1.5
+    _ROBOTS_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+    def _fetch_robots_response(self, robots_url: str) -> "requests.Response | None":
+        """GET robots.txt with a browser User-Agent and retries for transient failures.
+
+        ``RobotFileParser.read()`` identifies as ``Python-urllib`` — many sites
+        answer that with 403, which the stdlib turns into disallow-all and the
+        whole site ends up blocked. Fetching it ourselves also lets us see the
+        real status code (same policy as EthicalScraper).
+        """
+        response = None
+        for attempt in range(self._ROBOTS_FETCH_ATTEMPTS):
+            try:
+                response = requests.get(
+                    robots_url, headers={"User-Agent": BROWSER_USER_AGENT}, timeout=15, allow_redirects=True
+                )
+            except requests.RequestException as exc:
+                logger.info("robots.txt request error for %s: %s", robots_url, exc)
+                response = None
+            if response is not None and response.status_code not in self._ROBOTS_RETRYABLE_STATUS:
+                return response
+            if attempt < self._ROBOTS_FETCH_ATTEMPTS - 1:
+                time.sleep(self._ROBOTS_RETRY_DELAY_SECONDS)
+        return response
+
     async def _load_robots(self, domain: str) -> tuple[RobotFileParser, bool]:
         now = time.time()
         if domain in self._robots_cache:
@@ -171,8 +199,32 @@ class PlaywrightScraper:
         parser.set_url(robots_url)
         loaded = False
         try:
-            await asyncio.wait_for(asyncio.to_thread(parser.read), timeout=15.0)
-            loaded = True
+            response = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_robots_response, robots_url), timeout=45.0
+            )
+            if response is None:
+                logger.warning(
+                    "Failed to fetch robots.txt from %s (connection error) — BLOCKING (fail-closed)", robots_url
+                )
+            elif response.status_code == 200:
+                parser.parse(response.text.splitlines())
+                loaded = True
+            elif response.status_code == 404:
+                parser.allow_all = True
+                loaded = True
+            elif response.status_code in (401, 403):
+                # Site refuses robots.txt itself; page-level access controls apply.
+                parser.allow_all = True
+                loaded = True
+                logger.warning(
+                    "robots.txt at %s returned %d — treating as allow_all", robots_url, response.status_code
+                )
+            else:
+                logger.warning(
+                    "Failed to fetch robots.txt from %s (status: %d) — BLOCKING (fail-closed)",
+                    robots_url,
+                    response.status_code,
+                )
         except Exception as exc:
             logger.warning(
                 "Failed to load robots.txt from %s: %s — BLOCKING (fail-closed)", robots_url, exc
@@ -190,7 +242,7 @@ class PlaywrightScraper:
                 return True
             logger.warning("Blocking %s — robots.txt not loaded (fail-closed)", url)
             return False
-        allowed = parser.can_fetch(_DEFAULT_BROWSER_UA, url)
+        allowed = parser.can_fetch(BROWSER_USER_AGENT, url)
         if not allowed:
             if not self.respect_robots:
                 logger.info("robots.txt disallows %s — allowing anyway (respect_robots=False)", url)
@@ -238,7 +290,7 @@ class PlaywrightScraper:
 
         await self._ensure_browser()
         ctx = await self._browser.new_context(
-            user_agent=_DEFAULT_BROWSER_UA,
+            user_agent=BROWSER_USER_AGENT,
             extra_http_headers=self.extra_headers,
             java_script_enabled=True,
         )

@@ -13,6 +13,7 @@ from app.services.ethics_service import EthicalScraper
 from app.services.mapper_service import missing_critical_schema_fields, normalize_partner_payload
 from app.services.parser_service import parse_listing_page
 from app.services.playwright_scraper import PlaywrightScraper
+from app.utils.site_selectors import effective_selectors
 
 logger = get_logger(__name__)
 
@@ -27,11 +28,14 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
     """
     # ── Fetch ─────────────────────────────────────────────────────────────
     html: str | None = None
+    # Same selectors the real job runs with (incl. image_filter / image_exclude_filter).
+    selectors = effective_selectors(site.selectors, site.link_pattern, site.image_filter, site.image_exclude_filter)
+    headers = site.request_headers or {}
 
     if site.use_js_render:
-        content_ready_selector = site.selectors.get("title_selector") or site.selectors.get("price_selector")
+        content_ready_selector = selectors.get("title_selector") or selectors.get("price_selector")
         scraper = PlaywrightScraper(
-            min_delay=1.0, max_delay=2.0, timeout=30, content_ready_selector=content_ready_selector
+            min_delay=1.0, max_delay=2.0, timeout=30, extra_headers=headers, content_ready_selector=content_ready_selector
         )
         try:
             html = await scraper.get_html(url)
@@ -41,7 +45,7 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
         finally:
             await scraper.close()
     else:
-        ethical = EthicalScraper(user_agent="MVPScraper/1.0 (+test-scrape)")
+        ethical = EthicalScraper(user_agent="MVPScraper/1.0 (+test-scrape)", extra_headers=headers)
         try:
             response = await asyncio.to_thread(ethical.get, url)
             html = response.text if response else None
@@ -63,7 +67,7 @@ async def run_test_scrape(site: SiteConfig, url: str) -> TestScrapeResponse:
         raw = parse_listing_page(
             html,
             url,
-            site.selectors,
+            selectors,
             site.extraction_mode,
         )
     except Exception as exc:

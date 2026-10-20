@@ -89,7 +89,7 @@ def _text_or_energy(value_el: Tag | None) -> str:
     return ""
 
 
-def _extract_gallery(soup: BeautifulSoup) -> list[str]:
+def extract_ego_gallery(soup: BeautifulSoup) -> list[str]:
     """Property photos from `img.Streamed`, deduped, biggest variant per photo.
 
     Filters out the eGO CRM logo and any thumbnails belonging to a different
@@ -227,7 +227,7 @@ def extract_ego_platform(html: str, url: str) -> dict:
             raw["contacts"] = phone
             break
 
-    images = _extract_gallery(soup)
+    images = extract_ego_gallery(soup)
     if images:
         raw["images"] = images
         raw["alt_texts"] = [""] * len(images)

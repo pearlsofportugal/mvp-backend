@@ -468,3 +468,27 @@ class TestParseListingPage:
         assert data["garage"] == "Yes"
         assert data["balcony"] == "Yes"
         assert data["air_conditioning"] == "Yes"
+
+
+class TestParseImagesPrefersLazyAttribute:
+    """Realkey/CentralImo galleries serve a small ``_s`` thumbnail in ``src`` and
+    the full photo in ``data-src`` — the full one must win."""
+
+    HTML = """
+    <div id="thumbs">
+      <div class="item"><img data-src="https://imgs.x.pt/1/p/a.jpg" src="https://imgs.x.pt/1/p/a_s.jpg"></div>
+      <div class="item"><img src="https://imgs.x.pt/1/p/b.jpg"></div>
+      <div class="item"><img data-src="data:image/gif;base64,AAA" src="https://imgs.x.pt/1/p/c.jpg"></div>
+    </div>
+    """
+
+    def test_data_src_wins_over_thumbnail_src(self):
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(self.HTML, "html.parser")
+        data = _parse_images(soup, {"image_selector": "#thumbs .item img"}, "https://www.x.pt/")
+        assert data["images"] == [
+            "https://imgs.x.pt/1/p/a.jpg",
+            "https://imgs.x.pt/1/p/b.jpg",
+            "https://imgs.x.pt/1/p/c.jpg",
+        ]

@@ -180,14 +180,18 @@ async def run_scrape_job(job_id: str) -> None:
                 logger.exception("Failed to mark job %s as failed during recovery", job_id)
 
 
-async def _fetch_html(scraper: "EthicalScraper | PlaywrightScraper", url: str) -> str | None:
+async def _fetch_html(
+    scraper: "EthicalScraper | PlaywrightScraper", url: str, ready_selector: str | None = None
+) -> str | None:
     """Unified fetch that works for both EthicalScraper and PlaywrightScraper.
 
     Returns the HTML string, or None on failure/block.
     EthicalScraper is synchronous so it runs in a thread; PlaywrightScraper is async.
+    ``ready_selector`` (Playwright only) is what to wait for on this page; listing
+    pages pass their link selector so the cards are rendered before parsing.
     """
     if isinstance(scraper, PlaywrightScraper):
-        return await scraper.get_html(url)
+        return await scraper.get_html(url, content_ready_selector=ready_selector)
     response = await asyncio.to_thread(scraper.get, url)
     return response.text if response else None
 
@@ -297,7 +301,7 @@ async def _run_scrape_async(
                 break
             visited_page_urls.add(current_url)
 
-            html = await _fetch_html(scraper, current_url)
+            html = await _fetch_html(scraper, current_url, ready_selector=full_selectors.get("listing_link_selector"))
             if not html:
                 logger.warning("Failed to fetch page: %s", current_url)
                 errors += 1

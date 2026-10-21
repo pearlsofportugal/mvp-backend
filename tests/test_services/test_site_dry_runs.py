@@ -144,3 +144,14 @@ def test_listing_pages_wait_for_the_listing_cards_not_the_detail_title():
     browser.get_html.reset_mock()
     asyncio.run(scraper_service._fetch_html(browser, "https://x.pt/imovel/1"))
     browser.get_html.assert_awaited_once_with("https://x.pt/imovel/1", content_ready_selector=None)
+
+
+def test_crawl_stops_after_two_consecutive_pages_without_new_listings():
+    from app.services.scraper_service import MAX_EMPTY_PAGES, next_empty_page_streak
+
+    streak = 0
+    for new_links in (["a", "b"], [], ["c"], [], []):
+        streak = next_empty_page_streak(streak, new_links)
+    assert MAX_EMPTY_PAGES == 2
+    assert streak == 2          # the lone empty page in the middle did not end the crawl
+    assert next_empty_page_streak(1, ["x"]) == 0

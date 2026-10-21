@@ -180,6 +180,18 @@ async def run_scrape_job(job_id: str) -> None:
                 logger.exception("Failed to mark job %s as failed during recovery", job_id)
 
 
+# query_param / incremental_path pagination has no "next" link to follow: past the last
+# page a site serves an empty page or repeats the last one, and the crawl used to run on
+# to max_pages (barcelcasa: 60 pages for 17). Two in a row, not one, so a single page
+# that fails to render does not end the crawl early.
+MAX_EMPTY_PAGES = 2
+
+
+def next_empty_page_streak(streak: int, new_links: list[str]) -> int:
+    """Consecutive listing pages that brought no listing URL not already seen."""
+    return 0 if new_links else streak + 1
+
+
 async def _fetch_html(
     scraper: "EthicalScraper | PlaywrightScraper", url: str, ready_selector: str | None = None
 ) -> str | None:
@@ -280,6 +292,7 @@ async def _run_scrape_async(
 
         job_cancelled = False
         pagination_incomplete = False
+        empty_page_streak = 0
         for page_num in range(max_pages):
             # Re-read only status/cancel fields — lightweight scalar query
             if await _check_job_cancelled(db, job_id):
@@ -358,6 +371,7 @@ async def _run_scrape_async(
                 )
 
             listings_found += len(new_links)
+            empty_page_streak = next_empty_page_streak(empty_page_streak, new_links)
 
             # Batch-track found URLs — single commit per page
             for link in new_links:
@@ -393,6 +407,13 @@ async def _run_scrape_async(
                         new_listings=new_count,
                         updated_listings=updated_count,
                     )
+
+            if empty_page_streak >= MAX_EMPTY_PAGES:
+                logger.info(
+                    "Job %s: %d consecutive pages without new listings — end of listing, stopping at page %d",
+                    job_id, empty_page_streak, page_num + 1,
+                )
+                break
 
             # ---------- PAGINATION UNIVERSAL ----------
             if pagination_type == "incremental_path":

@@ -38,7 +38,7 @@ async def list_listings(
     filters: dict = Depends(listing_filter_params),
     is_enriched: bool | None = Query(None, description="Filter by AI enrichment status."),
     is_exported_to_imodigi: bool | None = Query(None, description="Filter by Imodigi export status (published or updated)."),
-    sort_by: str = Query("created_at", enum=list(SORT_FIELDS.keys())),
+    sort_by: str = Query("created_at", json_schema_extra={"enum": list(SORT_FIELDS.keys())}),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),

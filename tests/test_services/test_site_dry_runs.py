@@ -129,3 +129,18 @@ def test_sitemap_fetch_for_js_sites_presents_the_browser_user_agent():
         ))
     assert captured["user_agent"] == BROWSER_USER_AGENT
     assert captured["extra_headers"] == {"Accept-Language": "pt-PT"}
+
+
+def test_listing_pages_wait_for_the_listing_cards_not_the_detail_title():
+    """The scraper-wide ready selector is a detail-page title; on a listing page it never
+    appears, so the job parsed the HTML 8 s in, before the cards had rendered (0 links)."""
+    from app.services import scraper_service
+    from app.services.playwright_scraper import PlaywrightScraper
+
+    browser = PlaywrightScraper(content_ready_selector=".detail h1")
+    browser.get_html = AsyncMock(return_value="<html></html>")
+    asyncio.run(scraper_service._fetch_html(browser, "https://x.pt/imoveis", ready_selector="a.propertyItemWrap"))
+    browser.get_html.assert_awaited_once_with("https://x.pt/imoveis", content_ready_selector="a.propertyItemWrap")
+    browser.get_html.reset_mock()
+    asyncio.run(scraper_service._fetch_html(browser, "https://x.pt/imovel/1"))
+    browser.get_html.assert_awaited_once_with("https://x.pt/imovel/1", content_ready_selector=None)

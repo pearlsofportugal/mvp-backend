@@ -44,6 +44,8 @@ class PlaywrightScraper:
     """
 
     ROBOTS_CACHE_TTL = 3600.0
+    # How long to wait for the selector that signals the page's content is in.
+    content_ready_timeout = 15000
 
     def __init__(
         self,
@@ -267,8 +269,11 @@ class PlaywrightScraper:
     # Main fetch
     # ------------------------------------------------------------------
 
-    async def get_html(self, url: str) -> str | None:
+    async def get_html(self, url: str, content_ready_selector: str | None = None) -> str | None:
         """Render `url` in headless Chromium and return the full page HTML.
+
+        ``content_ready_selector`` overrides the scraper-wide one for this call: a
+        listing page must wait for its listing cards, not for a detail-page title.
 
         Returns None if:
         - URL is blocked by robots.txt
@@ -303,19 +308,20 @@ class PlaywrightScraper:
                 # its HTML would let the parser store "410" as a title.
                 logger.info("HTTP %s for %s — page is gone", self.last_status, url)
                 return None
-            if self.content_ready_selector:
+            ready_selector = content_ready_selector or self.content_ready_selector
+            if ready_selector:
                 # Wait for the actual content, not an idle network — sites that load
                 # listing data via a post-load XHR can sit on open connections
                 # (chat widgets, analytics) that never go idle, forcing the
                 # networkidle wait below to always burn its full timeout.
                 try:
                     await page.wait_for_selector(
-                        self.content_ready_selector, timeout=8000, state="attached"
+                        ready_selector, timeout=self.content_ready_timeout, state="attached"
                     )
                 except Exception:
                     logger.warning(
                         "content_ready_selector %r never appeared on %s — proceeding anyway",
-                        self.content_ready_selector, url,
+                        ready_selector, url,
                     )
             else:
                 # Best-effort: wait briefly for JS to finish. Many sites have persistent

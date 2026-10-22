@@ -158,6 +158,7 @@ class Listing(Base):
         Index("ix_listings_area_useful_m2", "area_useful_m2"),
         Index("ix_listings_source_partner_partner_id", "source_partner", "partner_id"),
         Index("ix_listings_created_at", "created_at"),
+        Index("ix_listings_updated_at_id", "updated_at", "id"),  # contract v2 keyset pagination
     )
 
     def __repr__(self) -> str:

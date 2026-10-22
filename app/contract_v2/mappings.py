@@ -52,6 +52,15 @@ SUBTYPE_LABELS: dict[str, tuple[str, str]] = {
     "rustic_land": ("Terreno rústico", "Rustic land"),
 }
 
+# which subtypes apply to which type (used by /taxonomies)
+SUBTYPES_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "apartment": ("duplex", "penthouse", "studio", "loft"),
+    "house": ("detached", "semi_detached", "duplex"),
+    "villa": ("detached", "semi_detached"),
+    "townhouse": ("semi_detached",),
+    "land": ("urban_land", "rustic_land"),
+}
+
 _VILLA = re.compile(r"\bvilla\b")
 _TOWNHOUSE = re.compile(r"\bem banda\b|\bgeminada\b|\btownhouse\b|\bbanda\b")
 _HOTEL = re.compile(r"\bhotel\b|\bhostel\b|\bpousada\b|\balojamento local\b")

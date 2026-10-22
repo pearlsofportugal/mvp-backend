@@ -111,6 +111,47 @@ class ListingRepository:
     
         return listings, total
     @staticmethod
+    async def list_for_contract(
+        db: AsyncSession,
+        *,
+        updated_since: datetime | None,
+        cursor: tuple[datetime, UUID] | None,
+        limit: int,
+        partner: str | None,
+        status: str | None,
+    ) -> tuple[list[Listing], int, bool]:
+        """One keyset page for the contract v2 feed: (listings, total matching the filters, has_more).
+
+        Ordered by (updated_at, id) ascending so a client can resume with the last item's cursor and
+        never see a gap or a repeat. ``updated_since`` is inclusive (re-delivering the boundary item is
+        harmless for an idempotent upsert, missing it is not). Media and price history are loaded eagerly:
+        both relationships are ``lazy="raise"``.
+        """
+        conds = []
+        if partner:
+            conds.append(Listing.source_partner == partner)
+        if status:
+            conds.append(Listing.status == status)
+        if updated_since is not None:
+            conds.append(Listing.updated_at >= updated_since)
+
+        total = await db.scalar(select(func.count()).select_from(Listing).where(*conds))
+
+        page_conds = list(conds)
+        if cursor is not None:
+            at, ident = cursor
+            page_conds.append(or_(Listing.updated_at > at, and_(Listing.updated_at == at, Listing.id > ident)))
+        query = (
+            select(Listing)
+            .where(*page_conds)
+            .order_by(asc(Listing.updated_at), asc(Listing.id))
+            .limit(limit + 1)
+            .options(selectinload(Listing.media_assets), selectinload(Listing.price_history))
+        )
+        rows = list((await db.execute(query)).scalars().all())
+        return rows[:limit], int(total or 0), len(rows) > limit
+
+    @staticmethod
     async def get_source_partners(db: AsyncSession) -> list[str]:
         result = await db.execute(
             select(Listing.source_partner)

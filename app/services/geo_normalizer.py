@@ -114,6 +114,13 @@ class GeoIndex:
         """Official name of a district (DD), county (DDCC) or parish (DDCCFF) code."""
         return self._names.get(code) if code else None
 
+    def places(self, level: str, parent: str | None = None) -> list[tuple[str, str]]:
+        """[(code, name)] of a level (district | county | parish), optionally under a parent code prefix."""
+        width = {"district": 2, "county": 4, "parish": 6}[level]
+        return sorted(
+            ((code, name) for code, name in self._names.items() if len(code) == width and (not parent or code.startswith(parent))),
+        )
+
     # ── lookups ──────────────────────────────────────────────────────────
 
     @staticmethod

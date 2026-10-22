@@ -82,3 +82,17 @@ def test_every_step_names_an_image_and_has_only_string_arguments():
 def test_user_substitutions_follow_cloud_build_naming():
     for key in _config().get("substitutions", {}):
         assert re.fullmatch(r"_[A-Z0-9_]+", key), key
+
+
+def test_images_are_pinned_to_tags_that_exist():
+    """cloud-sdk:502.0.0-slim was never published, so the Deploy step could not pull its image.
+
+    Checked against https://gcr.io/v2/google.com/cloudsdktool/cloud-sdk/tags/list: 590.0.0-slim exists.
+    """
+    images = {step["name"] for step in _config()["steps"]}
+    assert "gcr.io/google.com/cloudsdktool/cloud-sdk:590.0.0-slim" in images
+    assert "gcr.io/kaniko-project/executor:v1.23.2" in images
+    for image in images:
+        assert not image.endswith((":latest", ":slim")), f"{image}: pin an exact tag"
+    sdk_steps = [step for step in _config()["steps"] if "cloud-sdk" in step["name"]]
+    assert len({step["name"] for step in sdk_steps}) == 1  # Deploy and DeployWorker use the same gcloud

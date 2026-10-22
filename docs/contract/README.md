@@ -46,3 +46,48 @@
 
 ## Migração do formato atual
 `description_clean`/`description` + `enriched_translations` → `content.translations`; `has_*` → `features[]`; `source_partner` → `source.partner_key`; `media_assets` → `media` (acrescentar width/height, `is_cover`).
+
+---
+
+# Implementação no scraper (mvp-backend)
+
+Base: `https://<host>/api/v2`. Todas as rotas pedem o cabeçalho `X-API-Key`, exceto o schema (público) e o `/health` da raiz.
+O formato v1 (`/api/v1`) não foi tocado.
+
+| Rota | Para quê |
+|---|---|
+| `GET /api/v2/listings?updated_since=&cursor=&limit=&partner=&status=` | O feed. `limit` 1–200 (50 por omissão); `status` = `active`, `removed` ou `all` (omissão: `all`, para o plugin arquivar o que desapareceu). |
+| `GET /api/v2/listings/{id}` | Um imóvel (o objeto do contrato, sem envelope). |
+| `GET /api/v2/taxonomies` | Tipos e subtipos, condições, classes energéticas, features (26), estados, tipos de negócio, parceiros. Códigos estáveis; `label_pt`/`label_en`. |
+| `GET /api/v2/taxonomies/places?level=district\|county\|parish&parent=` | Distritos, concelhos e freguesias oficiais (DICOFRE). `parent` = código do distrito (2 dígitos) ou do concelho (4). |
+| `GET /api/v2/schemas/listing/2.0.json` | O JSON Schema (público). |
+| `GET /api/v2/health` | `schema_version`, imóveis ativos/removidos por parceiro e a última execução de cada site. |
+
+O `/health` da raiz também passa a trazer `schema_version`.
+
+## Como sincronizar
+1. Primeira vez: percorrer `GET /listings?limit=200` seguindo `next_cursor` até vir `null`. Guardar o `generated_at` **da primeira página**.
+2. Sincronizações seguintes: `GET /listings?updated_since=<generated_at guardado>` e o mesmo ciclo de cursor.
+3. `updated_since` é **inclusivo** (`>=`); repetir um imóvel é inofensivo, perder um não é possível. A ordem é `(updated_at, id)` ascendente e o cursor guarda ambos, por isso imóveis com o mesmo `updated_at` não se perdem entre páginas.
+4. `status=removed` chega com `removed_at` e `removed_reason: "not_found"`: arquivar/marcar vendido em vez de apagar.
+
+## Regras de mapeamento aplicadas (as que não são óbvias)
+- **Classe energética:** a escala portuguesa acaba no F; um `G` perdido vira `F`. `Isento`/`Exempted` → `exempt`; "em curso" → `pending`; `Unavailable`/vazio → `null` (desconhecido, não uma classe).
+- **Estado (`condition`):** `new`, `under_construction`, `used`, `renovated`, `to_renovate`, `ruin`; texto que não reconhecemos → `null`.
+- **Tipo:** passa sempre pelo vocabulário canónico (`Moradia Isolada`, `Lote`, `Quinta/Herdade`… caem no código certo); `villa`, `townhouse` e `hotel` e os subtipos vêm do texto.
+- **Features:** só entram positivas e com evidência clara — flag `has_*` verdadeira ou texto sem negação nem dúvida ("sem varanda", "possibilidade de piscina" não contam).
+- **Título (5–120) e descrição (≥ 40):** cortados em palavra / sintetizados ("Apartamento T2 em Canidelo") quando a fonte é curta demais; telefones e emails removidos da descrição (`contact_in_text` fica em `quality.issues` se a fonte os tinha).
+- **Fotos:** `thumb_url` por regra de anfitrião; a capa é a primeira foto; `has_watermark` quando o URL tem `/watermark/`; máximo 60; `width`/`height` só quando conhecidos.
+- **Qualidade:** `publishable` = ≥1 foto, preço (ou "sob consulta"), distrito/concelho e descrição `pt` válida. Os `issues` explicam porque não.
+- **Parceiro:** o nome vem de `site_configs.name`, o `website` do `base_url`; `logo_url`, `legal_name`, `ami_licence`, `phone`, `email`, `address` preenchem-se por `PATCH /api/v1/sites/{key}`.
+
+## Fora desta entrega (fase 2)
+`status` `reserved`/`sold`/`rented` (hoje só `active`/`removed`), `canonical_id` e `duplicate_group_id` (duplicados entre agências; vão a `null`) e `width`/`height` reais das fotos.
+
+## Verificar em produção
+```
+set MVP_API_URL=https://<host>/api/v1
+set MVP_API_KEY=<chave>
+python scripts/validate_contract.py
+```
+Percorre o feed todo, valida cada imóvel contra o schema publicado e imprime, por parceiro, violações, imóveis publicáveis e os `quality.issues` mais frequentes. Sai com código 1 se houver violações ou imóveis repetidos entre páginas.

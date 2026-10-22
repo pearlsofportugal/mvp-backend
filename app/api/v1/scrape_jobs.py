@@ -100,8 +100,9 @@ async def trigger_scheduled_job(
 ):
     """Trigger a scheduled scrape job for a site.
 
-    Called by Google Cloud Scheduler. This endpoint blocks until the scraping is
-    fully completed so that Cloud Run allocates full CPU for the task.
+    Called by Google Cloud Scheduler. Returns as soon as the job is dispatched: with
+    ``JOB_DISPATCH_MODE=cloud_tasks`` the scrape runs in a Cloud Run Job, with ``local`` it
+    continues in this process (which then needs CPU allocated outside requests).
     """
     site = await SiteConfigRepository.get_by_key(db, site_key)
     if not site or not site.is_active:

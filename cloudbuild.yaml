@@ -64,14 +64,30 @@ steps:
       # Concurrency dropped 80 -> 3, so raise the instance ceiling to keep
       # service-wide capacity; idle instances above min-instances cost nothing.
       - '--max-instances=10'
-      - '--no-cpu-throttling'
-      # CPU stays allocated outside requests: scrape jobs run in the web instance and would be
-      # starved otherwise; boost speeds up cold starts.
+      # CPU only while a request is being served. Scrapes no longer run in this service: they run in
+      # the Cloud Run Job below (JOB_DISPATCH_MODE=cloud_tasks). With JOB_DISPATCH_MODE=local they
+      # would be starved after the request that started them returns, so set --no-cpu-throttling.
+      - '--cpu-throttling'
       - '--cpu-boost'
       - '--quiet'
     id: Deploy
     waitFor: ['Build']
     entrypoint: gcloud
+  # Keep the scrape worker (Cloud Run Job, same image) in step with the service. Skipped while the
+  # Job does not exist yet (see scripts/setup_scrape_worker.py).
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:502.0.0-slim
+    id: DeployWorker
+    waitFor: ['Deploy']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        if gcloud run jobs describe $_WORKER_JOB_NAME --region=$_DEPLOY_REGION >/dev/null 2>&1; then
+          gcloud run jobs update $_WORKER_JOB_NAME --region=$_DEPLOY_REGION --quiet \
+            --image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+        else
+          echo "Job $_WORKER_JOB_NAME does not exist yet - skipping"
+        fi
 options:
   substitutionOption: ALLOW_LOOSE
   logging: CLOUD_LOGGING_ONLY
@@ -81,6 +97,7 @@ substitutions:
   _AR_REPOSITORY: cloud-run-source-deploy
   _PLATFORM: managed
   _SERVICE_NAME: mvp-backend
+  _WORKER_JOB_NAME: mvp-scrape-worker
   _DEPLOY_REGION: europe-west1
   _AR_HOSTNAME: europe-west1-docker.pkg.dev
 tags:

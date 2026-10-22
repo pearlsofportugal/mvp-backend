@@ -1,7 +1,8 @@
 """Repository — data-access layer for ScrapeJob records."""
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.scrape_job_model import ScrapeJob
@@ -20,6 +21,45 @@ class ScrapeJobRepository:
         return (
             await db.execute(select(ScrapeJob).where(ScrapeJob.idempotency_key == key))
         ).scalar_one_or_none()
+
+    @staticmethod
+    async def fail_abandoned_jobs(
+        db: AsyncSession, site_key: str, *, running_cutoff: datetime, pending_cutoff: datetime
+    ) -> int:
+        """Mark this site's dead jobs as failed so they stop blocking new ones.
+
+        A ``running`` job whose heartbeat is older than *running_cutoff* (or that never had one) belongs to a
+        worker that died; a ``pending`` job created before *pending_cutoff* was never picked up. Without this a
+        crashed Cloud Run Job execution keeps the site "active" forever and every later trigger answers 409.
+        """
+        jobs = (
+            await db.execute(
+                select(ScrapeJob).where(
+                    ScrapeJob.site_key == site_key,
+                    or_(
+                        and_(
+                            ScrapeJob.status == "running",
+                            or_(
+                                ScrapeJob.last_heartbeat_at.is_(None),
+                                ScrapeJob.last_heartbeat_at < running_cutoff,
+                            ),
+                        ),
+                        and_(ScrapeJob.status == "pending", ScrapeJob.created_at < pending_cutoff),
+                    ),
+                )
+            )
+        ).scalars().all()
+        for job in jobs:
+            reason = (
+                "Job marked failed: no heartbeat from its worker."
+                if job.status == "running"
+                else "Job marked failed: it was never started by a worker."
+            )
+            job.mark_failed(reason)
+            job.add_log("error", reason)
+        if jobs:
+            await db.commit()
+        return len(jobs)
 
     @staticmethod
     async def has_active_job(db: AsyncSession, site_key: str) -> bool:

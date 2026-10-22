@@ -100,6 +100,8 @@ def stage_infra(g: Gcloud, a) -> None:
     print("2. Cloud Tasks queue")
     g.run("tasks", "queues", "create", a.queue, "--location", region, "--project", project,
           "--max-attempts", "5", "--min-backoff", "30s")
+    g.run("tasks", "queues", "add-iam-policy-binding", a.queue, "--location", region, "--project", project,
+          "--member", f"serviceAccount:{sa}", "--role", "roles/cloudtasks.enqueuer", note="[only this queue]")
 
     print("3. Service account that Cloud Tasks uses to call the API")
     invoker = f"{INVOKER}@{project}.iam.gserviceaccount.com"
@@ -107,10 +109,7 @@ def stage_infra(g: Gcloud, a) -> None:
     g.run("run", "services", "add-iam-policy-binding", a.service, "--region", region, "--project", project,
           "--member", f"serviceAccount:{invoker}", "--role", "roles/run.invoker")
 
-    print("4. Permissions of the API service account")
-    for role in ("roles/cloudtasks.enqueuer", "roles/run.developer"):
-        g.run("projects", "add-iam-policy-binding", project, "--member", f"serviceAccount:{sa}", "--role", role,
-              "--condition=None")
+    print("4. Permissions of the API service account (enqueue: see 2; run the Job: see 6)")
     for target in (sa, invoker):  # act as itself (run the Job) and as the OIDC identity of the tasks
         g.run("iam", "service-accounts", "add-iam-policy-binding", target, "--project", project,
               "--member", f"serviceAccount:{sa}", "--role", "roles/iam.serviceAccountUser")
@@ -143,6 +142,9 @@ def stage_infra(g: Gcloud, a) -> None:
     finally:
         if tmp:
             os.unlink(tmp)
+    # run.developer includes run.jobs.runWithOverrides, needed to pass --scrape-job-id; scoped to this Job only.
+    g.run("run", "jobs", "add-iam-policy-binding", a.job, "--region", region, "--project", project,
+          "--member", f"serviceAccount:{sa}", "--role", "roles/run.developer", note="[only this Job]")
 
     print("\nStage 1 done: nothing changed for traffic. Test, then run with --activate.")
 

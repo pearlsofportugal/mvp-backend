@@ -53,7 +53,8 @@ def test_service_info_copies_plain_env_and_secret_references():
 def test_infra_dry_run_prints_the_expected_commands(capsys):
     out = _dry_run(mod.stage_infra, capsys)
     assert "tasks queues create scrape-jobs" in out
-    assert "roles/cloudtasks.enqueuer" in out and "roles/run.developer" in out
+    assert "tasks queues add-iam-policy-binding scrape-jobs" in out and "roles/cloudtasks.enqueuer" in out
+    assert "run jobs add-iam-policy-binding mvp-scrape-worker" in out and "roles/run.developer" in out
     assert "roles/run.invoker" in out
     assert "secrets create scrape-worker-dispatch-token" in out
     assert "run jobs deploy mvp-scrape-worker" in out
@@ -82,3 +83,8 @@ def test_activate_points_the_api_at_the_job(capsys):
 def test_rollback_restores_local_dispatch_and_cpu(capsys):
     out = _dry_run(mod.stage_rollback, capsys)
     assert "JOB_DISPATCH_MODE=local" in out and "--no-cpu-throttling" in out
+
+
+def test_dangerous_roles_are_never_granted_project_wide(capsys):
+    out = _dry_run(mod.stage_infra, capsys)
+    assert "projects add-iam-policy-binding" not in out

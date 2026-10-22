@@ -38,7 +38,7 @@ steps:
       - $_SERVICE_NAME
       - '--platform=managed'
       - '--image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
-      - '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$BUILD_TRIGGER_ID'
+      - '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID'
       - '--region=$_DEPLOY_REGION'
       # Sized for the synchronous /api/v1/ingest path, which renders pages in
       # headless Chromium (always, for eGO sites). See docs/ego-adapter.md.
@@ -98,6 +98,7 @@ substitutions:
   _PLATFORM: managed
   _SERVICE_NAME: mvp-backend
   _WORKER_JOB_NAME: mvp-scrape-worker
+  _TRIGGER_ID: manual  # the trigger overrides it; there is no built-in for the trigger id
   _DEPLOY_REGION: europe-west1
   _AR_HOSTNAME: europe-west1-docker.pkg.dev
 tags:

@@ -7,14 +7,16 @@ Schedule → cron conversion:
   interval_minutes < 60       → */N * * * *        (e.g. 30 → */30 * * * *)
   interval_minutes == 60      → 0 * * * *
   interval_minutes % 60 == 0  → 0 */H * * *        (e.g. 120 → 0 */2 * * *)
-  interval_minutes >= 1440    → M H * * *  anchored to start_at wall-clock time
+  interval_minutes >= 1440    → M H * * *  anchored to start_at wall-clock time (in schedule_timezone)
+  interval_minutes % 10080 == 0 → M H * * D  weekly, on start_at's weekday
   other                       → best-effort hourly approximation
 
 When GOOGLE_CLOUD_PROJECT is not set (local dev), all methods are no-ops.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.logging import get_logger
 
@@ -27,11 +29,41 @@ def _job_resource_name(site_key: str, project: str, location: str) -> str:
     return f"projects/{project}/locations/{location}/jobs/{_JOB_NAME_PREFIX}{site_key}"
 
 
-def _to_cron(interval_minutes: int, start_at: datetime | None) -> str:
-    """Convert interval_minutes + optional start_at to a cron expression."""
-    h = start_at.hour if start_at else 0
-    m = start_at.minute if start_at else 0
+_WEEK_MINUTES = 7 * 24 * 60
 
+
+def _local_start(start_at: datetime | None, tz_name: str | None) -> datetime | None:
+    """*start_at* expressed in the schedule's timezone (the zone the cron is evaluated in).
+
+    The site stores ``schedule_start_at`` as an aware UTC timestamp while the Cloud Scheduler
+    job is created with ``time_zone=schedule_timezone``, so the hour/weekday must be read in
+    that zone. Without a timezone (or an unknown one) the value is used as stored.
+    """
+    if start_at is None or not tz_name:
+        return start_at
+    try:
+        zone = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return start_at
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    return start_at.astimezone(zone)
+
+
+def _to_cron(interval_minutes: int, start_at: datetime | None, tz_name: str | None = None) -> str:
+    """Convert interval_minutes + optional start_at to a cron expression.
+
+    ``tz_name`` is the timezone the cron will be evaluated in (``schedule_timezone``).
+    """
+    local = _local_start(start_at, tz_name)
+    h = local.hour if local else 0
+    m = local.minute if local else 0
+
+    if interval_minutes >= _WEEK_MINUTES and interval_minutes % _WEEK_MINUTES == 0:
+        # Weekly — same weekday and time as start_at (cron: 0 = Sunday). Longer multiples of a
+        # week cannot be expressed in cron and run weekly.
+        weekday = (local.weekday() + 1) % 7 if local else 0
+        return f"{m} {h} * * {weekday}"
     if interval_minutes >= 1440:
         # Daily — fire once at the configured wall-clock time
         return f"{m} {h} * * *"
@@ -127,6 +159,7 @@ class CloudSchedulerService:
         cron = _to_cron(
             site.schedule_interval_minutes,
             site.schedule_start_at,
+            site.schedule_timezone,
         )
 
         job = scheduler_v1.Job(

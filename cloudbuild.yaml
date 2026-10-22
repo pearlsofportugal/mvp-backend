@@ -5,7 +5,7 @@ steps:
     args:
       - -c
       - |
-        pip install -q -e ".[dev]" &&
+        pip install -q -c constraints.txt -e ".[dev]" &&
         python -m pytest tests/ -q --tb=short -x
     env:
       # Settings.database_url_sync has no default — without it pydantic-settings
@@ -65,6 +65,9 @@ steps:
       # service-wide capacity; idle instances above min-instances cost nothing.
       - '--max-instances=10'
       - '--no-cpu-throttling'
+      # CPU stays allocated outside requests: scrape jobs run in the web instance and would be
+      # starved otherwise; boost speeds up cold starts.
+      - '--cpu-boost'
       - '--quiet'
     id: Deploy
     waitFor: ['Build']

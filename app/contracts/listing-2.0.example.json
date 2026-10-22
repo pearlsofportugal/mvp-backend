@@ -1,0 +1,173 @@
+{
+  "schema_version": "2.0",
+  "id": "3f6c1d1e-8a52-4b0e-9d2a-5c1f0b7e9a11",
+  "external_ref": "1201369",
+  "canonical_id": null,
+  "duplicate_group_id": null,
+  "status": "active",
+  "removed_at": null,
+  "removed_reason": null,
+  "first_seen_at": "2026-09-30T10:12:00Z",
+  "last_seen_at": "2026-10-19T04:00:00Z",
+  "published_at": "2026-09-28T00:00:00Z",
+  "updated_at": "2026-10-12T08:30:00Z",
+  "content_hash": "sha1:9b2c7a0f",
+  "source": {
+    "partner_key": "realkey",
+    "partner_id": "rk-221",
+    "url": "https://example.com/anuncio/1201369",
+    "is_exported_to_imodigi": true
+  },
+  "partner": {
+    "key": "realkey",
+    "name": "Realkey",
+    "legal_name": null,
+    "ami_licence": null,
+    "logo_url": "https://cdn.example.com/partners/realkey.png",
+    "website": "https://realkey.pt",
+    "phone": null,
+    "email": null,
+    "address": null
+  },
+  "business_type": "sale",
+  "property_type": {
+    "code": "apartment",
+    "label": "Apartamento",
+    "subtype_code": null,
+    "subtype_label": null
+  },
+  "condition": "used",
+  "typology": {
+    "label": "T2",
+    "main": 2,
+    "extra": 0
+  },
+  "location": {
+    "district": {
+      "code": "13",
+      "name": "Porto",
+      "slug": "porto"
+    },
+    "county": {
+      "code": "1312",
+      "name": "Porto",
+      "slug": "porto"
+    },
+    "parish": {
+      "code": "131215",
+      "name": "Canidelo",
+      "slug": "canidelo"
+    },
+    "street": null,
+    "postal_code": null,
+    "display_address": "Canidelo, Vila Nova de Gaia"
+  },
+  "price": {
+    "amount": 245000,
+    "currency": "EUR",
+    "period": null,
+    "on_request": false,
+    "negotiable": null,
+    "previous_amount": null,
+    "per_m2": 2722
+  },
+  "areas": {
+    "useful_m2": 90,
+    "gross_m2": 105,
+    "land_m2": null,
+    "terrace_m2": null
+  },
+  "rooms": {
+    "bedrooms": 2,
+    "bathrooms": 2,
+    "rooms_total": 5,
+    "parking_spaces": 1,
+    "floor": "3",
+    "floors_total": 6
+  },
+  "building": {
+    "construction_year": 2008,
+    "energy_class": "C",
+    "energy_certificate_ref": null
+  },
+  "features": [
+    "garage",
+    "elevator",
+    "balcony",
+    "air_conditioning",
+    "equipped_kitchen"
+  ],
+  "content": {
+    "default_language": "pt",
+    "is_enriched": true,
+    "quality_score": 82,
+    "translations": {
+      "pt": {
+        "title": "Apartamento T2 em Canidelo com garagem",
+        "description": "Apartamento T2 com 90 m2 em Canidelo, 3.o andar com elevador, varanda e lugar de garagem. Cozinha equipada e ar condicionado. Zona com comercio, escolas e transportes.",
+        "meta_description": "Apartamento T2 de 90 m2 em Canidelo com garagem e varanda. 245.000 EUR.",
+        "highlights": [
+          "Garagem",
+          "Varanda",
+          "Elevador"
+        ]
+      },
+      "en": {
+        "title": "2-bedroom apartment in Canidelo with garage",
+        "description": "2-bedroom apartment of 90 sqm in Canidelo, 3rd floor with lift, balcony and garage space. Equipped kitchen and air conditioning. Close to shops, schools and transport.",
+        "meta_description": "90 sqm 2-bed apartment in Canidelo with garage and balcony. EUR 245,000.",
+        "highlights": [
+          "Garage",
+          "Balcony",
+          "Lift"
+        ]
+      }
+    }
+  },
+  "media": [
+    {
+      "id": "m1",
+      "type": "photo",
+      "url": "https://imgs.centralimo.pt/abc/1201369_1.jpg",
+      "thumb_url": "https://imgs.centralimo.pt/abc/1201369_1_s.jpg",
+      "width": 1600,
+      "height": 1200,
+      "bytes": null,
+      "mime": "image/jpeg",
+      "position": 0,
+      "is_cover": true,
+      "caption": null,
+      "alt": {
+        "pt": "Sala",
+        "en": "Living room"
+      },
+      "has_watermark": false,
+      "hotlink_ok": true,
+      "checksum": null
+    },
+    {
+      "id": "m2",
+      "type": "photo",
+      "url": "https://imgs.centralimo.pt/abc/1201369_2.jpg",
+      "thumb_url": null,
+      "width": 1600,
+      "height": 1200,
+      "bytes": null,
+      "mime": "image/jpeg",
+      "position": 1,
+      "is_cover": false,
+      "caption": null,
+      "alt": null,
+      "has_watermark": false,
+      "hotlink_ok": true,
+      "checksum": null
+    }
+  ],
+  "quality": {
+    "score": 82,
+    "issues": [
+      "missing_features"
+    ],
+    "publishable": true
+  }
+}

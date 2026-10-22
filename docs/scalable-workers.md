@@ -23,9 +23,13 @@ CLOUD_RUN_SCRAPE_JOB_NAME=mvp-scrape-worker
 ```
 
 O endpoint interno inicia uma execução do Cloud Run Job e passa o UUID como
-argumento. O serviço API deve usar ingress interno e o service account de
-Cloud Tasks precisa de `run.invoker`; a identidade que chama a API Cloud Run
-precisa de `run.developer` para iniciar execuções.
+argumento. O Job tem de ser criado com `--command python,-m,app.worker`, para a execução
+só acrescentar `--scrape-job-id`. A API **não** pode ter ingress interno: o Cloud Tasks
+chama-a pela internet, por isso o endpoint fica protegido pelo cabeçalho
+`X-Worker-Dispatch-Token` e pelo token OIDC da conta `WORKER_DISPATCH_SERVICE_ACCOUNT`
+(que precisa de `run.invoker` no serviço). A conta do serviço precisa de
+`cloudtasks.enqueuer`, de `run.developer` e de `iam.serviceAccountUser` sobre si própria e
+sobre a conta OIDC. `scripts/setup_scrape_worker.py` cria tudo isto; ver `docs/deploy.md`.
 
 ## Operação
 

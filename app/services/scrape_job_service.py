@@ -1,9 +1,11 @@
 """Service — business logic for ScrapeJob lifecycle management."""
 import math
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.exceptions import AppException, JobAlreadyRunningError, NotFoundError
 from app.models.scrape_job_model import ScrapeJob
 from app.repositories.scrape_job_repository import ScrapeJobRepository
@@ -20,6 +22,14 @@ class ScrapeJobService:
             existing = await ScrapeJobRepository.get_by_idempotency_key(db, payload.idempotency_key)
             if existing:
                 return existing
+
+        now = datetime.now(timezone.utc)
+        await ScrapeJobRepository.fail_abandoned_jobs(
+            db,
+            payload.site_key,
+            running_cutoff=now - timedelta(seconds=settings.scrape_job_stale_after_seconds),
+            pending_cutoff=now - timedelta(seconds=settings.scrape_job_pending_timeout_seconds),
+        )
 
         if await ScrapeJobRepository.has_active_job(db, payload.site_key):
             raise JobAlreadyRunningError(

@@ -9,12 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 
 # Gera wheels — camada cacheada enquanto pyproject.toml não mudar
 RUN pip install --upgrade pip && \
-    pip wheel --no-cache-dir --wheel-dir /wheels . && \
-    pip install --no-cache-dir playwright && \
+    pip wheel -c constraints.txt --no-cache-dir --wheel-dir /wheels . && \
+    pip install -c constraints.txt --no-cache-dir playwright && \
     playwright install chromium --with-deps
 
 # Código só depois — não invalida o cache de dependências
@@ -39,7 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Instalar binários do Playwright antes de copiar do builder — esta camada
 # não depende do código da app, por isso fica cacheada entre builds.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN pip install playwright && \
+# Same playwright version as the library installed into /install, so the Chromium
+# downloaded here is the revision that version expects.
+COPY constraints.txt /tmp/constraints.txt
+RUN pip install -c /tmp/constraints.txt playwright && \
     playwright install chromium --with-deps && \
     chmod -R a+rx /opt/ms-playwright
 
@@ -47,6 +50,10 @@ COPY --from=builder /install /usr/local
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser alembic ./alembic
+
+# Smoke test: if the app cannot be imported with the installed dependencies (for example
+# an argument removed in a newer release) the build fails here instead of at container start.
+RUN DATABASE_URL=postgresql+asyncpg://smoke:smoke@localhost/smoke DATABASE_URL_SYNC=postgresql://smoke:smoke@localhost/smoke API_KEY=smoke python -c "import app.main"
 # COPY --chown=appuser:appuser entrypoint.sh ./
 
 USER appuser

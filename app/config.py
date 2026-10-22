@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     request_timeout: int = 120
     playwright_timeout: int = 60
     scrape_job_stale_after_seconds: int = 300
+    # A job that never left 'pending' (Cloud Task or Cloud Run Job failed to start) is abandoned after this.
+    scrape_job_pending_timeout_seconds: int = 3600
     job_dispatch_mode: Literal["local", "cloud_tasks"] = "local"
     cloud_tasks_project: str = ""
     cloud_tasks_location: str = "europe-west1"

@@ -27,7 +27,7 @@ steps:
       - '--cache=true'
       - '--cache-ttl=24h'
       - '--cache-repo=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$_SERVICE_NAME-cache'
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:502.0.0-slim
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:590.0.0-slim
     args:
       - run
       - services
@@ -72,7 +72,7 @@ steps:
     entrypoint: gcloud
   # Keep the scrape worker (Cloud Run Job, same image) in step with the service. Skipped while the
   # Job does not exist yet (see scripts/setup_scrape_worker.py).
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:502.0.0-slim
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:590.0.0-slim
     id: DeployWorker
     waitFor: ['Deploy']
     entrypoint: bash

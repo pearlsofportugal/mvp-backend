@@ -1,0 +1,782 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pearlsofportugal:mvp-backend:listing:2.0",
+  "title": "Pearls of Portugal - Listing v2",
+  "description": "Contrato entre o scraper (mvp-backend) e o plugin Pearls Listings Sync (WordPress/Houzez). Regras: (1) so se acrescentam campos (nunca se mudam nem se removem na mesma versao maior); (2) null = desconhecido, false/0 = confirmado que nao tem; (3) texto sem HTML, sem contactos e sem varias linguas coladas; (4) URLs de media estaveis, https e no maior tamanho disponivel.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "status",
+    "updated_at",
+    "source",
+    "business_type",
+    "property_type",
+    "location",
+    "price",
+    "content",
+    "media"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "const": "2.0",
+      "description": "Versao do contrato. Maior = quebra compatibilidade; menor = so acrescenta."
+    },
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "ID estavel do imovel no mvp-backend. Nunca muda, nem se o anuncio for republicado."
+    },
+    "external_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Referencia do anuncio na origem (ex.: 1201369)."
+    },
+    "canonical_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid",
+      "description": "Se for duplicado de outro imovel (mesmo imovel em varias agencias), o id do principal. null se for o principal."
+    },
+    "duplicate_group_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Agrupa os anuncios do mesmo imovel fisico."
+    },
+    "status": {
+      "enum": [
+        "active",
+        "reserved",
+        "sold",
+        "rented",
+        "removed"
+      ],
+      "description": "Estado atual. 'removed' = desapareceu da origem; o plugin passa-o a vendido/arrendado."
+    },
+    "removed_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "removed_reason": {
+      "enum": [
+        "not_found",
+        "sold",
+        "rented",
+        "withdrawn",
+        "duplicate",
+        "invalid",
+        null
+      ]
+    },
+    "first_seen_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_seen_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "published_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "Data de publicacao na origem, se existir."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "So muda quando o CONTEUDO publico muda (preco, texto, fotos, estado). O plugin usa isto para saltar imoveis sem alteracoes."
+    },
+    "content_hash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Hash do conteudo publico (opcional, ajuda a detetar alteracoes reais)."
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "partner_key",
+        "url"
+      ],
+      "properties": {
+        "partner_key": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$",
+          "description": "Slug estavel da agencia de origem (ex.: realkey, imobiliariaprp, t2mais1). Nunca renomear: o plugin liga a agencia por esta chave."
+        },
+        "partner_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Anuncio original (para 'ver na origem' e para reconciliar)."
+        },
+        "is_exported_to_imodigi": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Compatibilidade com o site atual."
+        }
+      }
+    },
+    "partner": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Dados da agencia de origem. Evita ter nomes/logos escritos a mao no WordPress.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "description": "Nome para mostrar (ex.: Imobiliaria PRP, T2+1)."
+        },
+        "legal_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ami_licence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "logo_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "website": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "phone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email"
+        },
+        "address": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "business_type": {
+      "enum": [
+        "sale",
+        "rent",
+        "trespasse"
+      ]
+    },
+    "property_type": {
+      "type": "object",
+      "required": [
+        "code",
+        "label"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "apartment",
+            "house",
+            "villa",
+            "townhouse",
+            "land",
+            "farm",
+            "commercial",
+            "office",
+            "shop",
+            "warehouse",
+            "garage",
+            "building",
+            "hotel",
+            "other"
+          ],
+          "description": "Codigo normalizado e estavel. E o que o plugin usa para tipos, URLs e SEO."
+        },
+        "label": {
+          "type": "string",
+          "description": "Texto original/PT (ex.: Moradia Geminada)."
+        },
+        "subtype_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Ex.: detached, semi_detached, duplex, penthouse, studio, loft, urban_land, rustic_land."
+        },
+        "subtype_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "condition": {
+      "enum": [
+        "new",
+        "under_construction",
+        "used",
+        "renovated",
+        "to_renovate",
+        "ruin",
+        null
+      ]
+    },
+    "typology": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Tipologia estruturada. Evita ter de adivinhar 'T3+1' a partir do titulo.",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "T0, T1, T2, T3+1..."
+        },
+        "main": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extra": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "required": [
+        "district",
+        "county"
+      ],
+      "properties": {
+        "district": {
+          "$ref": "#/$defs/place"
+        },
+        "county": {
+          "$ref": "#/$defs/place"
+        },
+        "parish": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/place"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "street": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rua (so se a origem a publica)."
+        },
+        "postal_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^\\d{4}-\\d{3}$"
+        },
+        "display_address": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Texto pronto para mostrar (ex.: Paranhos, Porto)."
+        }
+      }
+    },
+    "price": {
+      "type": "object",
+      "required": [
+        "currency"
+      ],
+      "properties": {
+        "amount": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "currency": {
+          "const": "EUR"
+        },
+        "period": {
+          "enum": [
+            "month",
+            null
+          ],
+          "description": "'month' em arrendamento."
+        },
+        "on_request": {
+          "type": "boolean",
+          "default": false,
+          "description": "Preco sob consulta (amount = null)."
+        },
+        "negotiable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "previous_amount": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "per_m2": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "areas": {
+      "type": "object",
+      "properties": {
+        "useful_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "gross_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "land_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "terrace_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "rooms": {
+      "type": "object",
+      "properties": {
+        "bedrooms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 50
+        },
+        "bathrooms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 50
+        },
+        "rooms_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "parking_spaces": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "floor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Andar (ex.: 3, r/c, cave)."
+        },
+        "floors_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "building": {
+      "type": "object",
+      "properties": {
+        "construction_year": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1000,
+          "maximum": 2100
+        },
+        "energy_class": {
+          "enum": [
+            "A+",
+            "A",
+            "B",
+            "B-",
+            "C",
+            "D",
+            "E",
+            "F",
+            "exempt",
+            "pending",
+            null
+          ],
+          "description": "Escala PT. O plugin mapeia para A-G do Houzez."
+        },
+        "energy_certificate_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "features": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Caracteristicas como CODIGOS controlados (ver /taxonomies). O plugin cria o termo no Houzez e traduz o rotulo. Preferir isto aos has_*.",
+      "items": {
+        "enum": [
+          "garage",
+          "parking",
+          "elevator",
+          "balcony",
+          "terrace",
+          "garden",
+          "pool",
+          "air_conditioning",
+          "central_heating",
+          "fireplace",
+          "solar_panels",
+          "storage_room",
+          "furnished",
+          "equipped_kitchen",
+          "sea_view",
+          "river_view",
+          "mountain_view",
+          "gated_community",
+          "concierge",
+          "accessible",
+          "barbecue",
+          "playground",
+          "gym",
+          "security_alarm",
+          "video_intercom",
+          "double_glazing"
+        ]
+      }
+    },
+    "content": {
+      "type": "object",
+      "required": [
+        "default_language",
+        "translations"
+      ],
+      "properties": {
+        "default_language": {
+          "enum": [
+            "pt",
+            "en",
+            "es",
+            "fr",
+            "de"
+          ]
+        },
+        "is_enriched": {
+          "type": "boolean"
+        },
+        "quality_score": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "translations": {
+          "type": "object",
+          "description": "Uma entrada por idioma. Cada texto e UMA lingua, sem HTML, sem telefones/emails, sem 'nota para agentes' e sem outras linguas coladas.",
+          "minProperties": 1,
+          "propertyNames": {
+            "enum": [
+              "pt",
+              "en",
+              "es",
+              "fr",
+              "de"
+            ]
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "title",
+              "description"
+            ],
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 120
+              },
+              "description": {
+                "type": "string",
+                "minLength": 40
+              },
+              "meta_description": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 170
+              },
+              "highlights": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Pontos fortes curtos (opcional)."
+              }
+            }
+          }
+        }
+      }
+    },
+    "media": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "url",
+          "position"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "photo",
+              "floorplan",
+              "video",
+              "virtual_tour",
+              "document"
+            ]
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://",
+            "description": "Original/maior tamanho disponivel. Estavel (nao muda entre execucoes). Sem sufixos de miniatura (_s, _m, thumb)."
+          },
+          "thumb_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "bytes": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "is_cover": {
+            "type": "boolean",
+            "default": false
+          },
+          "caption": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "alt": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Texto alternativo por lingua (opcional).",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "has_watermark": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "A foto vem com marca de agua de terceiros."
+          },
+          "hotlink_ok": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "A origem permite ligar diretamente a imagem."
+          },
+          "checksum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Para detetar fotos repetidas ou alteradas."
+          }
+        }
+      },
+      "description": "Fotos e outros ficheiros. Vazio so quando quality.issues contem no_photos (nesse caso quality.publishable=false)."
+    },
+    "quality": {
+      "type": "object",
+      "description": "Avaliacao automatica feita pelo scraper para o plugin decidir (publicar, rascunho, rever).",
+      "properties": {
+        "score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "missing_features",
+              "no_photos",
+              "few_photos",
+              "low_res_photos",
+              "watermarked_photos",
+              "price_missing",
+              "area_missing",
+              "description_short",
+              "description_mixed_languages",
+              "contact_in_text",
+              "possible_duplicate",
+              "address_unmatched"
+            ]
+          }
+        },
+        "publishable": {
+          "type": "boolean",
+          "description": "true se cumpre o minimo para publicar sem rever."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "place": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Codigo oficial (DICOFRE/INE): distrito 2 digitos, concelho 4, freguesia 6. Resolve acentos e variantes de nome."
+        },
+        "name": {
+          "type": "string",
+          "description": "Nome oficial com acentos (ex.: Paços de Ferreira)."
+        },
+        "slug": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z0-9-]+$"
+        }
+      }
+    }
+  }
+}

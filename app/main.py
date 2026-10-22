@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.deps import RequireApiKey
+from app.contract_v2 import SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION
 from app.api.responses import ok
 from app.api.v1.ai_enrichment import router as ai_enrichment_router
 from app.api.v1.dashboard import router as dashboard_router
@@ -18,6 +19,8 @@ from app.api.v1.ingest import router as ingest_router
 from app.api.v1.listings import router as listings_router
 from app.api.v1.scrape_jobs import router as jobs_router
 from app.api.v1.sites import router as sites_router
+from app.api.v2 import public_router as contract_public_router
+from app.api.v2 import router as contract_router
 from app.api.internal import router as internal_router
 from app.config import settings
 from app.core.exceptions import (
@@ -280,6 +283,13 @@ def create_app() -> FastAPI:
         tags=["dashboard"],
         dependencies=auth_dependencies,
     )
+    application.include_router(
+        contract_router,
+        prefix="/api/v2",
+        tags=["contract-v2"],
+        dependencies=auth_dependencies,
+    )
+    application.include_router(contract_public_router, prefix="/api/v2", tags=["contract-v2"])
     application.include_router(internal_router, prefix="/internal", tags=["internal"])
 
     # ── Public endpoints ───────────────────────────────────────────────────
@@ -305,6 +315,7 @@ def create_app() -> FastAPI:
                 status="healthy" if is_healthy else "unhealthy",
                 version=settings.app_version,
                 database=db_status,
+                schema_version=CONTRACT_SCHEMA_VERSION,
             ),
             "Health check completed",
             request,

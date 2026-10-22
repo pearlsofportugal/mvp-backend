@@ -50,6 +50,15 @@ class SiteConfig(Base):
     schedule_start_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     schedule_max_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Partner profile exposed by the contract v2 `partner` object (all optional)
+    logo_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    legal_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    ami_licence: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    website: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

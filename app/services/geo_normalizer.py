@@ -69,6 +69,7 @@ class GeoIndex:
         self._parishes: dict[str, dict[str, tuple[str, str]]] = {}         # county_code -> key -> (code6, name)
         self._counties_global: dict[str, list[tuple[str, str]]] = {}       # key -> [(code4, name)]
         self._district_names: dict[str, str] = {}
+        self._names: dict[str, str] = {}  # official code (2, 4 or 6 digits) -> official name
         for row in rows:
             code = (row.get("dicofre") or "").strip().zfill(6)
             if len(code) != 6 or not code.isdigit():
@@ -76,14 +77,17 @@ class GeoIndex:
             d_code, c_code = code[:2], code[:4]
             d_name, c_name, p_name = (row.get("distrito") or "").strip(), (row.get("concelho") or "").strip(), (row.get("freguesia") or "").strip()
             if d_name:
+                self._names.setdefault(d_code, d_name)
                 self._districts.setdefault(_key(d_name), (d_code, d_name))
                 self._district_names.setdefault(d_code, d_name)
             if c_name:
+                self._names.setdefault(c_code, c_name)
                 self._counties.setdefault(d_code, {}).setdefault(_key(c_name), (c_code, c_name))
                 entries = self._counties_global.setdefault(_key(c_name), [])
                 if (c_code, c_name) not in entries:
                     entries.append((c_code, c_name))
             if p_name:
+                self._names.setdefault(code, p_name)
                 self._parishes.setdefault(c_code, {}).setdefault(_key(p_name), (code, p_name))
         self.size = sum(len(v) for v in self._parishes.values())
         self._add_union_aliases()
@@ -105,6 +109,17 @@ class GeoIndex:
             for alias, entries in aliases.items():
                 if alias not in table and len({code for code, _ in entries}) == 1:
                     table[alias] = entries[0]
+
+    def name_for_code(self, code: str | None) -> str | None:
+        """Official name of a district (DD), county (DDCC) or parish (DDCCFF) code."""
+        return self._names.get(code) if code else None
+
+    def places(self, level: str, parent: str | None = None) -> list[tuple[str, str]]:
+        """[(code, name)] of a level (district | county | parish), optionally under a parent code prefix."""
+        width = {"district": 2, "county": 4, "parish": 6}[level]
+        return sorted(
+            ((code, name) for code, name in self._names.items() if len(code) == width and (not parent or code.startswith(parent))),
+        )
 
     # ── lookups ──────────────────────────────────────────────────────────
 

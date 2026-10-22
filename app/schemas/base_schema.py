@@ -51,6 +51,7 @@ class SystemHealth(BaseModel):
 
     status: Literal["healthy", "unhealthy"] = Field(..., description="Overall system health status.")
     version: str = Field(..., description="Application version string.")
+    schema_version: str | None = Field(None, description="Version of the listing contract served under /api/v2.")
     database: Literal["ok", "degraded", "unreachable"] = Field(
         "ok",
         description="Database connectivity status.",

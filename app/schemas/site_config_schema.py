@@ -116,6 +116,15 @@ class SiteConfigBase(BaseModel):
     schedule_start_url: str | None = Field(None, description="URL to begin scraping on scheduled runs (None = falls back to base_url).")
     schedule_max_pages: int | None = Field(None, ge=1, le=500, description="Max pages per scheduled run (None = uses server default).")
 
+    # ── Partner profile (contract v2 `partner` object) ─────────────────────
+    logo_url: str | None = Field(None, max_length=2048, description="Agency logo URL (https).")
+    legal_name: str | None = Field(None, max_length=200)
+    ami_licence: str | None = Field(None, max_length=50, description="AMI licence number.")
+    website: str | None = Field(None, max_length=2048, description="Agency website (default: origin of base_url).")
+    phone: str | None = Field(None, max_length=50)
+    email: str | None = Field(None, max_length=255)
+    address: str | None = Field(None, max_length=500)
+
     @field_validator("schedule_timezone")
     @classmethod
     def _validate_timezone(cls, v: str) -> str:
@@ -178,6 +187,13 @@ class SiteConfigUpdate(BaseModel):
     schedule_timezone: str | None = None
     schedule_start_url: str | None = None
     schedule_max_pages: int | None = Field(None, ge=1, le=500)
+    logo_url: str | None = Field(None, max_length=2048)
+    legal_name: str | None = Field(None, max_length=200)
+    ami_licence: str | None = Field(None, max_length=50)
+    website: str | None = Field(None, max_length=2048)
+    phone: str | None = Field(None, max_length=50)
+    email: str | None = Field(None, max_length=255)
+    address: str | None = Field(None, max_length=500)
 
     @field_validator("schedule_timezone")
     @classmethod

@@ -53,3 +53,32 @@ def test_steps_run_in_the_expected_order():
     steps = _config()["steps"]
     assert [s["id"] for s in steps] == ["Test", "Build", "Deploy", "DeployWorker"]
     assert steps[3]["waitFor"] == ["Deploy"]
+
+
+def test_every_volume_is_shared_by_at_least_two_steps():
+    """Cloud Build refuses to start: 'Volume "pip-cache" is used only once, need twice or more'."""
+    uses: dict[str, int] = {}
+    for step in _config()["steps"]:
+        for volume in step.get("volumes", []):
+            uses[volume["name"]] = uses.get(volume["name"], 0) + 1
+    assert all(count >= 2 for count in uses.values()), uses
+
+
+def test_step_ids_are_unique_and_wait_for_points_at_real_steps():
+    steps = _config()["steps"]
+    ids = [step["id"] for step in steps]
+    assert len(ids) == len(set(ids))
+    for step in steps:
+        assert set(step.get("waitFor", [])) <= set(ids) | {"-"}, step["id"]
+
+
+def test_every_step_names_an_image_and_has_only_string_arguments():
+    for step in _config()["steps"]:
+        assert isinstance(step["name"], str) and step["name"]
+        assert all(isinstance(arg, str) for arg in step.get("args", [])), step["id"]
+        assert all(isinstance(item, str) for item in step.get("env", [])), step["id"]
+
+
+def test_user_substitutions_follow_cloud_build_naming():
+    for key in _config().get("substitutions", {}):
+        assert re.fullmatch(r"_[A-Z0-9_]+", key), key

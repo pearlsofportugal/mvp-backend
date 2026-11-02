@@ -334,6 +334,27 @@ class TestParseListingPage:
         data = parse_listing_page(html, "https://example.com/p/4", selectors, "direct")
         assert data["property_type"] == "Apartamento"
 
+    def test_direct_mode_reads_ego_energy_class_icon_scoped_to_its_detail_row(self):
+        """bassolioporto: the energy row is an icon only; a related-listings card also carries one."""
+        selector = (
+            "li.detailItem:has(span.label:-soup-contains(\"Categoria Energética\")) i.energyClass"
+        )
+        template = """
+        <html><body>
+            <div class="propertyRelatedPanel"><i class="energyClass F"></i></div>
+            <ul class="propertyDetails">
+                <li class="detailItem"><span class="label">Categoria Energética</span>
+                    <span class="value"><i class="energyClass {cls}"></i></span></li>
+            </ul>
+        </body></html>
+        """
+        for css_class, expected in (("A", "A"), ("APlus", "A+"), ("C", "C")):
+            data = parse_listing_page(
+                template.format(cls=css_class), "https://example.com/p/5",
+                {"energy_certificate_selector": selector}, "direct",
+            )
+            assert data["energy_certificate"] == expected
+
     def test_direct_mode_extracts_summary_pairs_with_value_elements(self):
         html = """
         <html><body>

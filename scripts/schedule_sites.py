@@ -59,6 +59,7 @@ SLOTS: dict[str, tuple[tuple[int, int, int], str]] = {
     "escolhacerta": (MONDAY, "06:00"),
     "t2mais1": (MONDAY, "06:15"),
     "imoantlantico": (MONDAY, "06:30"),
+    "bassolioporto": (MONDAY, "06:45"),
     "realkey": (MONDAY, "07:00"),
 }
 

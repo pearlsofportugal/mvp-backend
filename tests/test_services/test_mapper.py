@@ -486,3 +486,27 @@ def test_imoantlantico_is_registered_under_its_site_key():
     from app.services.mapper_service import _PARTNER_NORMALIZERS
 
     assert "imoantlantico" in _PARTNER_NORMALIZERS
+
+
+def test_bassolioporto_is_registered_under_its_site_key():
+    from app.services.mapper_service import _PARTNER_NORMALIZERS, normalize_partner_payload
+
+    assert "bassolioporto" in _PARTNER_NORMALIZERS
+    schema = normalize_partner_payload(
+        {"title": "Apartamento T2", "property_id": "Ref. APA_60", "property_type": "Apartamento",
+         "district": "Porto", "county": "Porto", "price": "VENDA 500 000 €"},
+        "bassolioporto",
+    )
+    assert schema.partner_id == "APA_60"
+
+
+def test_bassolioporto_plot_drops_buildable_area_from_area_useful():
+    from app.services.mapper_service import normalize_partner_payload
+
+    raw = {"title": "Terreno com PIP", "property_type": "Terreno", "area": "473.8 m²",
+           "gross_area": "366 m²", "land_area": "366 m²", "district": "Porto", "price": "Venda 520 000 €"}
+    schema = normalize_partner_payload(raw, "bassolioporto")
+    assert schema.area_useful_m2 is None
+    assert schema.area_land_m2 == 366
+    apartment = normalize_partner_payload({**raw, "property_type": "Apartamento"}, "bassolioporto")
+    assert apartment.area_useful_m2 == 473.8

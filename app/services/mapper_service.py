@@ -1126,6 +1126,16 @@ def normalize_sottomayor_payload(raw: dict[str, Any]) -> PropertySchema:
     return normalize_ego_platform_payload(raw, "sottomayor")
 
 
+@partner_normalizer("bassolioporto")
+def normalize_bassolioporto_payload(raw: dict[str, Any]) -> PropertySchema:
+    """Normalize a Bassoli Oporto (EGO RealEstate platform) payload into canonical PropertySchema."""
+    schema = normalize_ego_platform_payload(raw, "bassolioporto")
+    # On plots the site fills "Área útil" with the buildable (PIP) area, not a habitable one.
+    if (schema.property_type or "").strip().lower() == "terreno":
+        schema = schema.model_copy(update={"area_useful_m2": None})
+    return schema
+
+
 # ═══════════════════════════════════════════════════════════
 # Imo Atlântico Normalizer
 # ═══════════════════════════════════════════════════════════

@@ -153,6 +153,21 @@ class TestInferBusinessType:
     def test_defaults_to_sale(self):
         assert _infer_business_type({"business_type": "Venda"}) == "sale"
 
+    def test_explicit_sale_field_beats_rental_pitch_in_the_description(self):
+        raw = {
+            "business_type": "http://purl.org/goodrelations/v1#Sell",
+            "raw_description": "Aumenta a atratividade para arrendamento de media e longa duracao.",
+        }
+        assert _infer_business_type(raw) == "sale"
+        assert _infer_business_type({**raw, "business_type": "Venda"}) == "sale"
+
+    def test_rental_phrase_still_wins_when_there_is_no_explicit_field(self):
+        raw = {"raw_description": "Aumenta a atratividade para arrendamento de media e longa duracao."}
+        assert _infer_business_type(raw) == "rent"
+
+    def test_explicit_rent_field_still_beats_sale_words_elsewhere(self):
+        assert _infer_business_type({"business_type": "Arrendamento", "title": "Venda de sonhos"}) == "rent"
+
     def test_trespasse_is_not_shadowed_by_rent_url_hint(self):
         assert _infer_business_type(
             {"business_type": "Trespasse"}, url_hint="https://x.pt/Imovel/Arrendamento/Loja/1"

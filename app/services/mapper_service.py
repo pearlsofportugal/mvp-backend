@@ -626,6 +626,7 @@ _NOT_SET = object()  # sentinel — distinguishes "not provided" from None
 
 _BUSINESS_TYPE_RENT_KEYWORDS = ("arrend", "arrendar", "arrendamento", "rent", "rental", "aluguer")
 _BUSINESS_TYPE_TRESPASSE_KEYWORDS = ("trespasse", "trespass")
+_BUSINESS_TYPE_SALE_KEYWORDS = ("venda", "vender", "sale", "sell", "comprar", "buy")
 
 
 _SALE_SIGNALS = ("venda", "for-sale", "for sale", "comprar", "/buy", "-sale-", "à venda", "a-venda")
@@ -653,6 +654,11 @@ def _infer_business_type(raw: dict[str, Any], *, url_hint: str | None = None) ->
             return "trespasse"
         if "/Arrendamento/" in url_hint:
             return "rent"
+    # The source states a sale outright (eGO: "Venda", JSON-LD "goodrelations#Sell"): the text
+    # heuristics below must not override it — a sale description can say "para arrendamento"
+    # when pitching rental yield.
+    if any(w in val for w in _BUSINESS_TYPE_SALE_KEYWORDS):
+        return "sale"
     # Last resort — many sites (no dedicated business_type field, no URL hint)
     # only state it in the headline or description ("apartamento arrendado",
     # "para arrendamento", "renda mensal").

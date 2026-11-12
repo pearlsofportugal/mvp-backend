@@ -289,12 +289,46 @@ async def _call_ai_for_translations_async(
     return await loop.run_in_executor(None, _call_ai_for_translations, listing, keywords, locales)
 
 
+META_DESCRIPTION_LENGTH = 155
+# Below this the snippet wastes SERP space; we only log it, we never pad with filler.
+_META_DESCRIPTION_WARN_BELOW = 140
+
+
+def fit_meta_description(text: str | None, locale: str = "") -> str | None:
+    """Guarantee a meta description never exceeds 155 characters.
+
+    The model is asked for exactly 155 characters, but LLMs cannot count reliably, so the hard
+    ceiling is enforced here: collapse whitespace, then (if too long) cut at the last sentence
+    end, else at the last word boundary, finishing with a full stop instead of an ellipsis.
+    Short results are kept as written and logged — padding would hurt the copy.
+    """
+    if not text:
+        return None
+    meta = " ".join(text.split()).strip("\"'“”")
+    if not meta:
+        return None
+    if len(meta) > META_DESCRIPTION_LENGTH:
+        window = meta[:META_DESCRIPTION_LENGTH]
+        sentence_end = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+        if sentence_end >= _META_DESCRIPTION_WARN_BELOW - 20:
+            meta = window[: sentence_end + 1]
+        else:
+            # Leave one character for the closing full stop.
+            word_cut = meta[: META_DESCRIPTION_LENGTH - 1].rsplit(" ", 1)[0].rstrip(" ,;:-–—")
+            meta = (word_cut or meta[: META_DESCRIPTION_LENGTH - 1]) + "."
+    if len(meta) < _META_DESCRIPTION_WARN_BELOW:
+        logger.warning(
+            "meta_description for locale %r has %d chars (target %d)", locale, len(meta), META_DESCRIPTION_LENGTH
+        )
+    return meta
+
+
 def _parse_locale_output(raw: dict[str, Any], locale: str) -> LocaleEnrichmentOutput:
     data = raw.get(locale) or {}
     return LocaleEnrichmentOutput(
         title=data.get("title") or None,
         description=data.get("description") or None,
-        meta_description=data.get("meta_description") or None,
+        meta_description=fit_meta_description(data.get("meta_description"), locale),
     )
 
 

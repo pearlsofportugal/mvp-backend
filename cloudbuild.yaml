@@ -85,6 +85,12 @@ steps:
         else
           echo "Job $_WORKER_JOB_NAME does not exist yet - skipping"
         fi
+        if gcloud run jobs describe $_ENRICH_JOB_NAME --region=$_DEPLOY_REGION >/dev/null 2>&1; then
+          gcloud run jobs update $_ENRICH_JOB_NAME --region=$_DEPLOY_REGION --quiet \
+            --image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+        else
+          echo "Job $_ENRICH_JOB_NAME does not exist yet - skipping"
+        fi
 options:
   substitutionOption: ALLOW_LOOSE
   logging: CLOUD_LOGGING_ONLY
@@ -95,6 +101,7 @@ substitutions:
   _PLATFORM: managed
   _SERVICE_NAME: mvp-backend
   _WORKER_JOB_NAME: mvp-scrape-worker
+  _ENRICH_JOB_NAME: mvp-enrich-worker
   _TRIGGER_ID: manual  # the trigger overrides it; there is no built-in for the trigger id
   _DEPLOY_REGION: europe-west1
   _AR_HOSTNAME: europe-west1-docker.pkg.dev

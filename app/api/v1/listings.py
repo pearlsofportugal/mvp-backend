@@ -37,7 +37,6 @@ async def list_listings(
     db: AsyncSession = Depends(get_db),
     filters: dict = Depends(listing_filter_params),
     is_enriched: bool | None = Query(None, description="Filter by AI enrichment status."),
-    is_exported_to_imodigi: bool | None = Query(None, description="Filter by Imodigi export status (published or updated)."),
     sort_by: str = Query("created_at", json_schema_extra={"enum": list(SORT_FIELDS.keys())}),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -56,7 +55,7 @@ async def list_listings(
             status_code=422,
             detail=f"page_size must be <= {MAX_DETAIL_PAGE_SIZE} when include=detail",
         )
-    filter_kwargs = {**filters, "is_enriched": is_enriched, "is_exported_to_imodigi": is_exported_to_imodigi}
+    filter_kwargs = {**filters, "is_enriched": is_enriched}
     paginated, meta = await ListingService.get_all_listings(
         db, filter_kwargs, sort_by, sort_order, page, page_size, include_detail=include_detail
     )
@@ -101,12 +100,11 @@ async def selector_listings(
     q: str | None = Query(None),
     source_partner: str | None = Query(None),
     is_enriched: bool | None = Query(None),
-    is_exported_to_imodigi: bool | None = Query(None, description="Filter by Imodigi export status (published or updated)."),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
     """Lightweight listing picker for the selector UI."""
-    results, meta = await ListingService.search_listings(db, q, source_partner, is_enriched, is_exported_to_imodigi, page, page_size)
+    results, meta = await ListingService.search_listings(db, q, source_partner, is_enriched, page, page_size)
     return ok(results, "Listings found", request, meta=meta)
 
 

@@ -188,7 +188,6 @@ def to_contract(listing, partner: dict | None = None) -> dict:
             "partner_key": listing.source_partner,
             "partner_id": listing.partner_id,
             "url": listing.source_url,
-            "is_exported_to_imodigi": None,
         },
         "partner": partner,
         "business_type": listing.business_type or "sale",

@@ -57,25 +57,6 @@ class Settings(BaseSettings):
     cloud_run_scrape_job_name: str = ""
     export_max_rows: int = 5000
 
-    # Imodigi CRM integration
-    imodigi_api_token: str = ""
-    imodigi_client_id: int | None = None
-    imodigi_base_url: str = "https://www.imodigi.com/crm_api"
-
-    # Imodigi Cloud Scheduler
-    imodigi_sync_enabled: bool = False
-    imodigi_sync_interval_minutes: int = 60
-    imodigi_sync_limit: int = 50
-    imodigi_sync_source_partner: str | None = None
-    imodigi_sync_is_enriched: bool | None = None
-    # A listing that failed export is retried after this cooldown instead of
-    # every single sync run — without it, a handful of permanently-broken
-    # listings (oldest = highest priority) would occupy the entire
-    # imodigi_sync_limit budget on every run, starving newer listings that
-    # have never been attempted. Defaults to 3x the sync interval so a
-    # failing listing gets a few real chances to self-heal (e.g. a transient
-    # Imodigi outage) before crowding out fresh listings again.
-    imodigi_failed_retry_cooldown_minutes: int = 180
     # AI / GenAI
     google_genai_api_key: str = ""
     google_genai_model: str = "gemini-3-flash-preview"

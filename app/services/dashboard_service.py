@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
@@ -83,7 +82,6 @@ class DashboardService:
                 min_price=row.min_price,
                 max_price=row.max_price,
                 enriched_count=row.enriched_count or 0,
-                exported_to_imodigi_count=0,  # sem modelo ainda
                 last_listing_updated_at=row.last_listing_updated_at,
                 last_job_id=str(row.last_job_id) if row.last_job_id else None,
                 last_job_status=row.last_job_status,

@@ -4,12 +4,11 @@ from decimal import Decimal
 from typing import TypedDict
 from uuid import UUID
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.sql import Select
 
 from app.config import settings
 from app.core.lifecycle import STATUS_ACTIVE, STATUS_ALL
-from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 
 
@@ -53,7 +52,6 @@ class ListingFilters(TypedDict, total=False):
     status: str | None
     search: str | None
     is_enriched: bool | None
-    is_exported_to_imodigi: bool | None
 
 
 def _use_postgres_fts() -> bool:
@@ -143,26 +141,6 @@ def apply_listing_filters(query: Select, filters: ListingFilters) -> Select:
         conds.append(Listing.enriched_translations.isnot(None))
     elif filters.get("is_enriched") is False:
         conds.append(Listing.enriched_translations.is_(None))
- 
-    # Imodigi export filter
-    if filters.get("is_exported_to_imodigi") is True:
-        conds.append(
-            exists(
-                select(ImodigiExport.id).where(
-                    ImodigiExport.listing_id == Listing.id,
-                    ImodigiExport.status.in_(["published", "updated"]),
-                ).correlate(Listing)
-            )
-        )
-    elif filters.get("is_exported_to_imodigi") is False:
-        conds.append(
-            ~exists(
-                select(ImodigiExport.id).where(
-                    ImodigiExport.listing_id == Listing.id,
-                    ImodigiExport.status.in_(["published", "updated"]),
-                ).correlate(Listing)
-            )
-        )
  
     # Full-text search — uses TSVECTOR GIN index on PostgreSQL; ILIKE fallback for SQLite (tests)
     if filters.get("search"):

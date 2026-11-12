@@ -15,8 +15,7 @@
   "source": {
     "partner_key": "realkey",
     "partner_id": "rk-221",
-    "url": "https://example.com/anuncio/1201369",
-    "is_exported_to_imodigi": true
+    "url": "https://example.com/anuncio/1201369"
   },
   "partner": {
     "key": "realkey",

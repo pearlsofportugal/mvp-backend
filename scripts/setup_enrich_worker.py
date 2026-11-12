@@ -48,7 +48,8 @@ def deploy_job(g: Gcloud, a) -> None:
         g.run(*args, note=f"[env from {len(env)} vars, values hidden]")
     finally:
         os.unlink(tmp)
-    g.report_denied()
+    # Only newer versions of the shared helper collect refused IAM bindings.
+    getattr(g, "report_denied", lambda: None)()
 
 
 def execute_job(g: Gcloud, a) -> None:

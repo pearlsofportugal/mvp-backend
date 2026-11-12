@@ -77,12 +77,11 @@ class ListingService:
         q: str | None,
         source_partner: str | None,
         is_enriched: bool | None,
-        is_exported_to_imodigi: bool | None,
         page: int,
         page_size: int,
     ) -> tuple[ListingSearchResponse, Meta]:
         listings, total = await ListingRepository.search_listings(
-            db, q, source_partner, is_enriched, is_exported_to_imodigi, page, page_size
+            db, q, source_partner, is_enriched, page, page_size
         )
         items: list[ListingSearchItem] = []
         for listing in listings:

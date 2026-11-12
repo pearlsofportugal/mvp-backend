@@ -14,7 +14,6 @@ from app.api.responses import ok
 from app.api.v1.ai_enrichment import router as ai_enrichment_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.export import router as export_router
-from app.api.v1.imodigi import router as imodigi_router
 from app.api.v1.ingest import router as ingest_router
 from app.api.v1.listings import router as listings_router
 from app.api.v1.scrape_jobs import router as jobs_router
@@ -26,7 +25,6 @@ from app.config import settings
 from app.core.exceptions import (
     AppException,
     DuplicateError,
-    ImodigiError,
     JobAlreadyRunningError,
     NotFoundError,
 )
@@ -63,18 +61,6 @@ async def lifespan(app: FastAPI):
         scheduled_sites = await SiteConfigRepository.get_all_scheduled(session)
 
     scheduler_service.start(scheduled_sites)
-    if settings.imodigi_sync_enabled and settings.imodigi_client_id:
-        from app.services.cloud_scheduler_service import cloud_scheduler_service
-        cloud_scheduler_service.schedule_imodigi_sync(
-            interval_minutes=settings.imodigi_sync_interval_minutes,
-            limit=settings.imodigi_sync_limit,
-        )
-        logger.info(
-            "Imodigi sync agendado: cada %d min, limit=%d",
-            settings.imodigi_sync_interval_minutes,
-            settings.imodigi_sync_limit,
-        )
-
     # Pre-warm parser field mapping cache so the first scrape request uses DB values
     try:
         from app.services.parser_service import _load_field_mappings
@@ -96,8 +82,6 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down %s", settings.app_name)
     scheduler_service.shutdown()
-    from app.adapters.imodigi_adapter import imodigi_adapter
-    await imodigi_adapter.aclose()
 
 
 def create_app() -> FastAPI:
@@ -218,19 +202,6 @@ def create_app() -> FastAPI:
             ).model_dump(),
         )
 
-    @application.exception_handler(ImodigiError)
-    async def imodigi_error_handler(request: Request, exc: ImodigiError):
-        trace_id = getattr(request.state, "trace_id", "")
-        return JSONResponse(
-            status_code=502,
-            content=ApiResponse(
-                success=False,
-                message=str(exc),
-                errors=[ErrorDetail(code="IMODIGI_ERROR", message=str(exc))],
-                trace_id=trace_id,
-            ).model_dump(),
-        )
-
     # ── Routers ────────────────────────────────────────────────────────────
 
     auth_dependencies = [RequireApiKey]
@@ -269,12 +240,6 @@ def create_app() -> FastAPI:
         export_router,
         prefix="/api/v1/export",
         tags=["export"],
-        dependencies=auth_dependencies,
-    )
-    application.include_router(
-        imodigi_router,
-        prefix="/api/v1/imodigi",
-        tags=["imodigi"],
         dependencies=auth_dependencies,
     )
     application.include_router(

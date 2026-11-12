@@ -1,4 +1,4 @@
-"""In-memory store for short-lived background jobs (enrichment & Imodigi bulk export).
+"""In-memory store for short-lived background jobs (enrichment).
 
 Jobs live primarily in a module-level dict keyed by job UUID, for fast
 same-instance polling with no DB round trip. Each job is also mirrored into
@@ -24,7 +24,6 @@ logger = get_logger(__name__)
 
 # Supported job types
 JOB_TYPE_ENRICHMENT = "enrichment"
-JOB_TYPE_IMODIGI_EXPORT = "imodigi_export"
 
 # Supported statuses
 STATUS_RUNNING = "running"

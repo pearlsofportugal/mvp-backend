@@ -7,7 +7,6 @@ from app.models.scrape_job_event_model import ScrapeJobEvent
 from app.models.background_job_model import BackgroundJob
 from app.models.site_config_model import SiteConfig
 from app.models.field_mapping_model import FieldMapping, CharacterMapping
-from app.models.imodigi_export_model import ImodigiExport
 from app.models.sold_listing_model import SoldListingUrl
 
 __all__ = [
@@ -20,6 +19,5 @@ __all__ = [
     "SiteConfig",
     "FieldMapping",
     "CharacterMapping",
-    "ImodigiExport",
     "SoldListingUrl",
 ]

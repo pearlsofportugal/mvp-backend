@@ -128,13 +128,6 @@
           "type": "string",
           "format": "uri",
           "description": "Anuncio original (para 'ver na origem' e para reconciliar)."
-        },
-        "is_exported_to_imodigi": {
-          "type": [
-            "boolean",
-            "null"
-          ],
-          "description": "Compatibilidade com o site atual."
         }
       }
     },

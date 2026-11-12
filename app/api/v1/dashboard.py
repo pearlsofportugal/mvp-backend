@@ -23,7 +23,7 @@ async def partner_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[PartnerStatsResponse]:
-    """Per-partner dashboard: listing counts, price stats, enrichment, Imodigi export, and last scrape job."""
+    """Per-partner dashboard: listing counts, price stats, enrichment, and last scrape job."""
     result = await DashboardService.get_partner_stats(db)
     return ok(result, "Partner stats retrieved successfully", request)
 

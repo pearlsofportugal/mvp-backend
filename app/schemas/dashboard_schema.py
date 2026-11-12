@@ -25,9 +25,8 @@ class PartnerStats(BaseModel):
     min_price: Decimal | None = Field(None, ge=0, decimal_places=2)
     max_price: Decimal | None = Field(None, ge=0, decimal_places=2)
 
-    # Enrichment / export
+    # Enrichment
     enriched_count: int = Field(0, ge=0, description="Imóveis com enriquecimento AI.")
-    exported_to_imodigi_count: int = Field(0, ge=0, description="Imóveis exportados para Imodigi.")
 
     # Timestamps
     last_listing_updated_at: datetime | None = Field(

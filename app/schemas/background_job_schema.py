@@ -1,4 +1,4 @@
-"""Pydantic schemas for generic background job responses (enrichment & Imodigi export)."""
+"""Pydantic schemas for generic background job responses (enrichment)."""
 
 from datetime import datetime
 from uuid import UUID

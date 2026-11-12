@@ -51,11 +51,6 @@ class ExportError(AppException):
     pass
 
 
-class ImodigiError(AppException):
-    """Error communicating with the Imodigi CRM API."""
-    pass
-
-
 class ValidationError(AppException):
     """Data validation error."""
     pass

@@ -1,4 +1,4 @@
-"""Durable state for enrichment and CRM bulk operations."""
+"""Durable state for enrichment bulk operations."""
 import uuid
 from datetime import datetime, timezone
 from typing import Any

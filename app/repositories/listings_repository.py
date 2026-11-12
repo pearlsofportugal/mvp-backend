@@ -3,12 +3,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, asc, desc, exists, func, or_, select, update
+from sqlalchemy import and_, asc, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 
 from app.core.lifecycle import STATUS_ACTIVE, STATUS_REMOVED
-from app.models.imodigi_export_model import ImodigiExport
 from app.models.listing_model import Listing
 from app.models.media_model import MediaAsset
 from app.models.price_history_model import PriceHistory
@@ -174,7 +173,6 @@ class ListingRepository:
         q: str | None,
         source_partner: str | None,
         is_enriched: bool | None,
-        is_exported_to_imodigi: bool | None,
         page: int,
         page_size: int,
     ) -> tuple[list[Listing], int]:
@@ -195,16 +193,6 @@ class ListingRepository:
             stmt = stmt.where(Listing.enriched_translations.isnot(None))
         elif is_enriched is False:
             stmt = stmt.where(Listing.enriched_translations.is_(None))
-        _imodigi_exists = exists(
-            select(ImodigiExport.id).where(
-                ImodigiExport.listing_id == Listing.id,
-                ImodigiExport.status.in_(["published", "updated"]),
-            ).correlate(Listing)
-        )
-        if is_exported_to_imodigi is True:
-            stmt = stmt.where(_imodigi_exists)
-        elif is_exported_to_imodigi is False:
-            stmt = stmt.where(~_imodigi_exists)
 
         count_col = func.count().over().label("total_count")
         data_stmt = (

@@ -61,16 +61,33 @@ WRITING RULES (apply identically to every locale):
   Adapt their meaning naturally — do NOT insert foreign-language keywords verbatim into the text.
 - CONTENT FILTER: Exclude all agency-specific references (names, contacts, taglines).
 
+META DESCRIPTION RULES (apply to every locale):
+- LENGTH (CRITICAL): The meta_description MUST be exactly 155 characters long, spaces and punctuation
+  included — never fewer than 150, never more than 155. Anything above 155 is cut off in Google results.
+  Draft it, count the characters, then add or remove words until it is 155. Never pad with filler,
+  repeated words or trailing spaces, and never end with an ellipsis.
+- PURPOSE: It is the Google snippet. Its job is to earn the click, so write it as an invitation, not a summary.
+- FOCUS KEYPHRASE: Include the primary keyword (or its natural equivalent in the target language),
+  ideally within the first half of the text.
+- CONTENT MATCH: Summarise only what the page really offers (typology, location and one or two standout
+  features from the property data). Never promise anything that is not in the description.
+- ACTION: Open or close with an active verb and a short, generic call to action in the target language
+  (e.g. discover, book a visit, find out more). No agency names, phone numbers or e-mail addresses.
+- UNIQUENESS: It must differ from the title and from the first sentence of the description, and from
+  the meta_description of every other locale and listing. Do not copy the description's opening.
+- FORMAT: A single sentence or two short ones, plain text, no quotation marks, no emojis, no HTML.
+
 OUTPUT RULES (JSON):
 Respond exclusively with valid JSON. No markdown, no code blocks, no extra text outside the JSON.
 The _word_count field is mandatory — count the words in description before responding.
+The meta_description field is validated by character count (155) — count its characters before responding.
 Only include locale keys for the requested locales: {{ locales | join(", ") }}.
 
 {
   "pt": {
     "title": "SEO title in European Portuguese (max 60 characters)",
     "description": "Full persuasive prose — MUST be 250 to 400 words",
-    "meta_description": "Google snippet — MUST be between 140 and 155 characters",
+    "meta_description": "Google snippet with keyphrase and call to action — MUST be exactly 155 characters",
     "_word_count": 312
   },
   "en": { ... }

@@ -119,7 +119,7 @@ class LocaleEnrichmentOutput(BaseModel):
 
     title: str | None = Field(None, description="Optimised listing title.")
     description: str | None = Field(None, description="Enriched listing description.")
-    meta_description: str | None = Field(None, description="SEO meta description (≤160 chars recommended).")
+    meta_description: str | None = Field(None, description="SEO meta description (155 chars target, never more).")
 
 
 class ListingTranslationRequest(BaseModel):

@@ -83,3 +83,33 @@ def test_prompt_uses_the_cleaned_description():
                       description_clean="Casa.")
     prompt = ai_enrichment_service._build_multilang_prompt(listing, ["T2"], ["en"])
     assert "Casa." in prompt and "segredo" not in prompt
+
+
+def test_prompt_demands_a_155_character_meta_description():
+    listing = Listing(source_partner="p", source_url="u", title="T2", description_clean="Casa.")
+    prompt = ai_enrichment_service._build_multilang_prompt(listing, ["T2", "Porto"], ["pt", "en"])
+    assert "exactly 155 characters" in prompt
+    assert "140" not in prompt.split("META DESCRIPTION RULES")[1]
+    assert "call to action" in prompt and "primary keyword" in prompt
+
+
+def test_fit_meta_description_never_exceeds_155():
+    fit = ai_enrichment_service.fit_meta_description
+    long_text = "Descubra este apartamento T2 luminoso no Porto, com varanda e garagem. " * 6
+    assert len(fit(long_text)) <= 155
+    no_stops = "palavra " * 40
+    assert len(fit(no_stops)) <= 155 and fit(no_stops).endswith(".")
+    exact = "x" * 155
+    assert fit(exact) == exact
+
+
+def test_fit_meta_description_keeps_short_text_and_handles_empty():
+    fit = ai_enrichment_service.fit_meta_description
+    assert fit("  Visite hoje.  ") == "Visite hoje."
+    assert fit("") is None and fit(None) is None and fit('  ""  ') is None
+
+
+def test_parse_locale_output_trims_the_meta_description():
+    raw = {"pt": {"title": "T", "description": "D", "meta_description": "Descubra a sua nova casa. " * 20}}
+    out = ai_enrichment_service._parse_locale_output(raw, "pt")
+    assert len(out.meta_description) <= 155

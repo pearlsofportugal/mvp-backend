@@ -17,6 +17,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.core.exceptions import EnrichmentError
+from app.core.lifecycle import STATUS_ACTIVE
 from app.core.logging import get_logger
 from app.models.listing_model import Listing
 from app.schemas.ai_enrichment_schema import _ALL_LOCALES, ListingTranslationRequest
@@ -30,8 +31,11 @@ RATE_LIMIT_PAUSE_SECONDS = 20
 
 
 async def pending_ids(db, partners: Sequence[str], force: bool, skip: set[UUID], limit: int) -> list[UUID]:
-    """Listings still to process, oldest first, never one already handled in this run."""
-    stmt = select(Listing.id)
+    """Listings still to process, oldest first, never one already handled in this run.
+
+    Only active listings: a removed one is off the market, so generating copy for it is wasted spend.
+    """
+    stmt = select(Listing.id).where(Listing.status == STATUS_ACTIVE)
     if not force:
         stmt = stmt.where(Listing.enriched_translations.is_(None))
     if partners:

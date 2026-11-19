@@ -7,8 +7,10 @@ from unittest.mock import patch
 
 from app import enrich_worker
 from app.core.exceptions import EnrichmentError
+from app.core.lifecycle import STATUS_REMOVED
 from app.models.listing_model import Listing
-from app.schemas.ai_enrichment_schema import LocaleEnrichmentOutput
+from app.schemas.ai_enrichment_schema import BulkEnrichmentRequest, LocaleEnrichmentOutput
+from app.services.ai_enrichment_service import get_enrichment_stats, get_listings_for_bulk_enrich
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "setup_enrich_worker.py"
 SPEC = importlib.util.spec_from_file_location("setup_enrich_worker", SCRIPT)
@@ -37,6 +39,44 @@ async def test_pending_ids_skips_what_was_already_handled_and_honours_the_limit(
     ids = await _add(db_session, "a", 3)
     assert len(await enrich_worker.pending_ids(db_session, [], False, {ids[0]}, 10)) == 2
     assert len(await enrich_worker.pending_ids(db_session, [], False, set(), 1)) == 1
+
+
+async def test_pending_ids_ignores_removed_listings_even_with_force(db_session):
+    active = await _add(db_session, "a", 1)
+    removed = Listing(source_partner="a", source_url="https://a/removed", title="T2", status=STATUS_REMOVED)
+    db_session.add(removed)
+    await db_session.commit()
+    assert await enrich_worker.pending_ids(db_session, [], False, set(), 10) == active
+    assert await enrich_worker.pending_ids(db_session, [], True, set(), 10) == active
+
+
+async def test_bulk_selection_skips_removed_but_honours_explicit_ids(db_session):
+    active = await _add(db_session, "a", 1)
+    removed = Listing(source_partner="a", source_url="https://a/removed", title="T2", status=STATUS_REMOVED)
+    db_session.add(removed)
+    await db_session.commit()
+
+    auto = await get_listings_for_bulk_enrich(db_session, BulkEnrichmentRequest(limit=10))
+    assert [row.id for row in auto] == active
+
+    explicit = await get_listings_for_bulk_enrich(db_session, BulkEnrichmentRequest(listing_ids=[removed.id]))
+    assert [row.id for row in explicit] == [removed.id]
+
+
+async def test_enrichment_stats_count_only_active_listings(db_session):
+    await _add(db_session, "a", 2)
+    await _add(db_session, "a", 1, enriched=True)
+    db_session.add_all([
+        Listing(source_partner="a", source_url="https://a/gone-1", title="T2", status=STATUS_REMOVED),
+        Listing(source_partner="a", source_url="https://a/gone-2", title="T2", status=STATUS_REMOVED,
+                enriched_translations={"pt": {"title": "x"}}),
+    ])
+    await db_session.commit()
+
+    stats = await get_enrichment_stats(db_session, None)
+    assert (stats.total_listings, stats.enriched_count, stats.not_enriched_count) == (3, 1, 2)
+    assert stats.by_source["a"].total == 3
+    assert stats.by_source["a"].enriched_count == 1
 
 
 class _Session:

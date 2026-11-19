@@ -96,6 +96,17 @@ class TestMysquareConfig:
         other = script.build_patch({"key": "habinedita", "selectors": {"title_selector": "h1"}})
         assert "selectors" not in other  # untouched sites get no selector changes
 
+    def test_imoantlantico_image_filter_matches_production(self):
+        # Production already has the wider filter (crmhcpro.pt/uploads); the script must not revert it.
+        script = self._script()
+        prod = {
+            "key": "imoantlantico",
+            **{k: v for k, v in script.IMOATLANTICO.items() if k != "selectors"},
+            "selectors": script.IMOATLANTICO["selectors"],
+            "image_filter": r"(?:multimedia\.hcpro\.pt/hcpro|crmhcpro\.pt/uploads)/\d+/properties/",
+        }
+        assert "image_filter" not in script.build_patch(prod)
+
     @pytest.mark.parametrize(("badge", "expected"), [(SOLD, True), (RENTED, True), (RESERVED, False), ("", False)])
     def test_shipped_selector_matches_the_real_badges(self, badge, expected):
         marker = self._script().MYSQUARE_SOLD_MARKER

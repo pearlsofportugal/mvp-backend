@@ -58,7 +58,8 @@ IMOATLANTICO = {
     "extraction_mode": "direct",
     "pagination_type": "sitemap",
     "link_pattern": r"^https://www\.imo-atlantico\.pt/imovel-[a-z0-9-]+-\d+$",
-    "image_filter": r"multimedia\.hcpro\.pt/hcpro/\d+/properties/",
+    # Same value as production (it also accepts the crmhcpro.pt/uploads host); keep in sync so --apply is a no-op here.
+    "image_filter": r"(?:multimedia\.hcpro\.pt/hcpro|crmhcpro\.pt/uploads)/\d+/properties/",
     "use_js_render": False,
     "schedule_start_url": "https://www.imo-atlantico.pt/sitemap.xml",
 }

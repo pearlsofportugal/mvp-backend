@@ -27,6 +27,35 @@ class EnrichmentSourceStats(BaseModel):
         return self
 
 
+class AiUsageDay(BaseModel):
+    date: str = Field(..., description="UTC date, YYYY-MM-DD.")
+    calls: int = Field(..., ge=0, description="API attempts made that day (retries included).")
+    tokens: int = Field(..., ge=0)
+    cost_eur: float | None = Field(None, description="None until model prices are configured.")
+    errors: int = Field(..., ge=0, description="Logged calls that ended in an error.")
+
+
+class AiUsageLimits(BaseModel):
+    calls: int | None = Field(None, description="Daily call limit; None = no limit.")
+    tokens: int | None = None
+    cost_eur: float | None = None
+
+
+class AiUsageSummary(BaseModel):
+    """Today's AI usage against the daily limits, with a per-day history."""
+
+    date: str = Field(..., description="Today (UTC).")
+    calls: int = Field(..., ge=0)
+    tokens: int = Field(..., ge=0)
+    cost_eur: float | None = None
+    limits: AiUsageLimits
+    budget_reached: bool = Field(..., description="True once a limit stops new AI calls until resets_at.")
+    resets_at: str = Field(..., description="When the daily counters restart (00:00 UTC), ISO 8601.")
+    prices_configured: bool = Field(..., description="False means cost_eur and the cost limit are inactive.")
+    by_operation: dict[str, int] = Field(default_factory=dict, description="Today's calls per operation.")
+    history: list[AiUsageDay] = Field(default_factory=list)
+
+
 class EnrichmentStats(BaseModel):
     """Aggregated enrichment statistics across all listings."""
 

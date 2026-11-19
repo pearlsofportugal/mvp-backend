@@ -29,6 +29,19 @@ test_session_factory = async_sessionmaker(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_ai_usage_bookkeeping(request, monkeypatch):
+    """The Gemini adapter checks the daily budget and logs usage through a sync DB engine. Unit tests
+    mock Gemini and must not touch (or be limited by) that table; tests that exercise the real thing
+    opt in with ``@pytest.mark.real_ai_usage``."""
+    if request.node.get_closest_marker("real_ai_usage"):
+        return
+    from app.services import ai_usage_service
+
+    monkeypatch.setattr(ai_usage_service, "check_budget", lambda: None)
+    monkeypatch.setattr(ai_usage_service, "record_call", lambda **kwargs: None)
+
+
 @pytest_asyncio.fixture(scope="function")
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Create tables and yield a test database session."""

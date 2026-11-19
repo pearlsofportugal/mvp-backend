@@ -23,6 +23,7 @@ from app.api.v2 import router as contract_router
 from app.api.internal import router as internal_router
 from app.config import settings
 from app.core.exceptions import (
+    AIBudgetExceededError,
     AppException,
     DuplicateError,
     JobAlreadyRunningError,
@@ -159,6 +160,19 @@ def create_app() -> FastAPI:
                 success=False,
                 message=str(exc),
                 errors=[ErrorDetail(code="APP_ERROR", message=str(exc))],
+                trace_id=trace_id,
+            ).model_dump(),
+        )
+
+    @application.exception_handler(AIBudgetExceededError)
+    async def ai_budget_handler(request: Request, exc: AIBudgetExceededError):
+        trace_id = getattr(request.state, "trace_id", "")
+        return JSONResponse(
+            status_code=429,
+            content=ApiResponse(
+                success=False,
+                message=str(exc),
+                errors=[ErrorDetail(code="AI_BUDGET_EXCEEDED", message=str(exc))],
                 trace_id=trace_id,
             ).model_dump(),
         )

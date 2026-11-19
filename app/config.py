@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     google_genai_timeout_ms: int = 45000
     ai_rate_limit_requests: int = 20
     ai_rate_limit_window: int = 60
+    # Daily spending brake (UTC day, 0 = off). Calls count API attempts, so retries are included.
+    # The cost limit only works when both prices below are set (EUR per 1M tokens, from the
+    # model's pricing page) — until then cost_eur stays empty and only calls/tokens are enforced.
+    ai_daily_call_limit: int = 1500
+    ai_daily_token_limit: int = 0
+    ai_daily_cost_limit_eur: float = 0.0
+    ai_price_input_eur_per_mtok: float = 0.0
+    ai_price_output_eur_per_mtok: float = 0.0
 
     # Generic /ingest extraction — LLM fallback fires only when the free layers
     # (structured data, selector suggester, regex heuristics) fail to get title

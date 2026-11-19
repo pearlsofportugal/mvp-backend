@@ -46,6 +46,11 @@ class EnrichmentError(AppException):
     pass
 
 
+class AIBudgetExceededError(EnrichmentError):
+    """The configured daily AI budget (calls / tokens / cost) has been reached."""
+    pass
+
+
 class ExportError(AppException):
     """Error during data export."""
     pass

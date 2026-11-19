@@ -10,6 +10,8 @@ from typing import Any
 from app.config import settings
 from app.core.exceptions import EnrichmentError
 from app.core.logging import get_logger
+from app.models.ai_usage_model import STATUS_ERROR, STATUS_OK
+from app.services import ai_usage_service
 
 logger = get_logger(__name__)
 
@@ -33,6 +35,24 @@ def _get_client() -> Any:
                 except ImportError as exc:
                     raise EnrichmentError("google-genai dependency is not available", detail=str(exc)) from exc
     return _client
+
+
+def _token_count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _usage_from(response: Any) -> tuple[int | None, int | None, int | None]:
+    """(prompt, output, total) tokens from a response's usage_metadata; None for what is missing.
+
+    Thinking tokens are billed as output, so they are added to the candidate tokens.
+    """
+    meta = getattr(response, "usage_metadata", None)
+    prompt = _token_count(getattr(meta, "prompt_token_count", None))
+    candidates = _token_count(getattr(meta, "candidates_token_count", None))
+    thoughts = _token_count(getattr(meta, "thoughts_token_count", None))
+    output = None if candidates is None and thoughts is None else (candidates or 0) + (thoughts or 0)
+    total = _token_count(getattr(meta, "total_token_count", None))
+    return prompt, output, total
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -63,25 +83,40 @@ class GeminiAdapter:
         system_instruction: str,
         prompt: str,
         temperature: float | None = None,
+        operation: str = "unknown",
+        listing_id: Any = None,
+        source_partner: str | None = None,
     ) -> dict[str, Any]:
         """Call the Gemini API synchronously and return parsed JSON.
+
+        Every call is checked against the daily budget first and logged afterwards (tokens, cost,
+        status) — see ``ai_usage_service``.
 
         Args:
             system_instruction: The system prompt / persona.
             prompt: The user-facing content prompt.
             temperature: Override the default temperature from settings.
+            operation / listing_id / source_partner: Context stored with the usage row.
 
         Returns:
             Parsed JSON dict from the model response.
 
         Raises:
+            AIBudgetExceededError: When today's configured limit has been reached (no API call made).
             EnrichmentError: On API failure or non-JSON response.
         """
         client = _get_client()
+        ai_usage_service.check_budget()
         temp = temperature if temperature is not None else settings.google_genai_temperature
+
+        started = time.monotonic()
+        attempts = 0
+        context = {"operation": operation, "model": settings.google_genai_model,
+                   "listing_id": listing_id, "source_partner": source_partner}
 
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
+            attempts += 1
             try:
                 response = client.models.generate_content(
                     model=settings.google_genai_model,
@@ -98,7 +133,14 @@ class GeminiAdapter:
                 # A malformed/non-JSON response is also worth retrying — the
                 # model is non-deterministic, so a fresh attempt may well
                 # produce valid JSON even though nothing else changed.
-                return _extract_json(str(response.text))
+                result = _extract_json(str(response.text))
+                prompt_tokens, output_tokens, total_tokens = _usage_from(response)
+                ai_usage_service.record_call(
+                    status=STATUS_OK, attempts=attempts, prompt_tokens=prompt_tokens,
+                    output_tokens=output_tokens, total_tokens=total_tokens,
+                    duration_ms=int((time.monotonic() - started) * 1000), **context,
+                )
+                return result
             except EnrichmentError:
                 raise
             except Exception as exc:
@@ -112,6 +154,10 @@ class GeminiAdapter:
                     time.sleep(delay)
 
         logger.exception("Gemini generate_content failed after %d attempts", _MAX_RETRIES, exc_info=last_exc)
+        ai_usage_service.record_call(
+            status=STATUS_ERROR, attempts=attempts, error=str(last_exc),
+            duration_ms=int((time.monotonic() - started) * 1000), **context,
+        )
         raise EnrichmentError("Failed to generate AI output", detail=str(last_exc)) from last_exc
 
 

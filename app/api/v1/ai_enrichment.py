@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db
 from app.api.responses import ok, ERROR_RESPONSES
 from app.schemas.ai_enrichment_schema import (
+    AiUsageSummary,
     BulkEnrichmentRequest,
     EnrichmentStats,
     ListingTranslationRequest,
@@ -21,6 +22,7 @@ from app.schemas.ai_enrichment_schema import (
 )
 from app.schemas.background_job_schema import BulkJobAccepted, BulkJobStatus
 from app.schemas.base_schema import ApiResponse
+from app.services.ai_usage_service import get_usage_summary
 from app.services.ai_enrichment_service import (
     enrich_translations_and_persist,
     get_enrichment_stats,
@@ -108,6 +110,17 @@ async def enrichment_stats(
     """Aggregated enrichment statistics across all listings."""
     stats = await get_enrichment_stats(db, source_partner)
     return ok(stats, "Enrichment stats retrieved successfully", request)
+
+
+@router.get("/usage", response_model=ApiResponse[AiUsageSummary], responses=ERROR_RESPONSES, operation_id="enrichment_usage")
+async def enrichment_usage(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    days: int = Query(7, ge=1, le=90, description="Days of history to include (UTC days, today included)."),
+):
+    """Today's AI usage against the daily limits, plus a per-day history."""
+    summary = await get_usage_summary(db, days)
+    return ok(AiUsageSummary.model_validate(summary), "AI usage retrieved successfully", request)
 
 
 # ---------------------------------------------------------------------------

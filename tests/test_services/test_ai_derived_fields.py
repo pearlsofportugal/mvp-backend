@@ -113,3 +113,41 @@ def test_parse_locale_output_trims_the_meta_description():
     raw = {"pt": {"title": "T", "description": "D", "meta_description": "Descubra a sua nova casa. " * 20}}
     out = ai_enrichment_service._parse_locale_output(raw, "pt")
     assert len(out.meta_description) <= 155
+
+
+def test_fit_meta_description_keeps_a_sentence_that_ends_close_to_the_limit():
+    fit = ai_enrichment_service.fit_meta_description
+    first = "Descubra esta moradia T3 na Apúlia, a 50 metros da praia, com piscina aquecida, jardim privado, garagem para dois carros e vistas livres em Esposende."
+    text = first + " Marque já a sua visita e conheça todos os detalhes."
+    assert 150 <= len(first) <= 155
+    assert fit(text) == first
+
+
+def test_fit_meta_description_gets_close_to_155_instead_of_a_short_sentence():
+    fit = ai_enrichment_service.fit_meta_description
+    # The first sentence ends at ~60 characters: it must NOT be the cut point any more.
+    text = ("Moradia T3 com piscina em Esposende. Situada a 50 metros da praia, esta casa luminosa tem jardim privado "
+            "garagem para dois carros e uma cozinha totalmente equipada pronta a habitar")
+    out = fit(text)
+    assert 140 <= len(out) <= 155 and out.endswith(".")
+    assert not out.endswith("..") and "…" not in out
+
+
+def test_fit_meta_description_never_ends_on_a_dangling_word():
+    fit = ai_enrichment_service.fit_meta_description
+    base = "Apartamento T2 luminoso no centro do Porto com varanda e garagem perto do metro e de todos os serviços do dia a "
+    for tail in ("dia de", "dia com", "dia para", "dia e"):
+        out = fit(base + tail + " conforto absoluto e vistas deslumbrantes sobre o rio")
+        assert len(out) <= 155
+        assert out.rstrip(".").split(" ")[-1].lower() not in {"de", "com", "para", "e", "a", "o"}
+
+
+def test_fit_meta_description_cuts_near_155_for_every_length_and_locale_text():
+    fit = ai_enrichment_service.fit_meta_description
+    words = "Entdecken Sie diese helle Wohnung mit Balkon Garage und Meerblick in zentraler Lage von Porto jetzt besichtigen".split()
+    for n in range(20, 60):
+        text = " ".join((words * 6)[:n])
+        out = fit(text)
+        assert len(out) <= 155, (n, out)
+        if len(text) > 155:  # shorter texts are kept exactly as written
+            assert out.endswith(".") and len(out) >= 145, (n, len(out), out)

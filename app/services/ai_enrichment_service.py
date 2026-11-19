@@ -1,5 +1,6 @@
 ﻿"""AI enrichment service — multi-locale SEO content generation."""
 import asyncio
+import re
 import time
 from collections import deque
 from typing import Any, Sequence
@@ -297,12 +298,40 @@ META_DESCRIPTION_LENGTH = 155
 _META_DESCRIPTION_WARN_BELOW = 140
 
 
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
+_CLAUSE_BREAK = re.compile(r"[,;:–—]\s")
+# A cut must stay this close to the ceiling to keep a whole sentence / stop at a clause.
+_META_SENTENCE_FLOOR = 150
+_META_CLAUSE_FLOOR = 148
+# Function words that must not be the last word of a cut snippet (pt, en, es, fr, de).
+_DANGLING_WORDS = frozenset(
+    "a o as os e de do da dos das em no na nos nas com um uma para por ao à "
+    "the an and of in on with for to at or "
+    "el la los las y en con un una del al "
+    "le les et du des avec pour une sur "
+    "und mit in der die das den dem ein eine im zu am".split()
+)
+
+
+def _close_snippet(text: str) -> str:
+    """End a cut snippet with a full stop, dropping dangling punctuation and function words."""
+    text = text.rstrip(" ,;:-–—")
+    while True:
+        head, _, last = text.rpartition(" ")
+        if head and last.lower() in _DANGLING_WORDS and len(head.rstrip(" ,;:-–—")) >= _META_DESCRIPTION_WARN_BELOW:
+            text = head.rstrip(" ,;:-–—")
+        else:
+            break
+    return text + "."
+
+
 def fit_meta_description(text: str | None, locale: str = "") -> str | None:
-    """Guarantee a meta description never exceeds 155 characters.
+    """Guarantee a meta description never exceeds 155 characters, staying as close to 155 as the copy allows.
 
     The model is asked for exactly 155 characters, but LLMs cannot count reliably, so the hard
-    ceiling is enforced here: collapse whitespace, then (if too long) cut at the last sentence
-    end, else at the last word boundary, finishing with a full stop instead of an ellipsis.
+    ceiling is enforced here. A text that is too long is cut at, in this order of preference:
+    a sentence end of 150+ characters, a clause break of 148+, else the last word boundary —
+    always finishing with a full stop (never an ellipsis, never on a dangling "de"/"the").
     Short results are kept as written and logged — padding would hurt the copy.
     """
     if not text:
@@ -311,14 +340,19 @@ def fit_meta_description(text: str | None, locale: str = "") -> str | None:
     if not meta:
         return None
     if len(meta) > META_DESCRIPTION_LENGTH:
-        window = meta[:META_DESCRIPTION_LENGTH]
-        sentence_end = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
-        if sentence_end >= _META_DESCRIPTION_WARN_BELOW - 20:
-            meta = window[: sentence_end + 1]
+        ends = [m.end() for m in _SENTENCE_END.finditer(meta[: META_DESCRIPTION_LENGTH + 1])
+                if m.end() <= META_DESCRIPTION_LENGTH]
+        # Room for the closing full stop: the cut text may be at most 154 characters.
+        room = meta[: META_DESCRIPTION_LENGTH - 1]
+        clauses = [m.start() for m in _CLAUSE_BREAK.finditer(room)]
+        if ends and ends[-1] >= _META_SENTENCE_FLOOR:
+            meta = meta[: ends[-1]]
+        elif clauses and clauses[-1] + 1 >= _META_CLAUSE_FLOOR:
+            meta = _close_snippet(room[: clauses[-1]])
         else:
-            # Leave one character for the closing full stop.
-            word_cut = meta[: META_DESCRIPTION_LENGTH - 1].rsplit(" ", 1)[0].rstrip(" ,;:-–—")
-            meta = (word_cut or meta[: META_DESCRIPTION_LENGTH - 1]) + "."
+            # Keep the whole of `room` when it already ends on a word boundary.
+            whole = meta[len(room)] == " "
+            meta = _close_snippet(room if whole else (room.rsplit(" ", 1)[0] or room))
     if len(meta) < _META_DESCRIPTION_WARN_BELOW:
         logger.warning(
             "meta_description for locale %r has %d chars (target %d)", locale, len(meta), META_DESCRIPTION_LENGTH

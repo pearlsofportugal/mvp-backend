@@ -501,6 +501,7 @@ def _llm_fallback(soup: BeautifulSoup, url: str, raw: dict) -> None:
             system_instruction=system_instruction,
             prompt=f"URL: {url}\n\nPage text:\n{page_text}",
             temperature=0.1,
+            operation="listing_extract",
         )
     except Exception as exc:  # noqa: BLE001 — fallback must never break the pipeline
         logger.warning("generic LLM fallback failed for %s: %s", url, exc)

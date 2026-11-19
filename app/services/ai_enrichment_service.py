@@ -283,7 +283,13 @@ def _call_ai_for_translations(listing: "Listing", keywords: list[str], locales: 
     system = _build_multilang_prompt(listing, keywords, locales)
     # The user prompt is minimal — all context is in the system instruction.
     prompt = f"Generate SEO content for the following locales: {', '.join(locales)}"
-    return gemini_adapter.generate(system_instruction=system, prompt=prompt)
+    return gemini_adapter.generate(
+        system_instruction=system,
+        prompt=prompt,
+        operation="seo_copywriting",
+        listing_id=listing.id,
+        source_partner=listing.source_partner,
+    )
 
 
 async def _call_ai_for_translations_async(

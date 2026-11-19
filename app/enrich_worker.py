@@ -16,7 +16,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-from app.core.exceptions import EnrichmentError
+from app.core.exceptions import AIBudgetExceededError, EnrichmentError
 from app.core.lifecycle import STATUS_ACTIVE
 from app.core.logging import get_logger
 from app.models.listing_model import Listing
@@ -47,8 +47,9 @@ async def pending_ids(db, partners: Sequence[str], force: bool, skip: set[UUID],
 
 
 async def enrich_one(listing_id: UUID, locales: list[str], force: bool) -> str:
-    """'enriched', 'skipped' or 'failed' for one listing. The Gemini rate limiter rejects instead of
-    waiting, so a rejected call is retried after a pause."""
+    """'enriched', 'skipped', 'failed' or 'budget' for one listing. The Gemini rate limiter rejects
+    instead of waiting, so a rejected call is retried after a pause; 'budget' means today's AI limit
+    was reached and the run should stop (retrying would only hit the same wall)."""
     from app.database import async_session_factory
     from app.repositories.listings_repository import ListingRepository
 
@@ -70,6 +71,9 @@ async def enrich_one(listing_id: UUID, locales: list[str], force: bool) -> str:
                 )
                 await db.commit()
                 return "enriched"
+        except AIBudgetExceededError as exc:
+            logger.warning("AI daily budget reached, stopping: %s", exc)
+            return "budget"
         except EnrichmentError as exc:
             if "rate limit" in str(exc).lower() and attempt < RATE_LIMIT_RETRIES:
                 await asyncio.sleep(RATE_LIMIT_PAUSE_SECONDS)
@@ -88,10 +92,17 @@ async def run(partners: Sequence[str], locales: list[str], force: bool, concurre
     counts = {"enriched": 0, "skipped": 0, "failed": 0}
     seen: set[UUID] = set()
     gate = asyncio.Semaphore(concurrency)
+    budget_hit = asyncio.Event()
 
     async def worker(lid: UUID) -> None:
         async with gate:
-            counts[await enrich_one(lid, locales, force)] += 1
+            if budget_hit.is_set():
+                return  # the limit was hit by a sibling: leave this one pending for tomorrow
+            outcome = await enrich_one(lid, locales, force)
+            if outcome == "budget":
+                budget_hit.set()  # not counted: the listing stays pending
+            else:
+                counts[outcome] += 1
 
     while limit <= 0 or len(seen) < limit:
         room = CHUNK if limit <= 0 else min(CHUNK, limit - len(seen))
@@ -103,6 +114,9 @@ async def run(partners: Sequence[str], locales: list[str], force: bool, concurre
         await asyncio.gather(*(worker(lid) for lid in ids))
         print(f"processed={len(seen)} enriched={counts['enriched']} skipped={counts['skipped']} "
               f"failed={counts['failed']}", flush=True)
+        if budget_hit.is_set():
+            print("stopped: daily AI budget reached; the remaining listings stay pending", flush=True)
+            break
     return counts
 
 

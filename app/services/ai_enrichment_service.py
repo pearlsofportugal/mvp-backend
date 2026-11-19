@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.gemini_adapter import gemini_adapter
 from app.config import settings
 from app.core.exceptions import EnrichmentError, NotFoundError
+from app.core.lifecycle import STATUS_ACTIVE
 from app.core.logging import get_logger
 from app.core.prompt_loader import render_prompt
 from app.models.listing_model import Listing
@@ -180,11 +181,12 @@ async def bulk_enrich_listings(
 
 
 async def get_enrichment_stats(db: AsyncSession, source_partner: str | None) -> EnrichmentStats:
-    """Aggregated enrichment statistics across all listings."""
+    """Aggregated enrichment statistics across the active listings (removed ones are not worth enriching)."""
     _is_enriched = Listing.enriched_translations.isnot(None)
+    _is_active = Listing.status == STATUS_ACTIVE
 
-    total_query = select(func.count(Listing.id))
-    enriched_query = select(func.count(Listing.id)).where(_is_enriched)
+    total_query = select(func.count(Listing.id)).where(_is_active)
+    enriched_query = select(func.count(Listing.id)).where(_is_active, _is_enriched)
 
     if source_partner:
         total_query = total_query.where(Listing.source_partner == source_partner)
@@ -197,7 +199,7 @@ async def get_enrichment_stats(db: AsyncSession, source_partner: str | None) -> 
         Listing.source_partner,
         func.count(Listing.id).label("total"),
         func.count(case((_is_enriched, 1))).label("enriched_count"),
-    ).group_by(Listing.source_partner)
+    ).where(_is_active).group_by(Listing.source_partner)
 
     if source_partner:
         by_source_query = by_source_query.where(Listing.source_partner == source_partner)
@@ -223,8 +225,9 @@ async def get_listings_for_bulk_enrich(db: AsyncSession, payload: BulkEnrichment
     if payload.listing_ids:
         stmt = select(Listing).where(Listing.id.in_(payload.listing_ids))
     else:
+        # Explicit listing_ids above are honoured as asked; the automatic selection skips removed listings.
         unenriched_filter = Listing.enriched_translations.is_(None)
-        stmt = select(Listing).where(unenriched_filter)
+        stmt = select(Listing).where(unenriched_filter, Listing.status == STATUS_ACTIVE)
         if payload.source_partner:
             stmt = stmt.where(Listing.source_partner == payload.source_partner)
         stmt = stmt.order_by(Listing.created_at.asc()).limit(payload.limit)

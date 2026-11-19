@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.lifecycle import STATUS_ACTIVE
 from app.models.listing_model import Listing
 from app.models.scrape_job_model import ScrapeJob
 from app.models.site_config_model import SiteConfig
@@ -56,7 +57,11 @@ class DashboardService:
         latest_job_cte.c.last_job_at,
         latest_job_cte.c.last_job_progress,
     )
-    .outerjoin(Listing, Listing.source_partner == SiteConfig.key)
+    # Only active listings: removed ones would inflate totals and averages versus /listings/stats.
+    .outerjoin(
+        Listing,
+        (Listing.source_partner == SiteConfig.key) & (Listing.status == STATUS_ACTIVE),
+    )
     .outerjoin(
         latest_job_cte,
         (latest_job_cte.c.site_key == SiteConfig.key)

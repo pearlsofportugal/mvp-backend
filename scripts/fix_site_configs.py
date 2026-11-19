@@ -8,6 +8,7 @@ What it does (dry-run by default; pass --apply to PATCH):
      ``.imagem-holder``), a link_pattern that matches the sitemap's ``/pt/imoveis/..._<id>/``
      URLs, and an image filter for the ximocrm image proxy.
   3. imoantlantico: first real configuration (HCPro CRM site, sitemap pagination).
+  4. mysquare: ``sold_marker_selector`` so ads badged Vendido/Arrendado are skipped (see parser_service).
 
 Usage:
     set MVP_API_URL=https://<host>/api/v1
@@ -62,6 +63,10 @@ IMOATLANTICO = {
     "schedule_start_url": "https://www.imo-atlantico.pt/sitemap.xml",
 }
 
+MYSQUARE_SOLD_MARKER = (
+    ".faixa .lbl_vendido:-soup-contains('Vendido'), .faixa .lbl_vendido:-soup-contains('Arrendado')"
+)
+
 MYSQUARE_VAL_SELECTORS = (
     "price_selector", "district_selector", "county_selector", "parish_selector",
     "typology_selector", "condition_selector", "property_type_selector",
@@ -75,6 +80,10 @@ def mysquare_patch(site: dict) -> dict:
             selectors[key] += " .val"
     selectors["images_selector"] = ".imagem-holder .swiper-slide img"
     selectors["description_selector"] = ".bloco-descricao .descricao"
+    # Sold/rented ads stay in the sitemap with a badge in `.faixa`. MySquare uses ONE class for every
+    # badge (Vendido, Arrendado and Reservado are all `lbl_vendido`; there is no `lbl_arrendado`), so
+    # the text picks the ones to skip. "Reservado" is left out on purpose: it can return to the market.
+    selectors["sold_marker_selector"] = MYSQUARE_SOLD_MARKER
     return {
         "selectors": selectors,
         "link_pattern": r"^https://www\.mysquare\.pt/pt/imoveis/[^/?#]+_\d+/?$",

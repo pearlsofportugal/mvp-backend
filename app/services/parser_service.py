@@ -395,8 +395,11 @@ def parse_listing_page(
     if coords:
         data["latitude"], data["longitude"] = coords.latitude, coords.longitude
 
-    # Sold/reserved detection
-    data["is_sold"] = _detect_sold_status(data, selectors)
+    # Sold/reserved detection: a per-site marker element wins, then the keyword scan of parsed fields.
+    marker_hit = _sold_marker_matches(soup, selectors)
+    data["is_sold"] = marker_hit or _detect_sold_status(data, selectors)
+    if data["is_sold"]:
+        data["sold_reason"] = "marker" if marker_hit else "keyword"
 
     return data
 
@@ -1688,6 +1691,25 @@ def parse_listing_card(
 
 
 _DEFAULT_SOLD_STATUS_FIELDS = ("condition", "business_state", "title")
+
+
+def _sold_marker_matches(soup: BeautifulSoup, selectors: dict[str, Any]) -> bool:
+    """True when the site's optional ``sold_marker_selector`` finds an element on the page.
+
+    Some sites flag sold/rented listings only with a badge element (e.g. MySquare's
+    ``.faixa .lbl_vendido``) and keep the page otherwise intact, so no parsed field carries the
+    status. A site opts in by setting ``sold_marker_selector`` (any CSS selector, comma-separated
+    alternatives allowed); sites without it are unaffected. An invalid selector never raises: it
+    counts as "no marker" so a typo cannot turn into an error on every listing.
+    """
+    marker = selectors.get("sold_marker_selector")
+    if not marker or not isinstance(marker, str):
+        return False
+    try:
+        return soup.select_one(marker.strip()) is not None
+    except Exception as exc:  # soupsieve raises SelectorSyntaxError for malformed selectors
+        logger.warning("Ignoring invalid sold_marker_selector %r: %s", marker, exc)
+        return False
 
 
 def _detect_sold_status(data: dict[str, Any], selectors: dict[str, Any]) -> bool:

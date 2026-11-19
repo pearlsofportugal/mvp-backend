@@ -611,6 +611,17 @@ async def _run_sitemap_scrape(
             sitemap_scraper.close()
 
 
+def _count_skipped_sold(job: ScrapeJob) -> None:
+    """Bump the job's ``skipped_sold`` counter (listings ignored because the source marks them sold/rented).
+
+    Counts both fresh detections and URLs skipped from the sold-URL cache, so the figure stays
+    meaningful on the runs after the first one. 404/410 pages are "gone", not counted here. The
+    callers' ``update_progress`` calls merge into the progress dict, so the counter survives them.
+    """
+    current = int((job.progress or {}).get("skipped_sold", 0) or 0)
+    job.update_progress(skipped_sold=current + 1)
+
+
 async def _process_listing_url(
     db: AsyncSession,
     job: ScrapeJob,
@@ -641,6 +652,7 @@ async def _process_listing_url(
         if await SoldListingRepository.is_recently_confirmed_sold(db, link, SOLD_URL_CACHE_TTL_DAYS):
             logger.info("Skipping recently-confirmed-sold URL (cached): %s", link)
             job.add_log("info", "Listing marked as sold/reserved — skipped (cached)", link)
+            _count_skipped_sold(job)
             job.touch_heartbeat()
             await db.commit()
             return False, False, False, False
@@ -669,8 +681,10 @@ async def _process_listing_url(
         raw_data = parse_listing_page(detail_html, link, full_selectors, extraction_mode)
         # ── Skip listings vendidos/reservados ──────────────────────────────
         if raw_data.get("is_sold"):
-            logger.info("Listing detected as sold/reserved — skipping: %s", link)
-            job.add_log("info", "Listing marked as sold/reserved — skipped", link)
+            reason = raw_data.get("sold_reason") or "keyword"
+            logger.info("Listing detected as sold/reserved (%s) — skipping: %s", reason, link)
+            job.add_log("info", f"Listing marked as sold/reserved ({reason}) — skipped", link)
+            _count_skipped_sold(job)
 
             existing = await ListingRepository.get_by_source_url(db, link)
             if existing and await ListingRepository.mark_removed(db, existing):

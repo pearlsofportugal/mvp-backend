@@ -13,6 +13,7 @@ NOTE: Since EthicalScraper uses synchronous `requests`, we wrap blocking calls
 with `asyncio.to_thread()` to avoid blocking the event loop.
 """
 import asyncio
+import re
 import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -26,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
-from app.core.lifecycle import GONE_STATUSES, STATUS_ACTIVE
+from app.core.lifecycle import GONE_STATUSES, STATUS_ACTIVE, STATUS_REMOVED
 from app.core.logging import get_logger, set_correlation_id
 from app.crawler.confidence import calculate_confidence, log_low_confidence_scores
 from app.database import async_session_factory, engine
@@ -451,6 +452,7 @@ async def _run_scrape_async(
                 job=job,
                 site_key=site_key,
                 discovered_urls=seen_listing_urls,
+                listing_id_pattern=full_selectors.get("listing_id_pattern"),
             )
         # Sempre actualiza o progress final antes de completar o job —
         # independentemente de ter havido deletes ou não.
@@ -592,6 +594,7 @@ async def _run_sitemap_scrape(
                 job=job,
                 site_key=site_key,
                 discovered_urls=set(urls),   # urls já é a lista completa do sitemap
+                listing_id_pattern=full_selectors.get("listing_id_pattern"),
             )
         if deleted_count:
             job.update_progress(
@@ -1002,6 +1005,71 @@ async def _replace_media_assets(db: AsyncSession, listing_id: UUID, schema) -> N
     logger.info("Stored %d media assets for listing %s (was %d)", len(wanted), listing_id, len(current))
 
 
+def _listing_id_from_url(url: str, pattern: re.Pattern[str]) -> str | None:
+    match = pattern.search(url)
+    return match.group(1) if match else None
+
+
+async def _remove_superseded_duplicates(
+    db: AsyncSession,
+    job: ScrapeJob,
+    site_key: str,
+    discovered_urls: set[str],
+    listing_id_pattern: str | None,
+) -> int:
+    """Soft-delete active listings whose URL changed but whose property id is still on the site.
+
+    Some partners (MySquare) put a slug in the URL that changes whenever the ad's title is edited,
+    while the trailing id stays stable and the site redirects any old slug to the new one. Since
+    the stored ``source_url`` is the key, every rename left a second active row for the same
+    property. A site opts in with ``selectors.listing_id_pattern`` — a regex whose first group is
+    the property id (e.g. ``_([0-9]+)/?$``). An active listing that was *not* discovered this crawl
+    but whose id *was* discovered under another URL is a stale duplicate and is removed.
+    Listings whose id is absent from the crawl, or whose new URL failed this run, are left alone.
+    """
+    if not listing_id_pattern:
+        return 0
+    try:
+        pattern = re.compile(listing_id_pattern)
+    except re.error:
+        logger.warning("Job %s: invalid listing_id_pattern for site %s — duplicate cleanup skipped", job.id, site_key)
+        return 0
+    if pattern.groups < 1:
+        logger.warning("Job %s: listing_id_pattern for site %s has no capture group — skipped", job.id, site_key)
+        return 0
+
+    # A URL that failed to fetch/parse this run proves nothing about its property, so keep the old twin.
+    failed = set((job.urls or {}).get("failed", []))
+    discovered_ids = {i for i in (_listing_id_from_url(u, pattern) for u in discovered_urls - failed) if i}
+    if not discovered_ids:
+        return 0
+
+    rows = (
+        await db.execute(
+            select(Listing.id, Listing.source_url).where(
+                Listing.source_partner == site_key,
+                Listing.status == STATUS_ACTIVE,
+                Listing.source_url.notin_(discovered_urls),
+            )
+        )
+    ).all()
+    stale_ids = [
+        row.id for row in rows if _listing_id_from_url(row.source_url, pattern) in discovered_ids
+    ]
+    if not stale_ids:
+        return 0
+
+    await db.execute(
+        update(Listing)
+        .where(Listing.id.in_(stale_ids))
+        .values(status=STATUS_REMOVED, removed_at=datetime.now(timezone.utc))
+        .execution_options(synchronize_session=False)
+    )
+    logger.info("Job %s: removed %d duplicate listings (URL changed) for partner '%s'", job.id, len(stale_ids), site_key)
+    job.add_log("info", f"Marked {len(stale_ids)} duplicate listings removed (same property id, URL changed)")
+    return len(stale_ids)
+
+
 async def _remove_missing_listings(
     db: AsyncSession,
     job: ScrapeJob,
@@ -1010,6 +1078,7 @@ async def _remove_missing_listings(
     *,
     min_discovered: int = 10,
     max_delete_ratio: float = 0.40,
+    listing_id_pattern: str | None = None,
 ) -> int:
     """Soft-delete (status=removed) active listings of this partner not seen in this crawl.
 
@@ -1019,6 +1088,10 @@ async def _remove_missing_listings(
     Safeguards:
     - Aborts if discovered_urls is suspiciously small (failed crawl).
     - Aborts if the removal ratio exceeds max_delete_ratio (site restructure / bug).
+
+    Before that check, listings whose URL changed (same property id, new slug) are retired
+    as duplicates — see ``_remove_superseded_duplicates`` — so they neither linger as ghost
+    rows nor count against the ratio.
     """
     if len(discovered_urls) < min_discovered:
         logger.warning(
@@ -1030,6 +1103,8 @@ async def _remove_missing_listings(
             f"Auto-remove skipped: only {len(discovered_urls)} URLs discovered (min: {min_discovered})",
         )
         return 0
+
+    superseded = await _remove_superseded_duplicates(db, job, site_key, discovered_urls, listing_id_pattern)
 
     total_active = await db.scalar(
         select(func.count()).where(Listing.source_partner == site_key, Listing.status == STATUS_ACTIVE)
@@ -1054,7 +1129,7 @@ async def _remove_missing_listings(
                 f"Auto-remove skipped: {to_remove_count}/{total_active} listings would be removed "
                 f"({ratio:.0%} exceeds {max_delete_ratio:.0%} safety limit)",
             )
-            return 0
+            return superseded
 
     removed_count = await ListingRepository.mark_missing_removed(db, site_key, discovered_urls)
 
@@ -1068,7 +1143,7 @@ async def _remove_missing_listings(
             f"Marked {removed_count} listings removed (no longer present on site)",
         )
 
-    return removed_count
+    return removed_count + superseded
 
 
 async def _complete_job(db: AsyncSession, job: ScrapeJob) -> None:

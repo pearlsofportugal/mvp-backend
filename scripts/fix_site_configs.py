@@ -9,6 +9,8 @@ What it does (dry-run by default; pass --apply to PATCH):
      URLs, and an image filter for the ximocrm image proxy.
   3. imoantlantico: first real configuration (HCPro CRM site, sitemap pagination).
   4. mysquare: ``sold_marker_selector`` so ads badged Vendido/Arrendado are skipped (see parser_service).
+  5. mysquare: ``listing_id_pattern`` so a renamed ad (new slug, same id) retires its old URL instead of
+     leaving a duplicate active row (see scraper_service._remove_superseded_duplicates).
 
 Usage:
     set MVP_API_URL=https://<host>/api/v1
@@ -68,6 +70,9 @@ MYSQUARE_SOLD_MARKER = (
     ".faixa .lbl_vendido:-soup-contains('Vendido'), .faixa .lbl_vendido:-soup-contains('Arrendado')"
 )
 
+# The trailing id is stable; the slug before it changes whenever the ad's title is edited.
+MYSQUARE_LISTING_ID_PATTERN = r"_(\d+)/?$"
+
 MYSQUARE_VAL_SELECTORS = (
     "price_selector", "district_selector", "county_selector", "parish_selector",
     "typology_selector", "condition_selector", "property_type_selector",
@@ -85,6 +90,7 @@ def mysquare_patch(site: dict) -> dict:
     # badge (Vendido, Arrendado and Reservado are all `lbl_vendido`; there is no `lbl_arrendado`), so
     # the text picks the ones to skip. "Reservado" is left out on purpose: it can return to the market.
     selectors["sold_marker_selector"] = MYSQUARE_SOLD_MARKER
+    selectors["listing_id_pattern"] = MYSQUARE_LISTING_ID_PATTERN
     return {
         "selectors": selectors,
         "link_pattern": r"^https://www\.mysquare\.pt/pt/imoveis/[^/?#]+_\d+/?$",

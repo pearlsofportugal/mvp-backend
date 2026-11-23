@@ -192,6 +192,189 @@ class TestTextHeuristics:
         assert raw["energy_certificate"] == "C"
 
 
+# ── _filter_chrome_images ───────────────────────────────────────────────────
+
+class TestFilterChromeImages:
+    def test_drops_svg_and_known_chrome_filenames_keeps_real_photos(self):
+        # era.pt: with no site-specific selector config, the default "img"
+        # selector in _parse_images grabs every <img> on the page — the nav
+        # logo (an .svg) and six social-footer icons, alongside the one real
+        # listing photo.
+        raw = {
+            "images": [
+                "https://www.era.pt/Portals/0/EraPT_4Cores.svg",
+                "https://mediaredir2.era.pt/i/moradia-t4-photo.jpg",
+                "https://www.era.pt/Portals/0/07_Redes-Sociais/facebook-footer-icon.png",
+                "https://www.era.pt/Portals/0/07_Redes-Sociais/youtube-footer-icon.png",
+            ],
+            "alt_texts": ["logo", "", "facebook", "youtube"],
+        }
+        ge._filter_chrome_images(raw)
+        assert raw["images"] == ["https://mediaredir2.era.pt/i/moradia-t4-photo.jpg"]
+        assert raw["alt_texts"] == [""]
+
+    def test_no_op_when_nothing_is_chrome(self):
+        raw = {"images": ["https://cdn.x/1.jpg", "https://cdn.x/2.jpg"], "alt_texts": ["", ""]}
+        ge._filter_chrome_images(raw)
+        assert raw["images"] == ["https://cdn.x/1.jpg", "https://cdn.x/2.jpg"]
+
+    def test_no_op_when_images_missing(self):
+        raw: dict = {}
+        ge._filter_chrome_images(raw)
+        assert raw == {}
+
+
+# ── _gallery_images_sharing_cover_host ──────────────────────────────────────
+
+class TestGalleryImagesSharingCoverHost:
+    def test_collects_same_host_photos_and_dedupes_size_variants(self):
+        # remax.pt: the whole gallery is utility-class markup with no
+        # "gallery"/"foto"/"thumb" keyword anywhere, and each photo appears
+        # twice — once per size variant used in different parts of the page
+        # (a hero carousel + a thumbnail strip) — under the *same* filename.
+        html = """
+        <html><body>
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg" class="object-cover">
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg" class="object-cover">
+          <img src="https://i.maxwork.pt/ds-l/listings/1/2/aaa.jpg" class="w-full h-full">
+          <img src="https://i.maxwork.pt/ds-l/listings/1/2/bbb.jpg" class="w-full h-full">
+          <img src="https://cdn.cookiebot.com/logo/arrow.png" class="CybotExternalLinkArrow">
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        cover = "https://i.maxwork.pt/ds-l/listings/1/2/aaa.jpg"
+        gallery = ge._gallery_images_sharing_cover_host(soup, cover)
+        assert gallery == [
+            "https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg",
+            "https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg",
+        ]
+
+    def test_empty_when_cover_url_has_no_host(self):
+        soup = BeautifulSoup("<html><body><img src='/relative.jpg'></body></html>", "lxml")
+        assert ge._gallery_images_sharing_cover_host(soup, "/relative.jpg") == []
+
+    def test_empty_when_photos_and_page_share_the_same_host(self):
+        # era.pt: listing photos and page chrome both live on www.era.pt, so
+        # host-matching alone can't tell them apart — bail out entirely.
+        html = """
+        <html><body>
+          <img src="https://www.era.pt/imoveis/1/2/aaa.jpg">
+          <img src="https://www.era.pt/imoveis/1/2/bbb.jpg">
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        cover = "https://www.era.pt/imoveis/1/2/aaa.jpg"
+        gallery = ge._gallery_images_sharing_cover_host(
+            soup, cover, "https://www.era.pt/imovel/moradia-t4-123"
+        )
+        assert gallery == []
+
+    def test_filters_social_and_logo_icons_on_a_dedicated_asset_host(self):
+        html = """
+        <html><body>
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg">
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg">
+          <img src="https://i.maxwork.pt/Portals/0/social/facebook-footer-icon.png">
+          <img src="https://i.maxwork.pt/assets/logo/site-logo.svg">
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        cover = "https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg"
+        gallery = ge._gallery_images_sharing_cover_host(
+            soup, cover, "https://www.remax.pt/pt/imoveis/some-listing"
+        )
+        assert gallery == [
+            "https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg",
+            "https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg",
+        ]
+
+
+# ── _best_paragraph_group ───────────────────────────────────────────────────
+
+class TestBestParagraphGroup:
+    def test_recovers_text_from_a_page_wrapping_asp_net_form(self):
+        # Classic ASP.NET WebForms sites (ville.pt and other X-IMO-CRM-powered
+        # agencies) wrap the ENTIRE page, body text included, in one
+        # <form id="form1"> directly under <body> for ViewState postback
+        # plumbing — not a contact widget. Decomposing every <form> wholesale
+        # used to wipe out the real description along with it (found live on
+        # ville.pt: fell back to the 155-char truncated meta description).
+        html = """
+        <html><body>
+        <form id="form1">
+          <div class="bloco-imovel-texto">
+            Moradia T3, Mourisca do Vouga, Agueda.<br/><br/>
+            Moradia térrea com cave ampla que serve de garagem e espaço de
+            arrumação muito útil para quem precisa de espaço extra.<br/><br/>
+            No piso térreo a moradia é constituida por cozinha equipada, sala
+            comum com lareira, três quartos com excelentes áreas e duas casas
+            de banho completas, uma delas em suíte com banheira de hidromassagem.
+          </div>
+          <input type="hidden" name="__VIEWSTATE" value="junk" />
+        </form>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        best = ge._best_paragraph_group(soup)
+        assert "Mourisca do Vouga" in best
+        assert "hidromassagem" in best
+        assert "__VIEWSTATE" not in best
+
+    def test_prefers_jsonld_description_over_a_short_meta_snippet(self):
+        # era.pt: <meta name="description"> is a generic ~60-char SEO snippet
+        # ("Conheça aqui..."), while the page's own JSON-LD RealEstateListing
+        # node carries the full real description — a source the fallback
+        # never looked at before, so it went hunting the DOM instead and
+        # lost to the site's own "add to home screen" PWA instructions.
+        html = """
+        <html><head>
+        <meta name="description" content="Conheça aqui o Apartamento em Alvalade e fique a saber tudo.">
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"RealEstateListing",
+         "description":"Apartamento T1 com varanda com cozinha totalmente equipada, inserido em prédio com 2 elevadores. Localização em plena Av. de Roma, a 2 minutos a pé do Metropolitano. Próximo de todo o tipo de comércio, serviços e transportes."}
+        </script>
+        </head><body>
+          <div>Pode adicionar facilmente este site ao seu ecrã inicial do seu telemóvel
+          para ter acesso instantâneo e navegar mais rápido, com uma experiência
+          semelhante ao de uma aplicação. Aceda ao menu de partilha e escolha a
+          opção Ecrã principal. Aceda ao menu do browser e escolha Instalar.</div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        raw = {"raw_description": "Conheça aqui o Apartamento em Alvalade e fique a saber tudo."}
+        ge._text_heuristics(soup, raw)
+        assert "Av. de Roma" in raw["raw_description"]
+        assert "ecrã inicial" not in raw["raw_description"]
+
+    def test_still_strips_a_real_embedded_contact_form(self):
+        # A genuine contact/consent widget nested in the page — not a
+        # page-wrapper — must still be dropped entirely, the original intent
+        # of decomposing "form": its disclaimer text must never outscore the
+        # real description elsewhere on the page.
+        html = """
+        <html><body>
+        <main>
+          <p>%s</p>
+        </main>
+        <form id="contact-widget">
+          <p>Li na totalidade e concordo com os termos e condições apresentados
+          e com a política de privacidade e proteção de dados pessoais, incluindo
+          o tratamento dos meus dados para efeitos de contacto comercial e
+          envio de newsletter sobre novidades e campanhas futuras.</p>
+          <input type="text" name="nome" />
+          <textarea name="mensagem"></textarea>
+        </form>
+        </body></html>
+        """ % ("Excelente apartamento T2 completamente remodelado, com acabamentos "
+               "de alta qualidade, cozinha equipada, dois quartos espaçosos, uma "
+               "casa de banho moderna e varanda com vista desafogada sobre o rio. "
+               "Localizado numa zona calma mas perto de todos os serviços.")
+        soup = BeautifulSoup(html, "lxml")
+        best = ge._best_paragraph_group(soup)
+        assert "apartamento T2" in best
+        assert "newsletter" not in best
+
+
 # ── extract_generic end-to-end (fetch + suggester mocked) ──────────────────
 
 _JSONLD_PAGE = """

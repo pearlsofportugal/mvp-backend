@@ -99,6 +99,15 @@ class TestParseArea:
     def test_thousands_only_dot_separator(self):
         assert parse_area("2.408 m²") == 2408.0
 
+    def test_thousands_only_comma_separator(self):
+        # English-language sites (portugalproperty.com, Savills, ...) write
+        # thousands with a comma and no decimal part — found live on
+        # portugalproperty.com, where "1,729 m2" was misread as 1.729 m².
+        assert parse_area("1,729 m2") == 1729.0
+
+    def test_thousands_only_comma_separator_large(self):
+        assert parse_area("12,345 m2") == 12345.0
+
 
 class TestParseInt:
     def test_from_string(self):

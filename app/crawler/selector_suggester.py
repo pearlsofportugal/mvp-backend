@@ -732,6 +732,14 @@ def _extract_values_from_json_ld_node(node: dict[str, Any]) -> dict[str, list[st
         return {field: [] for field in _FIELD_ORDER}
 
     title = _first_string(node.get("name"), node.get("headline"), node.get("title"))
+    if title and not _looks_like_prose_title(title):
+        # Some sites (remax.pt) put their own internal listing id/SKU in the
+        # JSON-LD Product "name" ("120511518-169") instead of the actual
+        # title that's in <title>/og:title/<h1> — JSON-LD is normally the
+        # most trustworthy source and is tried first, so an id like this
+        # silently won over the real title downstream. A real title always
+        # has letters; an id-only string never does.
+        title = None
     price = _first_string(
         node.get("price"),
         _nested_value(node, "offers", "price"),
@@ -1222,6 +1230,14 @@ def _address_parts(address_value: Any) -> tuple[str | None, str | None, str | No
         return district, county, parish
 
     return None, None, None
+
+
+_HAS_LETTER_RE = re.compile(r"[^\W\d_]")
+
+
+def _looks_like_prose_title(value: str) -> bool:
+    """A real listing title names *something* in words — an id/SKU never does."""
+    return bool(_HAS_LETTER_RE.search(value))
 
 
 def _nested_value(node: dict[str, Any], *keys: str) -> Any:

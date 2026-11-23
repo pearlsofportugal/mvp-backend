@@ -20,6 +20,7 @@ Nothing is written to the database here.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -28,7 +29,12 @@ from bs4 import BeautifulSoup, NavigableString
 from app.config import settings
 from app.core.logging import get_logger
 from app.crawler.html_cache import html_cache
-from app.crawler.selector_suggester import _is_in_excluded_region, suggest_selectors
+from app.crawler.selector_suggester import (
+    _JSON_LD_SELECTOR,
+    _is_in_excluded_region,
+    _iter_json_ld_nodes,
+    suggest_selectors,
+)
 from app.schemas.property_schema import PropertySchema
 from app.services.ego_extract_service import (
     ego_source_partner,
@@ -128,6 +134,35 @@ _DESCRIPTION_CONTAINER_SELECTORS = (
 _MIN_DESCRIPTION_LENGTH = 200
 
 
+def _jsonld_description(soup: BeautifulSoup) -> str:
+    """The listing's own JSON-LD "description", when richer than the generic
+    SEO meta tag.
+
+    Found live on era.pt: `<meta name="description">` is a generic ~60-char
+    snippet ("Conheça aqui o Apartamento em Alvalade e fique a saber tudo."),
+    while the page's own `RealEstateListing` JSON-LD node carries the full,
+    real description text as `description` — a field `_FIELD_ORDER` (and so
+    the structured-data layer) never looks at, so the fallback hunt below
+    went looking through the DOM for text that was sitting in plain JSON
+    on the same page all along, and lost to the site's PWA
+    "add to home screen" instructions in the process.
+    """
+    best = ""
+    for script in soup.select(_JSON_LD_SELECTOR):
+        raw_payload = script.string or script.get_text(strip=True)
+        if not raw_payload:
+            continue
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            continue
+        for node in _iter_json_ld_nodes(payload):
+            value = node.get("description")
+            if isinstance(value, str) and len(value.strip()) > len(best):
+                best = value.strip()
+    return best
+
+
 def _description_looks_truncated(text: str) -> bool:
     text = text.strip()
     if len(text) < _MIN_DESCRIPTION_LENGTH:
@@ -173,8 +208,21 @@ def _best_paragraph_group(soup: BeautifulSoup) -> str:
     with no descriptive class/id, so selector-based lookup misses it.
     """
     clean = BeautifulSoup(str(soup), "lxml")
-    for tag_name in (*_CHROME_TAGS, "form"):
+    for tag_name in (*_CHROME_TAGS, "input", "textarea", "button"):
         for el in clean.find_all(tag_name):
+            el.decompose()
+    for el in clean.find_all("form"):
+        # A real contact/consent form is a small widget nested in the page.
+        # Classic ASP.NET sites (ville.pt and other X-IMO-CRM-powered
+        # agencies) wrap the *entire* page — including the actual listing
+        # description — in one <form id="form1"> directly under <body> for
+        # ViewState postback plumbing. Decomposing that wholesale, as a
+        # contact-form widget would deserve, wiped out the real description
+        # along with it, leaving nothing for this function to find. A form
+        # sitting right under <body>/<html> is that page wrapper, not a
+        # widget, so only its field controls (already stripped above) are
+        # removed, not the form itself.
+        if el.parent is not None and el.parent.name not in ("body", "html"):
             el.decompose()
     for el in clean.find_all(id=_RELATED_LISTINGS_RE):
         el.decompose()
@@ -410,6 +458,9 @@ def _text_heuristics(soup: BeautifulSoup, raw: dict) -> None:
     current_description = raw.get("raw_description") or ""
     if _description_looks_truncated(current_description):
         best = current_description
+        jsonld_desc = _jsonld_description(soup)
+        if len(jsonld_desc) > len(best) and _looks_like_prose(jsonld_desc):
+            best = jsonld_desc
         for selector in _DESCRIPTION_CONTAINER_SELECTORS:
             for el in soup.select(selector):
                 if _is_in_excluded_region(el):
@@ -481,6 +532,106 @@ def _image_heuristic(soup: BeautifulSoup, url: str, raw: dict) -> None:
         raw["alt_texts"] = [""] * len(best)
 
 
+_SITE_CHROME_IMAGE_RE = re.compile(
+    r"facebook|instagram|linkedin|twitter|youtube|pinterest|whatsapp|messenger|"
+    r"tiktok|[-_/]logo[-_./]|[-_/]icon[-_./]|sprite|avatar|placeholder|flags?\.(png|jpe?g|svg)",
+    re.IGNORECASE,
+)
+
+
+def _is_chrome_image(src: str) -> bool:
+    """True for page chrome (logos, social badges, UI icons), never a real photo.
+
+    A plain "img" selector (the default when no site-specific config exists —
+    every generic-mode extraction) picks up literally every ``<img>`` on the
+    page, not just the gallery. Real estate photos are always raster; a site's
+    own logo and UI icons are commonly vector, so any ``.svg`` is chrome by
+    construction. Everything else is checked against known chrome filename
+    patterns (confirmed live on era.pt: its nav logo and six social-footer
+    icons were otherwise indistinguishable from gallery ``<img>`` tags).
+    """
+    path = urlparse(src).path
+    if path.lower().endswith(".svg"):
+        return True
+    return bool(_SITE_CHROME_IMAGE_RE.search(path))
+
+
+def _filter_chrome_images(raw: dict) -> None:
+    """Drop page-chrome images from an already-populated raw["images"] list."""
+    images = raw.get("images") or []
+    if not images:
+        return
+    alts = list(raw.get("alt_texts") or [])
+    alts += [""] * (len(images) - len(alts))
+    kept_images, kept_alts = [], []
+    for image, alt in zip(images, alts):
+        if _is_chrome_image(image):
+            continue
+        kept_images.append(image)
+        kept_alts.append(alt)
+    if len(kept_images) != len(images):
+        raw["images"] = kept_images
+        raw["alt_texts"] = kept_alts
+
+
+def _normalized_host(host: str) -> str:
+    return host[4:] if host.startswith("www.") else host
+
+
+def _gallery_images_sharing_cover_host(
+    soup: BeautifulSoup, cover_url: str, page_url: str | None = None
+) -> list[str]:
+    """Every real photo hosted on the same domain as the already-known cover.
+
+    Some sites (remax.pt) render their whole gallery with utility classes
+    (Tailwind-style: "w-full h-full object-cover", no "gallery"/"foto"/
+    "thumb" keyword anywhere) — _GALLERY_SELECTORS' keyword matching finds
+    nothing there even once the page is rendered, because it has no semantic
+    hook to look for. The listing's own photo CDN is a precise, class-name-
+    independent signal instead: site chrome (logos, cookie-consent icons,
+    social badges) is essentially never served from the same host as the
+    listing's own photos — confirmed live on remax.pt, where this picked out
+    exactly the 37 real listing photos and none of the page's cookie-banner
+    icons. Each photo there appears twice, once per size variant used in
+    different parts of the page (a hero carousel + a thumbnail strip), with
+    the same filename in both — dedup on that.
+
+    This only holds when photos live on a dedicated asset host distinct from
+    the site itself (maxwork.pt for remax.pt). Some sites (era.pt) serve both
+    listing photos *and* every piece of page chrome — social-share badges,
+    the nav logo, flag icons — from the site's own domain, so host-matching
+    alone pulls those in too (confirmed live on era.pt: a 2-photo listing
+    "gained" 5 social-network icons this way). Skip entirely when the cover
+    photo's host is the page's own host, and filter obviously-chrome
+    filenames as a second line of defence for whatever CDN host this still
+    runs on.
+    """
+    cover_host = urlparse(cover_url).hostname
+    if not cover_host:
+        return []
+    if page_url:
+        page_host = urlparse(page_url).hostname
+        if page_host and _normalized_host(page_host) == _normalized_host(cover_host):
+            return []
+    seen_names: set[str] = set()
+    gallery: list[str] = []
+    for img in soup.find_all("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+        if not src.startswith(("http://", "https://")):
+            continue
+        parsed = urlparse(src)
+        if parsed.hostname != cover_host:
+            continue
+        if _is_chrome_image(src):
+            continue
+        name = parsed.path.rsplit("/", 1)[-1]
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        gallery.append(src)
+    return gallery
+
+
 def _llm_fallback(soup: BeautifulSoup, url: str, raw: dict) -> None:
     """One Gemini Flash call to fill core fields — only when title/price still missing."""
     from app.adapters.gemini_adapter import gemini_adapter
@@ -546,6 +697,11 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
 
     # Layer a — structured data + built-in fallbacks
     raw = parse_listing_page(html, url, selectors={}, extraction_mode="direct")
+    # With no site-specific config, _parse_images defaults to a plain "img"
+    # selector — every <img> on the page, not just the gallery. Drop page
+    # chrome (logos, social badges) before it counts toward "images present"
+    # and blocks the layers below from looking for the real gallery.
+    _filter_chrome_images(raw)
     provenance = {f: ("structured_data" if raw.get(f) else None) for f in _PROVENANCE_FIELDS}
 
     # Layer b — selector suggester
@@ -584,6 +740,7 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
                     raw[key] = value
                     _bump_provenance(provenance, key, "structured_data")
             _strip_label_values(raw)
+            _filter_chrome_images(raw)
 
     # Layer c — regex heuristics
     before = {f: raw.get(f) for f in _PROVENANCE_FIELDS}
@@ -592,11 +749,41 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
         if raw.get(f) and not before.get(f):
             _bump_provenance(provenance, f, "heuristic")
 
-    # Layer d — image gallery heuristic
-    if not raw.get("images"):
+    # Layer d — image gallery heuristic. _image_heuristic already no-ops once
+    # there are 3+ images; gating the call itself on "images truthy" (instead
+    # of matching that same threshold) meant it was never even tried whenever
+    # layer a/b had already found exactly one image — the common case for a
+    # JSON-LD-only cover photo with the real gallery is a lazy-loaded one the
+    # static page never exposes any of.
+    before_images = list(raw.get("images") or [])
+    if len(before_images) < 3:
         _image_heuristic(soup, url, raw)
-        if raw.get("images"):
+        if raw.get("images") != before_images:
             _bump_provenance(provenance, "images", "heuristic")
+
+    # Layer d.5 — sparse-gallery render retry. Some sites (remax.pt) have
+    # literally zero <img> tags in static HTML — the whole gallery, beyond
+    # the single JSON-LD cover photo, is injected by client-side JS after
+    # hydration with no trace in the server-rendered markup, and even once
+    # rendered its utility-class markup has no keyword for the heuristic
+    # above to key on. A real listing's own photos are the whole point of a
+    # property report, so for a confirmed real listing (title + price both
+    # present) with only the one cover photo and no <img> tags in the static
+    # page at all, one extra render is worth the latency.
+    if (
+        len(raw.get("images") or []) == 1
+        and not soup.find_all("img")
+        and raw.get("price")
+        and raw.get("title")
+    ):
+        rendered = await _fetch_rendered(url)
+        if rendered and not _looks_like_challenge_page(rendered):
+            rsoup = BeautifulSoup(rendered, "lxml")
+            gallery = _gallery_images_sharing_cover_host(rsoup, raw["images"][0], url)
+            if len(gallery) > len(raw["images"]):
+                raw["images"] = gallery
+                raw["alt_texts"] = [""] * len(gallery)
+                _bump_provenance(provenance, "images", "heuristic")
     _prefer_og_image(soup, url, raw)
 
     # Layer e — optional LLM fallback. Fires on missing title/price (the

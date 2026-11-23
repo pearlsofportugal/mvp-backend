@@ -223,6 +223,32 @@ class TestBestParagraphGroup:
         assert "hidromassagem" in best
         assert "__VIEWSTATE" not in best
 
+    def test_prefers_jsonld_description_over_a_short_meta_snippet(self):
+        # era.pt: <meta name="description"> is a generic ~60-char SEO snippet
+        # ("Conheça aqui..."), while the page's own JSON-LD RealEstateListing
+        # node carries the full real description — a source the fallback
+        # never looked at before, so it went hunting the DOM instead and
+        # lost to the site's own "add to home screen" PWA instructions.
+        html = """
+        <html><head>
+        <meta name="description" content="Conheça aqui o Apartamento em Alvalade e fique a saber tudo.">
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"RealEstateListing",
+         "description":"Apartamento T1 com varanda com cozinha totalmente equipada, inserido em prédio com 2 elevadores. Localização em plena Av. de Roma, a 2 minutos a pé do Metropolitano. Próximo de todo o tipo de comércio, serviços e transportes."}
+        </script>
+        </head><body>
+          <div>Pode adicionar facilmente este site ao seu ecrã inicial do seu telemóvel
+          para ter acesso instantâneo e navegar mais rápido, com uma experiência
+          semelhante ao de uma aplicação. Aceda ao menu de partilha e escolha a
+          opção Ecrã principal. Aceda ao menu do browser e escolha Instalar.</div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        raw = {"raw_description": "Conheça aqui o Apartamento em Alvalade e fique a saber tudo."}
+        ge._text_heuristics(soup, raw)
+        assert "Av. de Roma" in raw["raw_description"]
+        assert "ecrã inicial" not in raw["raw_description"]
+
     def test_still_strips_a_real_embedded_contact_form(self):
         # A genuine contact/consent widget nested in the page — not a
         # page-wrapper — must still be dropped entirely, the original intent

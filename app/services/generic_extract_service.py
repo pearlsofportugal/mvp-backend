@@ -20,6 +20,7 @@ Nothing is written to the database here.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -28,7 +29,12 @@ from bs4 import BeautifulSoup, NavigableString
 from app.config import settings
 from app.core.logging import get_logger
 from app.crawler.html_cache import html_cache
-from app.crawler.selector_suggester import _is_in_excluded_region, suggest_selectors
+from app.crawler.selector_suggester import (
+    _JSON_LD_SELECTOR,
+    _is_in_excluded_region,
+    _iter_json_ld_nodes,
+    suggest_selectors,
+)
 from app.schemas.property_schema import PropertySchema
 from app.services.ego_extract_service import (
     ego_source_partner,
@@ -126,6 +132,35 @@ _DESCRIPTION_CONTAINER_SELECTORS = (
     "[class*='sobre']", "[itemprop='description']",
 )
 _MIN_DESCRIPTION_LENGTH = 200
+
+
+def _jsonld_description(soup: BeautifulSoup) -> str:
+    """The listing's own JSON-LD "description", when richer than the generic
+    SEO meta tag.
+
+    Found live on era.pt: `<meta name="description">` is a generic ~60-char
+    snippet ("Conheça aqui o Apartamento em Alvalade e fique a saber tudo."),
+    while the page's own `RealEstateListing` JSON-LD node carries the full,
+    real description text as `description` — a field `_FIELD_ORDER` (and so
+    the structured-data layer) never looks at, so the fallback hunt below
+    went looking through the DOM for text that was sitting in plain JSON
+    on the same page all along, and lost to the site's PWA
+    "add to home screen" instructions in the process.
+    """
+    best = ""
+    for script in soup.select(_JSON_LD_SELECTOR):
+        raw_payload = script.string or script.get_text(strip=True)
+        if not raw_payload:
+            continue
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            continue
+        for node in _iter_json_ld_nodes(payload):
+            value = node.get("description")
+            if isinstance(value, str) and len(value.strip()) > len(best):
+                best = value.strip()
+    return best
 
 
 def _description_looks_truncated(text: str) -> bool:
@@ -423,6 +458,9 @@ def _text_heuristics(soup: BeautifulSoup, raw: dict) -> None:
     current_description = raw.get("raw_description") or ""
     if _description_looks_truncated(current_description):
         best = current_description
+        jsonld_desc = _jsonld_description(soup)
+        if len(jsonld_desc) > len(best) and _looks_like_prose(jsonld_desc):
+            best = jsonld_desc
         for selector in _DESCRIPTION_CONTAINER_SELECTORS:
             for el in soup.select(selector):
                 if _is_in_excluded_region(el):

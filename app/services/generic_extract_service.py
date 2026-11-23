@@ -173,8 +173,21 @@ def _best_paragraph_group(soup: BeautifulSoup) -> str:
     with no descriptive class/id, so selector-based lookup misses it.
     """
     clean = BeautifulSoup(str(soup), "lxml")
-    for tag_name in (*_CHROME_TAGS, "form"):
+    for tag_name in (*_CHROME_TAGS, "input", "textarea", "button"):
         for el in clean.find_all(tag_name):
+            el.decompose()
+    for el in clean.find_all("form"):
+        # A real contact/consent form is a small widget nested in the page.
+        # Classic ASP.NET sites (ville.pt and other X-IMO-CRM-powered
+        # agencies) wrap the *entire* page — including the actual listing
+        # description — in one <form id="form1"> directly under <body> for
+        # ViewState postback plumbing. Decomposing that wholesale, as a
+        # contact-form widget would deserve, wiped out the real description
+        # along with it, leaving nothing for this function to find. A form
+        # sitting right under <body>/<html> is that page wrapper, not a
+        # widget, so only its field controls (already stripped above) are
+        # removed, not the form itself.
+        if el.parent is not None and el.parent.name not in ("body", "html"):
             el.decompose()
     for el in clean.find_all(id=_RELATED_LISTINGS_RE):
         el.decompose()

@@ -192,6 +192,66 @@ class TestTextHeuristics:
         assert raw["energy_certificate"] == "C"
 
 
+# ── _best_paragraph_group ───────────────────────────────────────────────────
+
+class TestBestParagraphGroup:
+    def test_recovers_text_from_a_page_wrapping_asp_net_form(self):
+        # Classic ASP.NET WebForms sites (ville.pt and other X-IMO-CRM-powered
+        # agencies) wrap the ENTIRE page, body text included, in one
+        # <form id="form1"> directly under <body> for ViewState postback
+        # plumbing — not a contact widget. Decomposing every <form> wholesale
+        # used to wipe out the real description along with it (found live on
+        # ville.pt: fell back to the 155-char truncated meta description).
+        html = """
+        <html><body>
+        <form id="form1">
+          <div class="bloco-imovel-texto">
+            Moradia T3, Mourisca do Vouga, Agueda.<br/><br/>
+            Moradia térrea com cave ampla que serve de garagem e espaço de
+            arrumação muito útil para quem precisa de espaço extra.<br/><br/>
+            No piso térreo a moradia é constituida por cozinha equipada, sala
+            comum com lareira, três quartos com excelentes áreas e duas casas
+            de banho completas, uma delas em suíte com banheira de hidromassagem.
+          </div>
+          <input type="hidden" name="__VIEWSTATE" value="junk" />
+        </form>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        best = ge._best_paragraph_group(soup)
+        assert "Mourisca do Vouga" in best
+        assert "hidromassagem" in best
+        assert "__VIEWSTATE" not in best
+
+    def test_still_strips_a_real_embedded_contact_form(self):
+        # A genuine contact/consent widget nested in the page — not a
+        # page-wrapper — must still be dropped entirely, the original intent
+        # of decomposing "form": its disclaimer text must never outscore the
+        # real description elsewhere on the page.
+        html = """
+        <html><body>
+        <main>
+          <p>%s</p>
+        </main>
+        <form id="contact-widget">
+          <p>Li na totalidade e concordo com os termos e condições apresentados
+          e com a política de privacidade e proteção de dados pessoais, incluindo
+          o tratamento dos meus dados para efeitos de contacto comercial e
+          envio de newsletter sobre novidades e campanhas futuras.</p>
+          <input type="text" name="nome" />
+          <textarea name="mensagem"></textarea>
+        </form>
+        </body></html>
+        """ % ("Excelente apartamento T2 completamente remodelado, com acabamentos "
+               "de alta qualidade, cozinha equipada, dois quartos espaçosos, uma "
+               "casa de banho moderna e varanda com vista desafogada sobre o rio. "
+               "Localizado numa zona calma mas perto de todos os serviços.")
+        soup = BeautifulSoup(html, "lxml")
+        best = ge._best_paragraph_group(soup)
+        assert "apartamento T2" in best
+        assert "newsletter" not in best
+
+
 # ── extract_generic end-to-end (fetch + suggester mocked) ──────────────────
 
 _JSONLD_PAGE = """

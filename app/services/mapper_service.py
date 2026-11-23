@@ -450,8 +450,15 @@ def _normalize_decimal_separators(num_str: str) -> str:
         return num_str.replace(",", "")
 
     if "," in num_str:
-        # A lone comma in an area string is always a decimal separator
-        # (areas are rarely written with a comma thousands separator).
+        # A lone comma is ambiguous between English thousands ("1,729" = 1729)
+        # and European decimal ("120,5" = 120.5) notation — English-language
+        # listing sites (portugalproperty.com, Savills, ...) use the former.
+        # Same digit-grouping heuristic parse_price already uses: every group
+        # after the first comma being exactly 3 digits means thousands, not a
+        # decimal fraction (a sqm value is never written to 3 decimal places).
+        parts = num_str.split(",")
+        if len(parts) > 1 and len(parts[0]) <= 3 and all(len(p) == 3 for p in parts[1:]):
+            return num_str.replace(",", "")
         return num_str.replace(",", ".")
 
     if "." in num_str:

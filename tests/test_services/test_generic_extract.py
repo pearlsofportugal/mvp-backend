@@ -192,6 +192,36 @@ class TestTextHeuristics:
         assert raw["energy_certificate"] == "C"
 
 
+# ── _gallery_images_sharing_cover_host ──────────────────────────────────────
+
+class TestGalleryImagesSharingCoverHost:
+    def test_collects_same_host_photos_and_dedupes_size_variants(self):
+        # remax.pt: the whole gallery is utility-class markup with no
+        # "gallery"/"foto"/"thumb" keyword anywhere, and each photo appears
+        # twice — once per size variant used in different parts of the page
+        # (a hero carousel + a thumbnail strip) — under the *same* filename.
+        html = """
+        <html><body>
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg" class="object-cover">
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg" class="object-cover">
+          <img src="https://i.maxwork.pt/ds-l/listings/1/2/aaa.jpg" class="w-full h-full">
+          <img src="https://i.maxwork.pt/ds-l/listings/1/2/bbb.jpg" class="w-full h-full">
+          <img src="https://cdn.cookiebot.com/logo/arrow.png" class="CybotExternalLinkArrow">
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        cover = "https://i.maxwork.pt/ds-l/listings/1/2/aaa.jpg"
+        gallery = ge._gallery_images_sharing_cover_host(soup, cover)
+        assert gallery == [
+            "https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg",
+            "https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg",
+        ]
+
+    def test_empty_when_cover_url_has_no_host(self):
+        soup = BeautifulSoup("<html><body><img src='/relative.jpg'></body></html>", "lxml")
+        assert ge._gallery_images_sharing_cover_host(soup, "/relative.jpg") == []
+
+
 # ── _best_paragraph_group ───────────────────────────────────────────────────
 
 class TestBestParagraphGroup:

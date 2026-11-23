@@ -532,6 +532,42 @@ def _image_heuristic(soup: BeautifulSoup, url: str, raw: dict) -> None:
         raw["alt_texts"] = [""] * len(best)
 
 
+def _gallery_images_sharing_cover_host(soup: BeautifulSoup, cover_url: str) -> list[str]:
+    """Every real photo hosted on the same domain as the already-known cover.
+
+    Some sites (remax.pt) render their whole gallery with utility classes
+    (Tailwind-style: "w-full h-full object-cover", no "gallery"/"foto"/
+    "thumb" keyword anywhere) — _GALLERY_SELECTORS' keyword matching finds
+    nothing there even once the page is rendered, because it has no semantic
+    hook to look for. The listing's own photo CDN is a precise, class-name-
+    independent signal instead: site chrome (logos, cookie-consent icons,
+    social badges) is essentially never served from the same host as the
+    listing's own photos — confirmed live on remax.pt, where this picked out
+    exactly the 37 real listing photos and none of the page's cookie-banner
+    icons. Each photo there appears twice, once per size variant used in
+    different parts of the page (a hero carousel + a thumbnail strip), with
+    the same filename in both — dedup on that.
+    """
+    cover_host = urlparse(cover_url).hostname
+    if not cover_host:
+        return []
+    seen_names: set[str] = set()
+    gallery: list[str] = []
+    for img in soup.find_all("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+        if not src.startswith(("http://", "https://")):
+            continue
+        parsed = urlparse(src)
+        if parsed.hostname != cover_host:
+            continue
+        name = parsed.path.rsplit("/", 1)[-1]
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        gallery.append(src)
+    return gallery
+
+
 def _llm_fallback(soup: BeautifulSoup, url: str, raw: dict) -> None:
     """One Gemini Flash call to fill core fields — only when title/price still missing."""
     from app.adapters.gemini_adapter import gemini_adapter
@@ -643,11 +679,41 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
         if raw.get(f) and not before.get(f):
             _bump_provenance(provenance, f, "heuristic")
 
-    # Layer d — image gallery heuristic
-    if not raw.get("images"):
+    # Layer d — image gallery heuristic. _image_heuristic already no-ops once
+    # there are 3+ images; gating the call itself on "images truthy" (instead
+    # of matching that same threshold) meant it was never even tried whenever
+    # layer a/b had already found exactly one image — the common case for a
+    # JSON-LD-only cover photo with the real gallery is a lazy-loaded one the
+    # static page never exposes any of.
+    before_images = list(raw.get("images") or [])
+    if len(before_images) < 3:
         _image_heuristic(soup, url, raw)
-        if raw.get("images"):
+        if raw.get("images") != before_images:
             _bump_provenance(provenance, "images", "heuristic")
+
+    # Layer d.5 — sparse-gallery render retry. Some sites (remax.pt) have
+    # literally zero <img> tags in static HTML — the whole gallery, beyond
+    # the single JSON-LD cover photo, is injected by client-side JS after
+    # hydration with no trace in the server-rendered markup, and even once
+    # rendered its utility-class markup has no keyword for the heuristic
+    # above to key on. A real listing's own photos are the whole point of a
+    # property report, so for a confirmed real listing (title + price both
+    # present) with only the one cover photo and no <img> tags in the static
+    # page at all, one extra render is worth the latency.
+    if (
+        len(raw.get("images") or []) == 1
+        and not soup.find_all("img")
+        and raw.get("price")
+        and raw.get("title")
+    ):
+        rendered = await _fetch_rendered(url)
+        if rendered and not _looks_like_challenge_page(rendered):
+            rsoup = BeautifulSoup(rendered, "lxml")
+            gallery = _gallery_images_sharing_cover_host(rsoup, raw["images"][0])
+            if len(gallery) > len(raw["images"]):
+                raw["images"] = gallery
+                raw["alt_texts"] = [""] * len(gallery)
+                _bump_provenance(provenance, "images", "heuristic")
     _prefer_og_image(soup, url, raw)
 
     # Layer e — optional LLM fallback. Fires on missing title/price (the

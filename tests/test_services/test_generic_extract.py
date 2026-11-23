@@ -192,6 +192,38 @@ class TestTextHeuristics:
         assert raw["energy_certificate"] == "C"
 
 
+# ── _filter_chrome_images ───────────────────────────────────────────────────
+
+class TestFilterChromeImages:
+    def test_drops_svg_and_known_chrome_filenames_keeps_real_photos(self):
+        # era.pt: with no site-specific selector config, the default "img"
+        # selector in _parse_images grabs every <img> on the page — the nav
+        # logo (an .svg) and six social-footer icons, alongside the one real
+        # listing photo.
+        raw = {
+            "images": [
+                "https://www.era.pt/Portals/0/EraPT_4Cores.svg",
+                "https://mediaredir2.era.pt/i/moradia-t4-photo.jpg",
+                "https://www.era.pt/Portals/0/07_Redes-Sociais/facebook-footer-icon.png",
+                "https://www.era.pt/Portals/0/07_Redes-Sociais/youtube-footer-icon.png",
+            ],
+            "alt_texts": ["logo", "", "facebook", "youtube"],
+        }
+        ge._filter_chrome_images(raw)
+        assert raw["images"] == ["https://mediaredir2.era.pt/i/moradia-t4-photo.jpg"]
+        assert raw["alt_texts"] == [""]
+
+    def test_no_op_when_nothing_is_chrome(self):
+        raw = {"images": ["https://cdn.x/1.jpg", "https://cdn.x/2.jpg"], "alt_texts": ["", ""]}
+        ge._filter_chrome_images(raw)
+        assert raw["images"] == ["https://cdn.x/1.jpg", "https://cdn.x/2.jpg"]
+
+    def test_no_op_when_images_missing(self):
+        raw: dict = {}
+        ge._filter_chrome_images(raw)
+        assert raw == {}
+
+
 # ── _gallery_images_sharing_cover_host ──────────────────────────────────────
 
 class TestGalleryImagesSharingCoverHost:
@@ -220,6 +252,41 @@ class TestGalleryImagesSharingCoverHost:
     def test_empty_when_cover_url_has_no_host(self):
         soup = BeautifulSoup("<html><body><img src='/relative.jpg'></body></html>", "lxml")
         assert ge._gallery_images_sharing_cover_host(soup, "/relative.jpg") == []
+
+    def test_empty_when_photos_and_page_share_the_same_host(self):
+        # era.pt: listing photos and page chrome both live on www.era.pt, so
+        # host-matching alone can't tell them apart — bail out entirely.
+        html = """
+        <html><body>
+          <img src="https://www.era.pt/imoveis/1/2/aaa.jpg">
+          <img src="https://www.era.pt/imoveis/1/2/bbb.jpg">
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        cover = "https://www.era.pt/imoveis/1/2/aaa.jpg"
+        gallery = ge._gallery_images_sharing_cover_host(
+            soup, cover, "https://www.era.pt/imovel/moradia-t4-123"
+        )
+        assert gallery == []
+
+    def test_filters_social_and_logo_icons_on_a_dedicated_asset_host(self):
+        html = """
+        <html><body>
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg">
+          <img src="https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg">
+          <img src="https://i.maxwork.pt/Portals/0/social/facebook-footer-icon.png">
+          <img src="https://i.maxwork.pt/assets/logo/site-logo.svg">
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        cover = "https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg"
+        gallery = ge._gallery_images_sharing_cover_host(
+            soup, cover, "https://www.remax.pt/pt/imoveis/some-listing"
+        )
+        assert gallery == [
+            "https://i.maxwork.pt/l-feat/listings/1/2/aaa.jpg",
+            "https://i.maxwork.pt/l-feat/listings/1/2/bbb.jpg",
+        ]
 
 
 # ── _best_paragraph_group ───────────────────────────────────────────────────

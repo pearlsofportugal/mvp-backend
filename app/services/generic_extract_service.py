@@ -532,7 +532,55 @@ def _image_heuristic(soup: BeautifulSoup, url: str, raw: dict) -> None:
         raw["alt_texts"] = [""] * len(best)
 
 
-def _gallery_images_sharing_cover_host(soup: BeautifulSoup, cover_url: str) -> list[str]:
+_SITE_CHROME_IMAGE_RE = re.compile(
+    r"facebook|instagram|linkedin|twitter|youtube|pinterest|whatsapp|messenger|"
+    r"tiktok|[-_/]logo[-_./]|[-_/]icon[-_./]|sprite|avatar|placeholder|flags?\.(png|jpe?g|svg)",
+    re.IGNORECASE,
+)
+
+
+def _is_chrome_image(src: str) -> bool:
+    """True for page chrome (logos, social badges, UI icons), never a real photo.
+
+    A plain "img" selector (the default when no site-specific config exists —
+    every generic-mode extraction) picks up literally every ``<img>`` on the
+    page, not just the gallery. Real estate photos are always raster; a site's
+    own logo and UI icons are commonly vector, so any ``.svg`` is chrome by
+    construction. Everything else is checked against known chrome filename
+    patterns (confirmed live on era.pt: its nav logo and six social-footer
+    icons were otherwise indistinguishable from gallery ``<img>`` tags).
+    """
+    path = urlparse(src).path
+    if path.lower().endswith(".svg"):
+        return True
+    return bool(_SITE_CHROME_IMAGE_RE.search(path))
+
+
+def _filter_chrome_images(raw: dict) -> None:
+    """Drop page-chrome images from an already-populated raw["images"] list."""
+    images = raw.get("images") or []
+    if not images:
+        return
+    alts = list(raw.get("alt_texts") or [])
+    alts += [""] * (len(images) - len(alts))
+    kept_images, kept_alts = [], []
+    for image, alt in zip(images, alts):
+        if _is_chrome_image(image):
+            continue
+        kept_images.append(image)
+        kept_alts.append(alt)
+    if len(kept_images) != len(images):
+        raw["images"] = kept_images
+        raw["alt_texts"] = kept_alts
+
+
+def _normalized_host(host: str) -> str:
+    return host[4:] if host.startswith("www.") else host
+
+
+def _gallery_images_sharing_cover_host(
+    soup: BeautifulSoup, cover_url: str, page_url: str | None = None
+) -> list[str]:
     """Every real photo hosted on the same domain as the already-known cover.
 
     Some sites (remax.pt) render their whole gallery with utility classes
@@ -547,10 +595,24 @@ def _gallery_images_sharing_cover_host(soup: BeautifulSoup, cover_url: str) -> l
     icons. Each photo there appears twice, once per size variant used in
     different parts of the page (a hero carousel + a thumbnail strip), with
     the same filename in both — dedup on that.
+
+    This only holds when photos live on a dedicated asset host distinct from
+    the site itself (maxwork.pt for remax.pt). Some sites (era.pt) serve both
+    listing photos *and* every piece of page chrome — social-share badges,
+    the nav logo, flag icons — from the site's own domain, so host-matching
+    alone pulls those in too (confirmed live on era.pt: a 2-photo listing
+    "gained" 5 social-network icons this way). Skip entirely when the cover
+    photo's host is the page's own host, and filter obviously-chrome
+    filenames as a second line of defence for whatever CDN host this still
+    runs on.
     """
     cover_host = urlparse(cover_url).hostname
     if not cover_host:
         return []
+    if page_url:
+        page_host = urlparse(page_url).hostname
+        if page_host and _normalized_host(page_host) == _normalized_host(cover_host):
+            return []
     seen_names: set[str] = set()
     gallery: list[str] = []
     for img in soup.find_all("img"):
@@ -559,6 +621,8 @@ def _gallery_images_sharing_cover_host(soup: BeautifulSoup, cover_url: str) -> l
             continue
         parsed = urlparse(src)
         if parsed.hostname != cover_host:
+            continue
+        if _is_chrome_image(src):
             continue
         name = parsed.path.rsplit("/", 1)[-1]
         if not name or name in seen_names:
@@ -633,6 +697,11 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
 
     # Layer a — structured data + built-in fallbacks
     raw = parse_listing_page(html, url, selectors={}, extraction_mode="direct")
+    # With no site-specific config, _parse_images defaults to a plain "img"
+    # selector — every <img> on the page, not just the gallery. Drop page
+    # chrome (logos, social badges) before it counts toward "images present"
+    # and blocks the layers below from looking for the real gallery.
+    _filter_chrome_images(raw)
     provenance = {f: ("structured_data" if raw.get(f) else None) for f in _PROVENANCE_FIELDS}
 
     # Layer b — selector suggester
@@ -671,6 +740,7 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
                     raw[key] = value
                     _bump_provenance(provenance, key, "structured_data")
             _strip_label_values(raw)
+            _filter_chrome_images(raw)
 
     # Layer c — regex heuristics
     before = {f: raw.get(f) for f in _PROVENANCE_FIELDS}
@@ -709,7 +779,7 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
         rendered = await _fetch_rendered(url)
         if rendered and not _looks_like_challenge_page(rendered):
             rsoup = BeautifulSoup(rendered, "lxml")
-            gallery = _gallery_images_sharing_cover_host(rsoup, raw["images"][0])
+            gallery = _gallery_images_sharing_cover_host(rsoup, raw["images"][0], url)
             if len(gallery) > len(raw["images"]):
                 raw["images"] = gallery
                 raw["alt_texts"] = [""] * len(gallery)

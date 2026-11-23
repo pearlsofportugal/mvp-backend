@@ -261,6 +261,36 @@ class TestParseListingPage:
         assert data["page_title"] == "Page Title"
         assert data["meta_description"] == "Meta desc"
 
+    def test_json_ld_name_that_is_a_bare_id_falls_back_to_og_title(self):
+        # remax.pt puts its own internal listing id/SKU in the JSON-LD
+        # Product "name" ("120511518-169") instead of the real title that's
+        # in og:title/<title>/<h1>. JSON-LD is tried first as the most
+        # trustworthy source, so without a sanity check the id silently won
+        # and the real title was never looked at.
+        html = """
+        <html><head>
+        <meta property="og:title" content="Apartamento T5 para arrendar em Avenidas Novas, Lisboa">
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"Product","name":"120511518-169",
+         "offers":{"@type":"Offer","price":"2480","priceCurrency":"EUR"}}
+        </script>
+        </head><body><h1>Apartamento T5 em Lisboa com elevador</h1></body></html>
+        """
+        data = parse_listing_page(html, "https://www.remax.pt/pt/imoveis/x/120511518-169", {}, "direct")
+        assert data["title"] == "Apartamento T5 para arrendar em Avenidas Novas, Lisboa"
+
+    def test_json_ld_name_with_letters_is_kept(self):
+        html = """
+        <html><head>
+        <meta property="og:title" content="Should not be used">
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"Product","name":"Apartamento T3 em Matosinhos"}
+        </script>
+        </head><body></body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/3", {}, "direct")
+        assert data["title"] == "Apartamento T3 em Matosinhos"
+
     def test_section_mode(self):
         html = """
         <html><body>

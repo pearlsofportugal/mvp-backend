@@ -415,3 +415,75 @@ async def test_extract_generic_uses_structured_data(monkeypatch):
     assert provenance["title"] == "structured_data"
     assert provenance["price"] == "structured_data"
     assert raw["title"] == "Apartamento T3 em Matosinhos"
+
+
+# ── Layer d.6: missing-spec render retry ────────────────────────────────────
+
+_RENDERED_SPEC_GRID = """
+<html><body>
+<!-- padding so this isn't mistaken for a bot-challenge page (those are
+     always short) -->
+<p>""" + ("Lorem ipsum dolor sit amet. " * 80) + """</p>
+<div class="grid">
+  <div class="row"><span class="lbl">Área Bruta Privativa (m2):</span><span class="value">122</span></div>
+</div></body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_gross_area_is_recovered_via_render_when_missing_on_a_real_listing(monkeypatch):
+    # era.pt: the characteristics grid (gross area, construction year, ...)
+    # is injected by client-side JS — zero matching spans in the static page.
+    async def fake_fetch(url):
+        return _JSONLD_PAGE
+
+    async def fake_suggest(url):
+        return {"candidates": {}}
+
+    async def fake_fetch_rendered(url):
+        return _RENDERED_SPEC_GRID
+
+    monkeypatch.setattr(ge, "_fetch", fake_fetch)
+    monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
+    monkeypatch.setattr(ge, "_fetch_rendered", fake_fetch_rendered)
+
+    _, provenance, raw = await ge.extract_generic("https://agencia-y.pt/imovel/apartamento-t3")
+
+    assert raw.get("gross_area") == "122"
+    assert provenance.get("gross_area") == "heuristic"
+
+
+@pytest.mark.asyncio
+async def test_no_render_retry_when_gross_area_already_present(monkeypatch):
+    jsonld_with_gross_area = _JSONLD_PAGE.replace(
+        '"image":["https://cdn.y/p1.jpg","https://cdn.y/p2.jpg"]}',
+        '"image":["https://cdn.y/p1.jpg","https://cdn.y/p2.jpg"],"floorSize":{"@type":"QuantitativeValue","value":"130"}}',
+    )
+
+    async def fake_fetch(url):
+        return jsonld_with_gross_area
+
+    async def fake_suggest(url):
+        return {"candidates": {}}
+
+    async def unexpected_render(url):
+        raise AssertionError("should not render when gross_area is already present")
+
+    monkeypatch.setattr(ge, "_fetch", fake_fetch)
+    monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
+    monkeypatch.setattr(ge, "_fetch_rendered", unexpected_render)
+
+    # Pre-seed gross_area directly to isolate the render-retry gate itself
+    # from whether structured-data parsing happens to pick up floorSize.
+    original_parse = ge.parse_listing_page
+
+    def patched_parse(*args, **kwargs):
+        result = original_parse(*args, **kwargs)
+        result.setdefault("gross_area", "130")
+        return result
+
+    monkeypatch.setattr(ge, "parse_listing_page", patched_parse)
+
+    _, _, raw = await ge.extract_generic("https://agencia-y.pt/imovel/apartamento-t3")
+
+    assert raw.get("gross_area") == "130"

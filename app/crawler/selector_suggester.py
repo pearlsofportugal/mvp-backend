@@ -141,12 +141,14 @@ _FIELD_ORDER = (
     "price",
     "title",
     "area",
+    "gross_area",
     "land_area",
     "rooms",
     "bathrooms",
     "property_type",
     "typology",
     "condition",
+    "construction_year",
     "business_type",
     "district",
     "county",
@@ -198,12 +200,20 @@ _ADDRESS_LABELS: dict[str, tuple[str, ...]] = {
 _STRUCTURED_FIELD_LABELS: dict[str, tuple[str, ...]] = {
     **_ADDRESS_LABELS,
     "area": ("area", "área", "área útil", "area util", "área bruta", "area bruta", "gross area", "useful area"),
+    "gross_area": (
+        "área bruta", "area bruta", "área bruta privativa", "area bruta privativa",
+        "gross area", "built area", "construction area", "área de construção", "area de construcao",
+    ),
     "land_area": ("area terreno", "área terreno", "land area", "plot area", "lot area", "terreno"),
     "bathrooms": ("bathrooms", "casas de banho", "casa de banho", "wc", "wcs", "banho", "banhos"),
     "rooms": ("rooms", "quartos", "bedrooms", "assoalhadas", "divisoes", "divisões"),
     "property_type": ("property type", "tipo de imóvel", "tipo imovel", "tipo", "type"),
     "typology": ("typology", "tipologia"),
     "condition": ("estado", "condition", "state"),
+    "construction_year": (
+        "ano de construção", "ano de construcao", "ano construção", "ano construcao",
+        "construction year", "year built", "built in",
+    ),
     "business_type": ("objectivo", "objetivo", "business type", "tipo de negócio", "tipo negocio", "natureza"),
 }
 _PROPERTY_KEYWORDS = (
@@ -370,6 +380,12 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[title*='útil']",
         "[title*='area']",
     ],
+    "gross_area": [
+        "[class*='bruta']",
+        "[class*='gross']",
+        "[class*='construida']",
+        "[class*='construída']",
+    ],
     "land_area": [
         "[class*='terreno']",
         "[class*='land']",
@@ -410,6 +426,12 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
         "[class*='estado']",
         "[class*='condition']",
         "[class*='state']",
+    ],
+    "construction_year": [
+        "[class*='ano']",
+        "[class*='construction']",
+        "[class*='built']",
+        "[class*='year']",
     ],
     "business_type": [
         "[class*='objectivo']",
@@ -452,7 +474,9 @@ _FIELD_HEURISTICS: dict[str, list[str]] = {
 _FIELD_VALIDATORS = {
     "price": re.compile(r"\d.*(?:€|eur|euro)", re.IGNORECASE),
     "area": re.compile(r"\d+(?:[\.,]\d+)?\s*(?:m2|m²|metros?)", re.IGNORECASE),
+    "gross_area": re.compile(r"\d+(?:[\.,]\d+)?\s*(?:m2|m²|metros?)", re.IGNORECASE),
     "land_area": re.compile(r"\d+(?:[\.,]\d+)?\s*(?:m2|m²|metros?)", re.IGNORECASE),
+    "construction_year": re.compile(r"\b(1[89]\d{2}|20[0-4]\d)\b"),
     "rooms": re.compile(r"(?:\bT\d\b|\d+\s*(?:quartos?|rooms?|divis[oõ]es?))", re.IGNORECASE),
     "bathrooms": re.compile(r"(?:\d+\s*(?:wcs?|casas?\s+de\s+banho|bathrooms?)|^\d{1,2}$)", re.IGNORECASE),
     "property_type": re.compile(r"\b(?:moradia|apartamento|terreno|loja|armaz[eé]m|escrit[oó]rio|garagem|quintinha|quinta|predio|pr[eé]dio|vivenda)\b", re.IGNORECASE),
@@ -790,10 +814,13 @@ def _score_candidate(
     heuristic_index: int,
     expected_values: list[str],
     element: Tag | None = None,
+    structured_label: str | None = None,
 ) -> float:
     """Assign a confidence score to a selector candidate."""
     base_score = max(0.2, _W.BASE_MAX - heuristic_index * _W.BASE_STEP)
-    quality_score = _field_quality_score(field, sample, selector, _structured_context_label(element))
+    quality_score = _field_quality_score(
+        field, sample, selector, _structured_context_label(element), structured_label
+    )
     if quality_score < 0:
         return 0.0
 
@@ -811,7 +838,13 @@ def _score_candidate(
     return base_score + quality_score + selector_score + specificity_score + relation_score + expected_match_score
 
 
-def _field_quality_score(field: str, sample: str, selector: str, context_label: str | None = None) -> float:
+def _field_quality_score(
+    field: str,
+    sample: str,
+    selector: str,
+    context_label: str | None = None,
+    structured_label: str | None = None,
+) -> float:
     """Score whether the extracted sample resembles the target field."""
     if field == "title":
         normalized = _normalize_text(sample)
@@ -882,17 +915,43 @@ def _field_quality_score(field: str, sample: str, selector: str, context_label: 
             if any(token in normalized_sample for token in ("area util", "área útil", "util", "area bruta", "área bruta", "bruta")):
                 return -0.12
 
+    if field == "gross_area":
+        if not re.search(r"\d", sample):
+            return -0.18
+        if normalized_sample in {"area", "área", "areas", "áreas", "util", "útil", "bruta"}:
+            return -0.2
+        # Structured summary rows (remax.pt, era.pt) hold the figure bare, with
+        # no "m2" unit — the label itself already said "área bruta", so a bare
+        # 1-4 digit number is trustworthy here without also requiring a unit.
+        if re.fullmatch(r"\d{1,4}(?:[.,]\d+)?", normalized_sample) or _FIELD_VALIDATORS["gross_area"].search(sample):
+            return _W.GENERIC_VALID
+        return -0.12
+
+    if field == "construction_year":
+        if _FIELD_VALIDATORS["construction_year"].search(sample):
+            return _W.GENERIC_VALID
+        return -0.2
+
     if field == "rooms":
         if re.fullmatch(r"\d{1,2}", normalized_sample):
-            if any(token in _normalize_text(selector) for token in _FIELD_SELECTOR_HINTS["rooms"]["positive"]):
+            if structured_label or any(
+                token in _normalize_text(selector) for token in _FIELD_SELECTOR_HINTS["rooms"]["positive"]
+            ):
                 return 0.12
             return -0.15
+        # Some sites label a plain-text room-type enumeration ("Cozinha, Sala,
+        # Quarto, ...") with the same "Divisões" word used elsewhere for a
+        # room *count* (remax.pt) — a bedroom count is always a number, so
+        # anything else here is that enumeration, not a value for this field.
+        return -0.1
 
     if field == "bathrooms":
         if any(token in normalized_sample for token in ("wc", "wcs", "banho", "bath")) and re.search(r"\d", sample):
             return -0.08
         if re.fullmatch(r"\d{1,2}", normalized_sample):
-            if any(token in _normalize_text(selector) for token in _FIELD_SELECTOR_HINTS["bathrooms"]["positive"]):
+            if structured_label or any(
+                token in _normalize_text(selector) for token in _FIELD_SELECTOR_HINTS["bathrooms"]["positive"]
+            ):
                 return 0.12
             return -0.15
 
@@ -1002,6 +1061,7 @@ def _collect_structured_field_candidates(
             heuristic_index=0,
             expected_values=expected_values,
             element=value_element or node,
+            structured_label=label_text,
         )
         if base_score <= 0:
             continue
@@ -1117,10 +1177,17 @@ def _build_selector(root: BeautifulSoup | Tag, element: Tag, fallback_selector: 
                 return combined_selector
         parent = parent.parent if isinstance(parent.parent, Tag) else None
 
-    positional_selector = _build_positional_selector(element)
-    if positional_selector and _selector_occurrence_count(root, positional_selector) == 1:
+    positional_selector = _build_positional_selector(root, element)
+    if positional_selector:
         return positional_selector
 
+    # Last resort: a non-unique selector is still useful when every candidate
+    # for this field shares the same ambiguity (parse_listing_page takes the
+    # first match either way) — but never for homogeneous repeated rows
+    # (Tailwind-style spec grids: remax.pt, era.pt), where "first match" would
+    # silently grab a *different* row's value. _build_positional_selector
+    # already covers those; only fall through here when it found nothing at
+    # all (so returning current_selector isn't making a known-wrong choice).
     if current_selector and current_selector not in _GENERIC_SELECTOR_FALLBACKS:
         return current_selector
 
@@ -1150,28 +1217,40 @@ def _selector_occurrence_count(root: BeautifulSoup | Tag, selector: str) -> int:
     return len(_safe_select(root, selector))
 
 
-def _build_positional_selector(element: Tag) -> str | None:
-    """Build a stable selector using nth-of-type when ids/classes are not enough."""
-    index = _nth_of_type_index(element)
-    if index is None or not element.name:
+_MAX_POSITIONAL_CHAIN_DEPTH = 20
+
+
+def _build_positional_selector(root: BeautifulSoup | Tag, element: Tag) -> str | None:
+    """Build a selector from a chain of nth-of-type indices, climbing toward
+    the document root until the chain is globally unique.
+
+    A single level isn't enough when the whole ancestor chain shares the same
+    generic classes at every level (Tailwind-style spec grids on remax.pt and
+    era.pt: every "Ano de Construção"/"Área Bruta"/etc. row is structurally
+    identical, so any one-level nth-of-type is ambiguous — the *combination*
+    of positions across several levels is what's actually unique). Each
+    element in a document has exactly one path of sibling-type indices from
+    itself to <body>, so the full chain is always unique by construction;
+    this returns the shortest prefix of it that already is, to keep the
+    selector readable and resilient to unrelated markup changes elsewhere on
+    the page.
+    """
+    if not element.name:
         return None
 
-    parent = element.parent if isinstance(element.parent, Tag) else None
-    ancestors: list[Tag] = []
-    while parent is not None:
-        ancestors.append(parent)
-        parent = parent.parent if isinstance(parent.parent, Tag) else None
-
-    preferred_ancestors = [ancestor for ancestor in ancestors if ancestor.get("id")]
-    if not preferred_ancestors:
-        preferred_ancestors = ancestors
-
-    for ancestor in preferred_ancestors:
-        parent_selector = _element_selector(ancestor)
-        if parent_selector and parent_selector not in _GENERIC_SELECTOR_FALLBACKS:
-            selector = f"{parent_selector} {element.name}:nth-of-type({index})"
-            if _selector_occurrence_count(ancestor, f":scope {element.name}:nth-of-type({index})") == 1:
-                return selector
+    segments: list[str] = []
+    node: Tag | None = element
+    depth = 0
+    while isinstance(node, Tag) and node.name not in (None, "html") and depth < _MAX_POSITIONAL_CHAIN_DEPTH:
+        index = _nth_of_type_index(node)
+        if index is None:
+            return None
+        segments.append(f"{node.name}:nth-of-type({index})")
+        candidate = " > ".join(reversed(segments))
+        if _selector_occurrence_count(root, candidate) == 1:
+            return candidate
+        node = node.parent if isinstance(node.parent, Tag) else None
+        depth += 1
 
     return None
 
@@ -1301,9 +1380,27 @@ def _is_valid_structured_value(value: str, label_text: str, all_structured_label
         return False
     if normalized in all_structured_labels:
         return False
+    # A genuine value doesn't restate the label it sits next to — reject a
+    # candidate that is the label itself extended with more label-ish words
+    # (remax.pt: label span text "Área Bruta Privativa m²" vs. the matched
+    # synonym "área bruta" — the two aren't equal, so the check above misses
+    # it, but the candidate is still clearly the label, not "197").
+    if normalized.startswith(label_text):
+        return False
     if normalized in _LOCATION_STOPWORDS or _LOCATION_STOPWORD_PATTERNS.match(normalized):
         return False
     if normalized in {"/", "-", "|"}:
+        return False
+    # A candidate that is itself just known label words glued together (e.g.
+    # remax.pt's "WC/Casas de banho" row: label and value sit in sibling
+    # spans, but the label span's own text is a compound of two dictionary
+    # entries joined by "/", which doesn't exactly equal any single entry so
+    # the checks above miss it) is not a value — strip every known label
+    # phrase out and reject if nothing real is left.
+    remainder = normalized
+    for known_label in sorted(all_structured_labels, key=len, reverse=True):
+        remainder = remainder.replace(known_label, " ")
+    if not re.search(r"[a-z0-9]", remainder):
         return False
     return True
 

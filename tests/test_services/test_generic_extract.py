@@ -417,6 +417,85 @@ async def test_extract_generic_uses_structured_data(monkeypatch):
     assert raw["title"] == "Apartamento T3 em Matosinhos"
 
 
+_JSONLD_PAGE_WITH_ADDRESS_NO_BATHROOMS = """
+<html><head>
+<title>Moradia T1 - Olhao</title>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"RealEstateListing",
+ "name":"Moradia T1 em Olhao",
+ "offers":{"@type":"Offer","price":"245000","priceCurrency":"EUR"},
+ "image":["https://cdn.y/p1.jpg"],
+ "about":{"@type":"House","numberOfRooms":1,"numberOfBedrooms":1,
+          "address":{"@type":"PostalAddress","addressLocality":"Olhao","addressRegion":"Faro"}}}
+</script>
+</head><body><h1>Moradia T1 em Olhao</h1></body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_fires_when_only_bathrooms_is_missing(monkeypatch):
+    # Confirmed live on era.pt: title/price/address are all present via
+    # JSON-LD (address nested under "about" — see TestGenericAddress /
+    # test_parser.py), so the old gate (title/price/address blank) never
+    # fired, leaving bathrooms permanently unfillable even though the LLM
+    # reliably recovers it from the page text when actually asked.
+    async def fake_fetch(url):
+        return _JSONLD_PAGE_WITH_ADDRESS_NO_BATHROOMS
+
+    async def fake_suggest(url):
+        return {"candidates": {}}
+
+    def fake_generate(**kwargs):
+        return {"bathrooms": 2}
+
+    monkeypatch.setattr(ge, "_fetch", fake_fetch)
+    monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
+    import app.adapters.gemini_adapter as gemini_mod
+    monkeypatch.setattr(gemini_mod.gemini_adapter, "generate", fake_generate)
+
+    schema, provenance, raw = await ge.extract_generic("https://agencia-y.pt/imovel/moradia-t1")
+
+    assert raw.get("bathrooms") == 2
+    assert provenance.get("bathrooms") == "llm"
+    # The fields the old gate already covered keep coming from structured data.
+    assert provenance.get("district") != "llm"
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_does_not_fire_when_core_fields_are_all_present(monkeypatch):
+    async def fake_fetch(url):
+        return _JSONLD_PAGE_WITH_ADDRESS_NO_BATHROOMS
+
+    async def fake_suggest(url):
+        return {"candidates": {}}
+
+    def unexpected_generate(**kwargs):
+        raise AssertionError("LLM should not be called when title/price/address/bathrooms are all present")
+
+    monkeypatch.setattr(ge, "_fetch", fake_fetch)
+    monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
+    import app.adapters.gemini_adapter as gemini_mod
+    monkeypatch.setattr(gemini_mod.gemini_adapter, "generate", unexpected_generate)
+
+    # Pre-seed bathrooms directly to isolate the LLM gate itself from whether
+    # structured-data/suggester parsing happens to find a bathroom count —
+    # JSON-LD's numberOfBathroomsTotal isn't actually wired into raw["bathrooms"]
+    # today (see test above), so this is the realistic way bathrooms gets filled
+    # without the LLM on a site with a working selector/structured match.
+    original_parse = ge.parse_listing_page
+
+    def patched_parse(*args, **kwargs):
+        result = original_parse(*args, **kwargs)
+        result.setdefault("bathrooms", "2")
+        return result
+
+    monkeypatch.setattr(ge, "parse_listing_page", patched_parse)
+
+    _, _, raw = await ge.extract_generic("https://agencia-y.pt/imovel/moradia-t1")
+
+    assert raw.get("bathrooms") == "2"
+
+
 # ── Layer d.6: missing-spec render retry ────────────────────────────────────
 
 _RENDERED_SPEC_GRID = """

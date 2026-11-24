@@ -816,8 +816,17 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
     # even wrong, picked up from price_per_m2), so the old title-or-price
     # check never ran, yet district/county/parish were all blank and the LLM
     # recovered all three correctly from the same page text.
+    #
+    # Also fires when bathrooms is missing: JSON-LD's numberOfBathrooms(Total)
+    # is rare in practice (era.pt: confirmed absent even though bedrooms and a
+    # full address are both present via JSON-LD), and no other layer here
+    # looks for a bathroom count at all — without this, address_blank fixing
+    # itself (structured data now covers district/county on its own) silently
+    # stopped the one path that used to fill bathrooms as a side effect.
     address_blank = not raw.get("district") and not raw.get("county") and not raw.get("parish")
-    if settings.generic_extract_llm_fallback and (not raw.get("title") or not raw.get("price") or address_blank):
+    if settings.generic_extract_llm_fallback and (
+        not raw.get("title") or not raw.get("price") or address_blank or not raw.get("bathrooms")
+    ):
         before = {f: raw.get(f) for f in _PROVENANCE_FIELDS}
         _llm_fallback(soup, url, raw)
         for f in _PROVENANCE_FIELDS:

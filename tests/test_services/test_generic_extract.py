@@ -445,11 +445,17 @@ async def test_llm_fallback_fires_when_only_bathrooms_is_missing(monkeypatch):
     async def fake_suggest(url):
         return {"candidates": {}}
 
+    async def fake_fetch_rendered(url):
+        # gross_area is missing from this fixture too, which triggers Layer
+        # d.6's render retry — stub it so the test never needs a real browser.
+        return _JSONLD_PAGE_WITH_ADDRESS_NO_BATHROOMS
+
     def fake_generate(**kwargs):
         return {"bathrooms": 2}
 
     monkeypatch.setattr(ge, "_fetch", fake_fetch)
     monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
+    monkeypatch.setattr(ge, "_fetch_rendered", fake_fetch_rendered)
     import app.adapters.gemini_adapter as gemini_mod
     monkeypatch.setattr(gemini_mod.gemini_adapter, "generate", fake_generate)
 
@@ -469,11 +475,15 @@ async def test_llm_fallback_does_not_fire_when_core_fields_are_all_present(monke
     async def fake_suggest(url):
         return {"candidates": {}}
 
+    async def fake_fetch_rendered(url):
+        return _JSONLD_PAGE_WITH_ADDRESS_NO_BATHROOMS
+
     def unexpected_generate(**kwargs):
         raise AssertionError("LLM should not be called when title/price/address/bathrooms are all present")
 
     monkeypatch.setattr(ge, "_fetch", fake_fetch)
     monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
+    monkeypatch.setattr(ge, "_fetch_rendered", fake_fetch_rendered)
     import app.adapters.gemini_adapter as gemini_mod
     monkeypatch.setattr(gemini_mod.gemini_adapter, "generate", unexpected_generate)
 

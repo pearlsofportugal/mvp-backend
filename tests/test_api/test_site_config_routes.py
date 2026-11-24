@@ -221,9 +221,12 @@ async def test_site_config_suggest_prefers_value_elements_and_filters_modal_titl
     title_samples = [candidate["sample"] for candidate in data["candidates"]["title"]]
     assert "Centros de Resolução de Litígios" not in title_samples
     assert data["candidates"]["business_type"][0]["sample"] == "Venda"
-    assert data["candidates"]["business_type"][0]["selector"].startswith("p.info-item.float-right")
+    # All three value <p> tags share the same first-two classes
+    # ("info-item float-right"), so a class-based selector would be
+    # ambiguous — must be anchored by DOM position instead.
+    assert data["candidates"]["business_type"][0]["selector"] == "div:nth-of-type(1) > p:nth-of-type(2)"
     assert data["candidates"]["area"][0]["sample"] == "92 m²"
-    assert data["candidates"]["area"][0]["selector"].startswith("p.info-item.float-right")
+    assert data["candidates"]["area"][0]["selector"] == "div:nth-of-type(2) > p:nth-of-type(2)"
     assert data["candidates"]["condition"][0]["sample"] == "Excelente"
 
 

@@ -291,6 +291,52 @@ class TestParseListingPage:
         data = parse_listing_page(html, "https://example.com/p/3", {}, "direct")
         assert data["title"] == "Apartamento T3 em Matosinhos"
 
+    def test_json_ld_gallery_used_even_when_a_direct_selector_found_one_image(self):
+        # era.pt's gallery renders only its first slide as a real <img src=...>;
+        # the rest sit behind a JS carousel as data-bg attributes filled in
+        # later. The default "img" selector therefore finds exactly 1 real
+        # photo, so the JSON-LD fallback below used to be skipped entirely
+        # (it only ran when images was empty) even though JSON-LD listed the
+        # full 10-photo gallery.
+        html = """
+        <html><body>
+        <img class="slide-img" src="https://cdn.example.pt/photo-1.jpg" alt="foto 1">
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"RealEstateListing",
+         "name":"Moradia T1",
+         "image":["https://cdn.example.pt/photo-1.jpg","https://cdn.example.pt/photo-2.jpg",
+                   "https://cdn.example.pt/photo-3.jpg"]}
+        </script>
+        </body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/era", {"image_selector": "img"}, "direct")
+        assert data["images"] == [
+            "https://cdn.example.pt/photo-1.jpg",
+            "https://cdn.example.pt/photo-2.jpg",
+            "https://cdn.example.pt/photo-3.jpg",
+        ]
+
+    def test_direct_selector_gallery_is_kept_when_richer_than_json_ld(self):
+        html = """
+        <html><body>
+        <div class="gallery">
+            <img src="https://cdn.example.pt/a.jpg">
+            <img src="https://cdn.example.pt/b.jpg">
+            <img src="https://cdn.example.pt/c.jpg">
+        </div>
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"RealEstateListing","name":"Moradia T2",
+         "image":["https://cdn.example.pt/a.jpg"]}
+        </script>
+        </body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/richer", {"image_selector": ".gallery img"}, "direct")
+        assert data["images"] == [
+            "https://cdn.example.pt/a.jpg",
+            "https://cdn.example.pt/b.jpg",
+            "https://cdn.example.pt/c.jpg",
+        ]
+
     def test_section_mode(self):
         html = """
         <html><body>

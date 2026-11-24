@@ -463,14 +463,15 @@ def _fill_missing_listing_fields_from_page(
         if candidates:
             data[field] = candidates[0]
 
-    if not data.get("images"):
-        images = jsonld_values.get("images") or []
-        if images:
-            logger.info("Images filled via JSON-LD fallback (direct selector found none): %d images", len(images))
-            data["images"] = images
-            # ← FIX: manter alt_texts com o mesmo tamanho de images
-
-            data["alt_texts"] = [""] * len(images)
+    jsonld_images = jsonld_values.get("images") or []
+    existing_images = data.get("images") or []
+    if jsonld_images and len(jsonld_images) > len(existing_images):
+        logger.info(
+            "Images filled via JSON-LD fallback (%d JSON-LD vs %d already found): %d images",
+            len(jsonld_images), len(existing_images), len(jsonld_images),
+        )
+        data["images"] = jsonld_images
+        data["alt_texts"] = [""] * len(jsonld_images)
 
     if not data.get("property_type") and data.get("title"):
         inferred = _infer_property_type_from_title(data["title"])

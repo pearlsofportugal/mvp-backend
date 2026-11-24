@@ -291,6 +291,29 @@ class TestParseListingPage:
         data = parse_listing_page(html, "https://example.com/p/3", {}, "direct")
         assert data["title"] == "Apartamento T3 em Matosinhos"
 
+    def test_json_ld_address_nested_under_about_is_still_read(self):
+        # era.pt (and other RealEstateListing-flavoured JSON-LD) nests the
+        # address, and room/bathroom counts, under "about" (the Accommodation
+        # the listing is "about") instead of on the listing node itself.
+        # Confirmed live: a listing with title/price on the top-level node but
+        # address only under "about" used to leave district/county blank,
+        # forcing an unreliable LLM call for data that was already present.
+        html = """
+        <html><body>
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"RealEstateListing",
+         "name":"Moradia T1 Olhao",
+         "offers":{"@type":"Offer","price":245000,"priceCurrency":"EUR"},
+         "about":{"@type":"House","numberOfRooms":1,"numberOfBedrooms":1,
+                  "address":{"@type":"PostalAddress","addressLocality":"Olhão",
+                             "addressRegion":"Faro","addressCountry":"PT"}}}
+        </script>
+        </body></html>
+        """
+        data = parse_listing_page(html, "https://example.com/p/era", {}, "direct")
+        assert data["district"] == "Faro"
+        assert data["county"] == "Olhão"
+
     def test_json_ld_gallery_used_even_when_a_direct_selector_found_one_image(self):
         # era.pt's gallery renders only its first slide as a real <img src=...>;
         # the rest sit behind a JS carousel as data-bg attributes filled in

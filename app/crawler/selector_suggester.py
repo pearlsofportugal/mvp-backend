@@ -778,15 +778,26 @@ def _extract_values_from_json_ld_node(node: dict[str, Any]) -> dict[str, list[st
         node.get("lotSize"),
         _nested_value(node, "lotSize", "name"),
     )
-    rooms = _first_string(node.get("numberOfRooms"), node.get("numberOfBedrooms"))
-    bathrooms = _first_string(node.get("numberOfBathroomsTotal"), node.get("numberOfBathrooms"))
+    # Many RealEstateListing payloads (era.pt confirmed live) nest the physical
+    # place's own details — address, room/bathroom counts — under "about" (the
+    # accommodation/house the listing is "about"), not on the listing node
+    # itself. Fall back to that nested entity for exactly those fields.
+    about = node.get("about") if isinstance(node.get("about"), dict) else {}
+    rooms = _first_string(
+        node.get("numberOfRooms"), node.get("numberOfBedrooms"),
+        about.get("numberOfRooms"), about.get("numberOfBedrooms"),
+    )
+    bathrooms = _first_string(
+        node.get("numberOfBathroomsTotal"), node.get("numberOfBathrooms"),
+        about.get("numberOfBathroomsTotal"), about.get("numberOfBathrooms"),
+    )
     property_type = _first_string(node.get("additionalType"), node.get("category"))
     if not property_type:
         property_type = _property_type_from_json_ld_type(type_names)
     typology = _typology_from_strings(title, _first_string(node.get("description")))
     condition = _first_string(node.get("itemCondition"), node.get("condition"))
     business_type = _first_string(node.get("businessFunction"), _nested_value(node, "offers", "businessFunction"))
-    district, county, parish = _address_parts(node.get("address"))
+    district, county, parish = _address_parts(node.get("address") or about.get("address"))
     images = [_stringify(value) for value in _as_list(node.get("image")) if _stringify(value)]
 
     return {

@@ -31,6 +31,7 @@ from app.core.logging import get_logger
 from app.crawler.html_cache import html_cache
 from app.crawler.selector_suggester import (
     _JSON_LD_SELECTOR,
+    _collect_structured_field_candidates,
     _is_in_excluded_region,
     _iter_json_ld_nodes,
     suggest_selectors,
@@ -772,20 +773,41 @@ async def extract_generic(url: str) -> tuple[PropertySchema, dict[str, str | Non
     # property report, so for a confirmed real listing (title + price both
     # present) with only the one cover photo and no <img> tags in the static
     # page at all, one extra render is worth the latency.
-    if (
+    needs_gallery_render = (
         len(raw.get("images") or []) == 1
         and not soup.find_all("img")
         and raw.get("price")
         and raw.get("title")
-    ):
+    )
+    # Layer d.6 — missing-spec render retry. Some sites (era.pt) only inject
+    # their characteristics grid (gross area, construction year, ...) after
+    # client-side hydration — the static page has zero span.lbl/span.value
+    # elements at all, so the structured label/value matcher above never had
+    # anything to look at for gross_area. Confirmed on era.pt: 0 such spans
+    # in the static fetch, "Área Bruta Privativa (m2): 122" only present once
+    # rendered. Only worth the extra render for a confirmed real listing
+    # still missing gross_area after every static-page layer.
+    needs_spec_render = not raw.get("gross_area") and raw.get("price") and raw.get("title")
+
+    rsoup: BeautifulSoup | None = None
+    if needs_gallery_render or needs_spec_render:
         rendered = await _fetch_rendered(url)
         if rendered and not _looks_like_challenge_page(rendered):
             rsoup = BeautifulSoup(rendered, "lxml")
-            gallery = _gallery_images_sharing_cover_host(rsoup, raw["images"][0], url)
-            if len(gallery) > len(raw["images"]):
-                raw["images"] = gallery
-                raw["alt_texts"] = [""] * len(gallery)
-                _bump_provenance(provenance, "images", "heuristic")
+
+    if rsoup is not None and needs_gallery_render:
+        gallery = _gallery_images_sharing_cover_host(rsoup, raw["images"][0], url)
+        if len(gallery) > len(raw["images"]):
+            raw["images"] = gallery
+            raw["alt_texts"] = [""] * len(gallery)
+            _bump_provenance(provenance, "images", "heuristic")
+
+    if rsoup is not None and needs_spec_render:
+        candidates = _collect_structured_field_candidates(rsoup, "gross_area", [])
+        if candidates and candidates[0]["score"] >= _MIN_SUGGESTER_SCORE:
+            raw["gross_area"] = candidates[0]["sample"]
+            _bump_provenance(provenance, "gross_area", "heuristic")
+
     _prefer_og_image(soup, url, raw)
 
     # Layer e — optional LLM fallback. Fires on missing title/price (the

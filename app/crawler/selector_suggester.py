@@ -1221,31 +1221,50 @@ _MAX_POSITIONAL_CHAIN_DEPTH = 20
 
 
 def _build_positional_selector(root: BeautifulSoup | Tag, element: Tag) -> str | None:
-    """Build a selector from a chain of nth-of-type indices, climbing toward
-    the document root until the chain is globally unique.
+    """Build a selector using nth-of-type when ids/classes alone aren't enough.
 
-    A single level isn't enough when the whole ancestor chain shares the same
-    generic classes at every level (Tailwind-style spec grids on remax.pt and
-    era.pt: every "Ano de Construção"/"Área Bruta"/etc. row is structurally
-    identical, so any one-level nth-of-type is ambiguous — the *combination*
-    of positions across several levels is what's actually unique). Each
-    element in a document has exactly one path of sibling-type indices from
-    itself to <body>, so the full chain is always unique by construction;
-    this returns the shortest prefix of it that already is, to keep the
-    selector readable and resilient to unrelated markup changes elsewhere on
-    the page.
+    Two strategies, in order:
+
+    1. Anchor on the nearest ancestor with a stable id, plus the element's own
+       nth-of-type among same-tag siblings (e.g. ContentPlaceHolder-style
+       ASP.NET pages: "#some_id li:nth-of-type(3)") — short, readable, and
+       resilient to unrelated markup changes elsewhere on the page. Verified
+       for *global* uniqueness in `root`, unlike the single-ancestor-subtree
+       check this used to do (which was always trivially true and could
+       still return an ambiguous selector once applied against the whole
+       document).
+    2. A full chain of nth-of-type segments climbing toward the document
+       root, taking the shortest globally-unique prefix. Needed when no
+       ancestor has an id at all and the whole ancestor chain shares the same
+       generic classes at every level (Tailwind-style spec grids on remax.pt
+       and era.pt: every "Ano de Construção"/"Área Bruta"/etc. row is
+       structurally identical, so any one-level nth-of-type is ambiguous —
+       the *combination* of positions across several levels is what's
+       actually unique). Every element has exactly one such path to <body>,
+       so the full chain is always unique by construction.
     """
     if not element.name:
         return None
+
+    index = _nth_of_type_index(element)
+    if index is not None:
+        ancestor = element.parent if isinstance(element.parent, Tag) else None
+        while ancestor is not None:
+            ancestor_id = _css_token(ancestor.get("id"))
+            if ancestor_id:
+                selector = f"#{ancestor_id} {element.name}:nth-of-type({index})"
+                if _selector_occurrence_count(root, selector) == 1:
+                    return selector
+            ancestor = ancestor.parent if isinstance(ancestor.parent, Tag) else None
 
     segments: list[str] = []
     node: Tag | None = element
     depth = 0
     while isinstance(node, Tag) and node.name not in (None, "html") and depth < _MAX_POSITIONAL_CHAIN_DEPTH:
-        index = _nth_of_type_index(node)
-        if index is None:
+        chain_index = _nth_of_type_index(node)
+        if chain_index is None:
             return None
-        segments.append(f"{node.name}:nth-of-type({index})")
+        segments.append(f"{node.name}:nth-of-type({chain_index})")
         candidate = " > ".join(reversed(segments))
         if _selector_occurrence_count(root, candidate) == 1:
             return candidate

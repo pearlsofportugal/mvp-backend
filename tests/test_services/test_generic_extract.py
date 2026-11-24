@@ -456,6 +456,10 @@ async def test_llm_fallback_fires_when_only_bathrooms_is_missing(monkeypatch):
     monkeypatch.setattr(ge, "_fetch", fake_fetch)
     monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
     monkeypatch.setattr(ge, "_fetch_rendered", fake_fetch_rendered)
+    # The LLM fallback is off by default (app/config.py) — only this session's
+    # local dev .env turns it on, which is why this gate had zero test
+    # coverage and the flag-off-by-default case never surfaced until CI ran it.
+    monkeypatch.setattr(ge.settings, "generic_extract_llm_fallback", True)
     import app.adapters.gemini_adapter as gemini_mod
     monkeypatch.setattr(gemini_mod.gemini_adapter, "generate", fake_generate)
 
@@ -484,6 +488,7 @@ async def test_llm_fallback_does_not_fire_when_core_fields_are_all_present(monke
     monkeypatch.setattr(ge, "_fetch", fake_fetch)
     monkeypatch.setattr(ge, "suggest_selectors", fake_suggest)
     monkeypatch.setattr(ge, "_fetch_rendered", fake_fetch_rendered)
+    monkeypatch.setattr(ge.settings, "generic_extract_llm_fallback", True)
     import app.adapters.gemini_adapter as gemini_mod
     monkeypatch.setattr(gemini_mod.gemini_adapter, "generate", unexpected_generate)
 

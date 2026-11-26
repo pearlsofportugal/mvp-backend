@@ -123,3 +123,56 @@ class TestCollectStructuredFieldCandidatesOnRemaxStyleGrid:
         candidates = ss._collect_structured_field_candidates(soup, "rooms", [])
         assert candidates
         assert candidates[0]["sample"] == "5"
+
+
+# remax.pt's real "nearby parishes" cross-sell widget: a heading whose own text
+# is "Freguesias Próximas" ("Nearby Parishes" — plural), followed by links to
+# OTHER parishes near this listing, not the listing's own address. Reproduced
+# from https://remax.pt/pt/imoveis/venda-apartamento-t3-amadora-mina-de-agua —
+# every listing on the site carried this block, and before the fix its own
+# heading text was picked up as the property's district/county/parish.
+_REMAX_NEARBY_REGIONS_HTML = """
+<html><body>
+<div id="nearby-regions">
+  <h3>Freguesias Próximas</h3>
+  <div class="grid">
+    <a href="/pt/comprar/imoveis/apartamento/r/r/alfragide/t">Alfragide</a>
+    <a href="/pt/comprar/imoveis/apartamento/r/r/venteira/t">Venteira</a>
+  </div>
+</div>
+</body></html>
+"""
+
+
+class TestNearbyRegionsWidgetIsNotTakenAsAddress:
+    def test_parish_has_no_candidate_from_the_nearby_regions_widget(self):
+        soup = _soup(_REMAX_NEARBY_REGIONS_HTML)
+        candidates = ss._collect_structured_field_candidates(soup, "parish", [])
+        assert candidates == []
+
+    def test_district_and_county_also_get_no_candidate(self):
+        soup = _soup(_REMAX_NEARBY_REGIONS_HTML)
+        assert ss._collect_structured_field_candidates(soup, "district", []) == []
+        assert ss._collect_structured_field_candidates(soup, "county", []) == []
+
+    def test_is_in_excluded_region_true_for_the_widget_and_its_contents(self):
+        soup = _soup(_REMAX_NEARBY_REGIONS_HTML)
+        heading = soup.find("h3")
+        link = soup.find("a")
+        assert ss._is_in_excluded_region(heading) is True
+        assert ss._is_in_excluded_region(link) is True
+
+
+class TestFindStructuredLabelWordBoundary:
+    def test_plural_heading_does_not_match_a_singular_label(self):
+        # "Freguesias Próximas" starts with "freguesia" character-for-character
+        # (plural "freguesias" = "freguesia" + "s") — a naive startswith() would
+        # wrongly read this heading as a "freguesia" (parish) label/value row.
+        soup = _soup("<div><h3>Freguesias Próximas</h3></div>")
+        node = soup.find("div")
+        assert ss._find_structured_label(node, "parish") is None
+
+    def test_exact_label_word_still_matches(self):
+        soup = _soup("<div>Freguesia: Sintra</div>")
+        node = soup.find("div")
+        assert ss._find_structured_label(node, "parish") == "freguesia"

@@ -28,9 +28,18 @@ _BLOCKED_HOSTS = {"localhost", "0.0.0.0", "::1"}
 # count outscored the actual listing's own (awkwardly embedded, no dedicated
 # element) price and got selected instead, silently mixing two properties'
 # data into one ingest. PT + EN patterns; matched against id/class tokens.
+#
+# The "nearby|proximo..." tail covers the same mix-up for a different widget
+# shape: remax.pt's own listing page has a <div id="nearby-regions"><h3>
+# Freguesias Próximas</h3>...<a>Alfragide</a><a>Venteira</a>...</div> block —
+# a cross-sell list of OTHER parishes near this one, not this property's own
+# address. Without this exclusion, "freguesia" matching inside "Freguesias
+# Próximas" (plural, the widget's own heading) fed "Freguesias Próximas"
+# itself into district/county/parish for every remax.pt listing.
 _EXCLUDED_ANCESTOR_RE = re.compile(
     r"similar|related|recommend|semelhant|relacionad|sugest[aã]o|sugestoes|"
-    r"you[-_]?may[-_]?also|also[-_]?like|voce[-_]?tambem",
+    r"you[-_]?may[-_]?also|also[-_]?like|voce[-_]?tambem|"
+    r"nearby|pr[oó]xim[ao]s?|perto",
     re.IGNORECASE,
 )
 
@@ -1107,7 +1116,12 @@ def _find_structured_label(node: Tag, field: str) -> str | None:
 
     text = _normalize_text(node.get_text(" ", strip=True))
     for label in allowed_labels:
-        if text.startswith(label):
+        # A plain startswith() also fires on the next letter of a longer word —
+        # "freguesia" matches the start of "freguesias" (plural), so a heading
+        # like "Freguesias Próximas" ("Nearby Parishes") would otherwise read
+        # as a freguesia label. Require the label to end a word (next char,
+        # if any, isn't a letter) so only a real label/value row matches.
+        if text.startswith(label) and (len(text) == len(label) or not text[len(label)].isalpha()):
             return label
     return None
 
@@ -1136,8 +1150,11 @@ def _extract_structured_field_value(node: Tag, label_text: str, all_structured_l
             if _is_valid_structured_value(child_text, label_text, all_structured_labels):
                 return child_text, node
 
+    # \b after the label stops it matching mid-word — without it, "freguesia"
+    # matches inside "Freguesias" (plural) and captures whatever follows the
+    # "s" as if it were the value.
     full_text = _truncate_whitespace(node.get_text(" ", strip=True))
-    match = re.search(rf"(?i){re.escape(label_text)}\s*:?\s*(.+)$", full_text)
+    match = re.search(rf"(?i){re.escape(label_text)}\b\s*:?\s*(.+)$", full_text)
     if match:
         extracted = _clean_structured_value(match.group(1))
         if _is_valid_structured_value(extracted, label_text, all_structured_labels):
